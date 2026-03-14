@@ -1,0 +1,20 @@
+{
+  "name": "civic-voice-engine",
+  "version": "1.0.0",
+  "description": "Universal government data ingestion and AI processing engine for Civic Voice",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "ingest": "node src/ingest.js",
+    "test": "node --experimental-vm-modules node_modules/.bin/jest"
+  },
+  "keywords": ["civic", "government", "ai", "data-ingestion"],
+  "author": "khalidsakarya",
+  "license": "MIT",
+  "type": "commonjs",
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.78.0",
+    "axios": "^1.13.6",
+    "dotenv": "^17.3.1"
+  }
+}

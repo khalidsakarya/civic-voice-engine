@@ -1,0 +1,32 @@
+[
+  {
+    "name": "congress_bills",
+    "type": "bill",
+    "jurisdiction": "US",
+    "url": "https://api.congress.gov/v3/bill",
+    "method": "GET",
+    "params": {
+      "limit": 20,
+      "format": "json"
+    },
+    "auth": {
+      "apiKeyHeader": "X-API-Key",
+      "apiKeyEnvVar": "CONGRESS_API_KEY"
+    }
+  },
+  {
+    "name": "openstates_bills",
+    "type": "bill",
+    "jurisdiction": "CA",
+    "url": "https://v3.openstates.org/bills",
+    "method": "GET",
+    "params": {
+      "jurisdiction": "California",
+      "per_page": 20
+    },
+    "auth": {
+      "apiKeyHeader": "X-API-KEY",
+      "apiKeyEnvVar": "OPENSTATES_API_KEY"
+    }
+  }
+]
