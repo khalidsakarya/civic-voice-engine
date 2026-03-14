@@ -1,6 +1,56 @@
 [
   {
-    "name": "congress_bills",
+    "_comment": "=== CANADA ===",
+    "name": "canada_openparliament_bills",
+    "type": "bill",
+    "jurisdiction": "CA",
+    "url": "https://api.openparliament.ca/bills/",
+    "method": "GET",
+    "params": {
+      "format": "json",
+      "limit": 20
+    },
+    "auth": null
+  },
+  {
+    "name": "canada_openparliament_votes",
+    "type": "vote",
+    "jurisdiction": "CA",
+    "url": "https://api.openparliament.ca/votes/",
+    "method": "GET",
+    "params": {
+      "format": "json",
+      "limit": 20
+    },
+    "auth": null
+  },
+  {
+    "name": "canada_openparliament_legislators",
+    "type": "legislator",
+    "jurisdiction": "CA",
+    "url": "https://api.openparliament.ca/politicians/",
+    "method": "GET",
+    "params": {
+      "format": "json",
+      "limit": 20
+    },
+    "auth": null
+  },
+  {
+    "name": "canada_open_gov_datasets",
+    "type": "bill",
+    "jurisdiction": "CA",
+    "url": "https://open.canada.ca/data/api/action/package_search",
+    "method": "GET",
+    "params": {
+      "q": "parliament legislation",
+      "rows": 20
+    },
+    "auth": null
+  },
+  {
+    "_comment": "=== USA ===",
+    "name": "us_congress_bills",
     "type": "bill",
     "jurisdiction": "US",
     "url": "https://api.congress.gov/v3/bill",
@@ -10,14 +60,14 @@
       "format": "json"
     },
     "auth": {
-      "apiKeyHeader": "X-API-Key",
+      "apiKeyParam": "api_key",
       "apiKeyEnvVar": "CONGRESS_API_KEY"
     }
   },
   {
-    "name": "openstates_bills",
+    "name": "us_openstates_bills",
     "type": "bill",
-    "jurisdiction": "CA",
+    "jurisdiction": "US-CA",
     "url": "https://v3.openstates.org/bills",
     "method": "GET",
     "params": {
@@ -27,6 +77,45 @@
     "auth": {
       "apiKeyHeader": "X-API-KEY",
       "apiKeyEnvVar": "OPENSTATES_API_KEY"
+    }
+  },
+  {
+    "_comment": "=== UK ===",
+    "name": "uk_parliament_bills",
+    "type": "bill",
+    "jurisdiction": "UK",
+    "url": "https://bills-api.parliament.uk/api/v1/Bills",
+    "method": "GET",
+    "params": {
+      "take": 20,
+      "skip": 0
+    },
+    "auth": null
+  },
+  {
+    "name": "uk_parliament_members",
+    "type": "legislator",
+    "jurisdiction": "UK",
+    "url": "https://members-api.parliament.uk/api/Members/Search",
+    "method": "GET",
+    "params": {
+      "take": 20,
+      "skip": 0
+    },
+    "auth": null
+  },
+  {
+    "name": "uk_theyworkforyou_mps",
+    "type": "legislator",
+    "jurisdiction": "UK",
+    "url": "https://www.theyworkforyou.com/api/getMPs",
+    "method": "GET",
+    "params": {
+      "output": "js"
+    },
+    "auth": {
+      "apiKeyParam": "key",
+      "apiKeyEnvVar": "THEYWORKFORYOU_API_KEY"
     }
   }
 ]

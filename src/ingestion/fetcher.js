@@ -9,14 +9,23 @@ async function fetchSources(source) {
   const { url, method = 'GET', params = {}, headers = {}, auth } = source;
 
   const requestHeaders = { ...headers };
-  if (auth?.apiKeyHeader && process.env[auth.apiKeyEnvVar]) {
-    requestHeaders[auth.apiKeyHeader] = process.env[auth.apiKeyEnvVar];
+  const requestParams = { ...params };
+
+  if (auth) {
+    const apiKey = process.env[auth.apiKeyEnvVar];
+    if (!apiKey) {
+      console.warn(`[fetcher] Warning: env var ${auth.apiKeyEnvVar} is not set for source "${source.name}"`);
+    } else if (auth.apiKeyHeader) {
+      requestHeaders[auth.apiKeyHeader] = apiKey;
+    } else if (auth.apiKeyParam) {
+      requestParams[auth.apiKeyParam] = apiKey;
+    }
   }
 
   const response = await axios({
     method,
     url,
-    params,
+    params: requestParams,
     headers: requestHeaders,
     timeout: 30000,
   });
