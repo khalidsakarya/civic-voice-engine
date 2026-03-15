@@ -80,6 +80,198 @@
     }
   },
   {
+    "_comment": "=== MONTHLY: GOVERNMENT EFFICIENCY SCORES ===",
+    "name": "us_government_performance",
+    "type": "efficiency_score",
+    "jurisdiction": "US",
+    "url": "https://api.usaspending.gov/api/v2/agency/",
+    "method": "GET",
+    "params": {
+      "limit": 20,
+      "order": "desc",
+      "sort": "budgetary_resources"
+    },
+    "auth": null
+  },
+  {
+    "name": "canada_government_performance",
+    "type": "efficiency_score",
+    "jurisdiction": "CA",
+    "url": "https://open.canada.ca/data/api/action/package_search",
+    "method": "GET",
+    "params": {
+      "q": "departmental results performance reporting",
+      "rows": 20,
+      "sort": "metadata_modified desc"
+    },
+    "auth": null
+  },
+  {
+    "name": "uk_government_performance",
+    "type": "efficiency_score",
+    "jurisdiction": "UK",
+    "url": "https://data.gov.uk/api/3/action/package_search",
+    "method": "GET",
+    "params": {
+      "q": "government performance spending efficiency",
+      "rows": 20,
+      "sort": "metadata_modified desc"
+    },
+    "auth": null
+  },
+  {
+    "_comment": "=== MONTHLY: BUDGET AND SPENDING ===",
+    "name": "us_federal_budget",
+    "type": "budget",
+    "jurisdiction": "US",
+    "url": "https://api.usaspending.gov/api/v2/references/agency/",
+    "method": "GET",
+    "params": {
+      "limit": 20
+    },
+    "auth": null
+  },
+  {
+    "name": "canada_federal_budget",
+    "type": "budget",
+    "jurisdiction": "CA",
+    "url": "https://open.canada.ca/data/api/action/package_search",
+    "method": "GET",
+    "params": {
+      "q": "federal budget estimates main supplementary",
+      "rows": 20,
+      "sort": "metadata_modified desc"
+    },
+    "auth": null
+  },
+  {
+    "name": "uk_public_spending",
+    "type": "budget",
+    "jurisdiction": "UK",
+    "url": "https://data.gov.uk/api/3/action/package_search",
+    "method": "GET",
+    "params": {
+      "q": "public spending HM Treasury budget",
+      "rows": 20,
+      "sort": "metadata_modified desc"
+    },
+    "auth": null
+  },
+  {
+    "name": "australia_federal_budget",
+    "type": "budget",
+    "jurisdiction": "AU",
+    "url": "https://data.gov.au/data/api/action/package_search",
+    "method": "GET",
+    "params": {
+      "q": "federal budget mid-year economic fiscal outlook MYEFO",
+      "rows": 20,
+      "sort": "metadata_modified desc"
+    },
+    "auth": null
+  },
+  {
+    "_comment": "=== MONTHLY: AUDIT FINDINGS ===",
+    "name": "us_gao_reports",
+    "type": "audit",
+    "jurisdiction": "US",
+    "url": "https://data.gao.gov/api/odata/v1/Reports",
+    "method": "GET",
+    "params": {
+      "$top": 20,
+      "$orderby": "ReportDate desc"
+    },
+    "auth": null
+  },
+  {
+    "name": "canada_oag_reports",
+    "type": "audit",
+    "jurisdiction": "CA",
+    "url": "https://open.canada.ca/data/api/action/package_search",
+    "method": "GET",
+    "params": {
+      "q": "auditor general audit report findings",
+      "rows": 20,
+      "sort": "metadata_modified desc"
+    },
+    "auth": null
+  },
+  {
+    "name": "uk_nao_reports",
+    "type": "audit",
+    "jurisdiction": "UK",
+    "url": "https://data.gov.uk/api/3/action/package_search",
+    "method": "GET",
+    "params": {
+      "q": "national audit office NAO report findings",
+      "rows": 20,
+      "sort": "metadata_modified desc"
+    },
+    "auth": null
+  },
+  {
+    "name": "australia_anao_reports",
+    "type": "audit",
+    "jurisdiction": "AU",
+    "url": "https://data.gov.au/data/api/action/package_search",
+    "method": "GET",
+    "params": {
+      "q": "Australian National Audit Office ANAO performance audit",
+      "rows": 20,
+      "sort": "metadata_modified desc"
+    },
+    "auth": null
+  },
+  {
+    "_comment": "=== MONTHLY: DEPARTMENT PERFORMANCE ===",
+    "name": "us_agency_performance",
+    "type": "department_performance",
+    "jurisdiction": "US",
+    "url": "https://open.fda.gov/api.json",
+    "method": "GET",
+    "params": {},
+    "auth": null
+  },
+  {
+    "name": "canada_departmental_results",
+    "type": "department_performance",
+    "jurisdiction": "CA",
+    "url": "https://open.canada.ca/data/api/action/package_search",
+    "method": "GET",
+    "params": {
+      "q": "departmental results report DRR performance indicators",
+      "rows": 20,
+      "sort": "metadata_modified desc"
+    },
+    "auth": null
+  },
+  {
+    "name": "uk_department_performance",
+    "type": "department_performance",
+    "jurisdiction": "UK",
+    "url": "https://data.gov.uk/api/3/action/package_search",
+    "method": "GET",
+    "params": {
+      "q": "department performance indicators metrics targets",
+      "rows": 20,
+      "sort": "metadata_modified desc"
+    },
+    "auth": null
+  },
+  {
+    "name": "australia_department_performance",
+    "type": "department_performance",
+    "jurisdiction": "AU",
+    "url": "https://data.gov.au/data/api/action/package_search",
+    "method": "GET",
+    "params": {
+      "q": "department agency annual report performance results",
+      "rows": 20,
+      "sort": "metadata_modified desc"
+    },
+    "auth": null
+  },
+  {
     "_comment": "=== BIMONTHLY: FINANCIAL DISCLOSURES ===",
     "name": "us_senate_financial_disclosures",
     "type": "financial_disclosure",

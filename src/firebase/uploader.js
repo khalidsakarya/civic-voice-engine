@@ -160,6 +160,82 @@ async function uploadEfficiencyScores() {
 }
 
 /**
+ * Upload government efficiency scores (monthly recalc) to `efficiency_scores_monthly`.
+ */
+async function uploadMonthlyEfficiencyScores() {
+  const files = loadLatestFiles(path.join(OUTPUT_ROOT, 'efficiency_score'));
+  const allRecords = [];
+  for (const file of files) {
+    const { records } = JSON.parse(fs.readFileSync(file));
+    allRecords.push(...records.map(withTimestamp));
+  }
+  if (allRecords.length === 0) {
+    console.log('[firebase] ⚠ efficiency_scores_monthly: no records found, skipping');
+    return 0;
+  }
+  const count = await batchWrite('efficiency_scores_monthly', allRecords);
+  console.log(`[firebase] ✓ efficiency_scores_monthly: ${count} documents written`);
+  return count;
+}
+
+/**
+ * Upload budget and spending data to the `budget_spending` collection.
+ */
+async function uploadBudgetSpending() {
+  const files = loadLatestFiles(path.join(OUTPUT_ROOT, 'budget'));
+  const allRecords = [];
+  for (const file of files) {
+    const { records } = JSON.parse(fs.readFileSync(file));
+    allRecords.push(...records.map(withTimestamp));
+  }
+  if (allRecords.length === 0) {
+    console.log('[firebase] ⚠ budget_spending: no records found, skipping');
+    return 0;
+  }
+  const count = await batchWrite('budget_spending', allRecords);
+  console.log(`[firebase] ✓ budget_spending: ${count} documents written`);
+  return count;
+}
+
+/**
+ * Upload audit findings to the `audit_findings` collection.
+ */
+async function uploadAuditFindings() {
+  const files = loadLatestFiles(path.join(OUTPUT_ROOT, 'audit'));
+  const allRecords = [];
+  for (const file of files) {
+    const { records } = JSON.parse(fs.readFileSync(file));
+    allRecords.push(...records.map(withTimestamp));
+  }
+  if (allRecords.length === 0) {
+    console.log('[firebase] ⚠ audit_findings: no records found, skipping');
+    return 0;
+  }
+  const count = await batchWrite('audit_findings', allRecords);
+  console.log(`[firebase] ✓ audit_findings: ${count} documents written`);
+  return count;
+}
+
+/**
+ * Upload department performance metrics to `department_performance`.
+ */
+async function uploadDepartmentPerformance() {
+  const files = loadLatestFiles(path.join(OUTPUT_ROOT, 'department_performance'));
+  const allRecords = [];
+  for (const file of files) {
+    const { records } = JSON.parse(fs.readFileSync(file));
+    allRecords.push(...records.map(withTimestamp));
+  }
+  if (allRecords.length === 0) {
+    console.log('[firebase] ⚠ department_performance: no records found, skipping');
+    return 0;
+  }
+  const count = await batchWrite('department_performance', allRecords);
+  console.log(`[firebase] ✓ department_performance: ${count} documents written`);
+  return count;
+}
+
+/**
  * Upload financial disclosures to the `financial_disclosures` collection.
  */
 async function uploadFinancialDisclosures() {
@@ -241,14 +317,18 @@ async function uploadCorporateAffiliations() {
 async function uploadAll() {
   console.log('[firebase] Starting upload to Firestore...');
   const results = {
-    bills:                   await uploadBills(),
-    members:                 await uploadMembers(),
-    votes:                   await uploadVotes(),
-    efficiency_scores:       await uploadEfficiencyScores(),
-    financial_disclosures:   await uploadFinancialDisclosures(),
-    lobbying_activity:       await uploadLobbyingActivity(),
-    contracts:               await uploadContracts(),
-    corporate_affiliations:  await uploadCorporateAffiliations(),
+    bills:                      await uploadBills(),
+    members:                    await uploadMembers(),
+    votes:                      await uploadVotes(),
+    efficiency_scores:          await uploadEfficiencyScores(),
+    efficiency_scores_monthly:  await uploadMonthlyEfficiencyScores(),
+    budget_spending:            await uploadBudgetSpending(),
+    audit_findings:             await uploadAuditFindings(),
+    department_performance:     await uploadDepartmentPerformance(),
+    financial_disclosures:      await uploadFinancialDisclosures(),
+    lobbying_activity:          await uploadLobbyingActivity(),
+    contracts:                  await uploadContracts(),
+    corporate_affiliations:     await uploadCorporateAffiliations(),
   };
   const total = Object.values(results).reduce((a, b) => a + b, 0);
   console.log(`[firebase] Upload complete. ${total} total documents written.`);
@@ -269,6 +349,10 @@ module.exports = {
   uploadMembers,
   uploadVotes,
   uploadEfficiencyScores,
+  uploadMonthlyEfficiencyScores,
+  uploadBudgetSpending,
+  uploadAuditFindings,
+  uploadDepartmentPerformance,
   uploadFinancialDisclosures,
   uploadLobbyingActivity,
   uploadContracts,

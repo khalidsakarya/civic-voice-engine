@@ -14,6 +14,7 @@
     "scheduler:daily": "node src/scheduler.js --daily",
     "scheduler:weekly": "node src/scheduler.js --weekly",
     "scheduler:bimonthly": "node src/scheduler.js --bimonthly",
+    "scheduler:monthly": "node src/scheduler.js --monthly",
     "pipeline:full": "npm run start && npm run process:bills && npm run score:efficiency && npm run upload:firebase",
     "test": "node --experimental-vm-modules node_modules/.bin/jest"
   },
