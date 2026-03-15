@@ -80,6 +80,35 @@
     }
   },
   {
+    "_comment": "=== AUSTRALIA ===",
+    "name": "australia_datagov_bills",
+    "type": "bill",
+    "jurisdiction": "AU",
+    "url": "https://data.gov.au/data/api/action/package_search",
+    "method": "GET",
+    "params": {
+      "q": "parliament bill legislation act",
+      "fq": "organization:department-of-the-senate OR organization:department-of-the-house-of-representatives OR organization:attorney-generals-department",
+      "rows": 20,
+      "sort": "metadata_modified desc"
+    },
+    "auth": null
+  },
+  {
+    "name": "australia_datagov_senators",
+    "type": "legislator",
+    "jurisdiction": "AU",
+    "url": "https://data.gov.au/data/api/action/package_search",
+    "method": "GET",
+    "params": {
+      "q": "senators parliament members representatives",
+      "fq": "res_format:CSV",
+      "rows": 20,
+      "sort": "metadata_modified desc"
+    },
+    "auth": null
+  },
+  {
     "_comment": "=== UK ===",
     "name": "uk_parliament_bills",
     "type": "bill",
