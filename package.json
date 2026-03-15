@@ -11,6 +11,8 @@
     "upload:firebase": "node src/uploadToFirebase.js",
     "scheduler": "node src/scheduler.js",
     "scheduler:now": "node src/scheduler.js --now",
+    "scheduler:daily": "node src/scheduler.js --daily",
+    "scheduler:weekly": "node src/scheduler.js --weekly",
     "pipeline:full": "npm run start && npm run process:bills && npm run score:efficiency && npm run upload:firebase",
     "test": "node --experimental-vm-modules node_modules/.bin/jest"
   },

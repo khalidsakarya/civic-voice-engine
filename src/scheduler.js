@@ -2,59 +2,95 @@ require('dotenv').config();
 const cron = require('node-cron');
 const { runPipeline } = require('./pipeline');
 const { processBill } = require('./processing/billProcessor');
-const { uploadAll } = require('./firebase/uploader');
+const { uploadBills, uploadVotes, uploadMembers, uploadEfficiencyScores } = require('./firebase/uploader');
 const fs = require('fs');
 const path = require('path');
 
 const PROCESSED_DIR = path.resolve(__dirname, '../output/processed');
-const BILL_DIR = path.resolve(__dirname, '../output/bill');
+const BILL_DIR     = path.resolve(__dirname, '../output/bill');
 
-/**
- * Run the full end-to-end pipeline:
- * ingest → process bills → score efficiency → upload to Firebase
- */
-async function runFullCycle() {
+// ─── Tier definitions ────────────────────────────────────────────────────────
+//
+//  DAILY  (02:00 every day)  — bills + votes
+//    1. Ingest all bill and vote sources
+//    2. Process bills with Claude AI
+//    3. Score government efficiency
+//    4. Upload bills, votes, efficiency_scores to Firestore
+//
+//  WEEKLY (03:00 every Sunday) — member profiles
+//    1. Ingest all legislator sources
+//    2. Upload members to Firestore
+//
+// ─────────────────────────────────────────────────────────────────────────────
+
+const allSources = require('../config/sources.json');
+const dailySources  = allSources.filter(s => s.type === 'bill' || s.type === 'vote');
+const weeklySources = allSources.filter(s => s.type === 'legislator');
+
+// ─── Daily cycle ─────────────────────────────────────────────────────────────
+
+async function runDailyCycle() {
   const startedAt = new Date().toISOString();
   console.log(`\n${'='.repeat(60)}`);
-  console.log(`[scheduler] Full cycle started at ${startedAt}`);
+  console.log(`[scheduler:daily] Cycle started at ${startedAt}`);
+  console.log(`[scheduler:daily] Sources: ${dailySources.map(s => s.name).join(', ')}`);
   console.log('='.repeat(60));
 
   try {
-    // 1. Ingest from all government API sources
-    console.log('\n[scheduler] Step 1/4 — Ingesting government data...');
-    const sources = require('../config/sources.json');
-    await runPipeline(sources);
+    console.log('\n[scheduler:daily] Step 1/4 — Ingesting bills & votes...');
+    await runPipeline(dailySources);
 
-    // 2. Process bills with Claude
-    console.log('\n[scheduler] Step 2/4 — Processing bills with Claude AI...');
+    console.log('\n[scheduler:daily] Step 2/4 — Processing bills with Claude AI...');
     await processBillsFromOutput();
 
-    // 3. Score efficiency
-    console.log('\n[scheduler] Step 3/4 — Scoring government efficiency...');
+    console.log('\n[scheduler:daily] Step 3/4 — Scoring government efficiency...');
+    // Re-require each run to pick up fresh output
+    delete require.cache[require.resolve('./scoreEfficiency')];
     require('./scoreEfficiency');
 
-    // 4. Upload to Firebase
-    console.log('\n[scheduler] Step 4/4 — Uploading to Firebase...');
-    await uploadAll();
+    console.log('\n[scheduler:daily] Step 4/4 — Uploading to Firebase...');
+    const billCount  = await uploadBills();
+    const voteCount  = await uploadVotes();
+    const scoreCount = await uploadEfficiencyScores();
 
-    const finishedAt = new Date().toISOString();
-    console.log(`\n[scheduler] ✓ Full cycle complete at ${finishedAt}`);
+    console.log(`\n[scheduler:daily] ✓ Done at ${new Date().toISOString()}`);
+    console.log(`[scheduler:daily]   bills: ${billCount}  votes: ${voteCount}  efficiency_scores: ${scoreCount}`);
   } catch (err) {
-    console.error(`[scheduler] ✗ Cycle failed: ${err.message}`);
+    console.error(`[scheduler:daily] ✗ Failed: ${err.message}`);
     console.error(err.stack);
   }
 }
 
-/**
- * Inline bill processing (mirrors processBills.js logic).
- */
+// ─── Weekly cycle ─────────────────────────────────────────────────────────────
+
+async function runWeeklyCycle() {
+  const startedAt = new Date().toISOString();
+  console.log(`\n${'='.repeat(60)}`);
+  console.log(`[scheduler:weekly] Cycle started at ${startedAt}`);
+  console.log(`[scheduler:weekly] Sources: ${weeklySources.map(s => s.name).join(', ')}`);
+  console.log('='.repeat(60));
+
+  try {
+    console.log('\n[scheduler:weekly] Step 1/2 — Ingesting member profiles...');
+    await runPipeline(weeklySources);
+
+    console.log('\n[scheduler:weekly] Step 2/2 — Uploading members to Firebase...');
+    const memberCount = await uploadMembers();
+
+    console.log(`\n[scheduler:weekly] ✓ Done at ${new Date().toISOString()}`);
+    console.log(`[scheduler:weekly]   members: ${memberCount}`);
+  } catch (err) {
+    console.error(`[scheduler:weekly] ✗ Failed: ${err.message}`);
+    console.error(err.stack);
+  }
+}
+
+// ─── Bill processing helper ───────────────────────────────────────────────────
+
 async function processBillsFromOutput() {
   fs.mkdirSync(PROCESSED_DIR, { recursive: true });
 
-  const files = fs.readdirSync(BILL_DIR)
-    .filter(f => f.endsWith('.json'))
-    .sort();
-
+  const files = fs.readdirSync(BILL_DIR).filter(f => f.endsWith('.json')).sort();
   const latest = {};
   for (const file of files) {
     const key = file.replace(/_\d{4}-\d{2}-\d{2}T[\d-]+Z\.json$/, '');
@@ -67,7 +103,7 @@ async function processBillsFromOutput() {
     allBills.push(...raw.records);
   }
 
-  console.log(`[scheduler] Processing ${allBills.length} bills...`);
+  console.log(`[scheduler:daily] Processing ${allBills.length} bills...`);
   const results = [];
 
   for (const bill of allBills) {
@@ -87,27 +123,37 @@ async function processBillsFromOutput() {
     bills: results,
   }, null, 2));
 
-  console.log(`[scheduler] ${results.length} bills processed → ${outFile}`);
+  console.log(`[scheduler:daily] ${results.length} bills processed → ${outFile}`);
 }
 
-// ─── Start ───────────────────────────────────────────────────
+// ─── Start ────────────────────────────────────────────────────────────────────
 
-const RUN_NOW = process.argv.includes('--now');
+const RUN_NOW        = process.argv.includes('--now');
+const RUN_DAILY_NOW  = process.argv.includes('--daily');
+const RUN_WEEKLY_NOW = process.argv.includes('--weekly');
 
-if (RUN_NOW) {
-  // Immediate single run (useful for manual triggers / CI)
-  runFullCycle().then(() => process.exit(0)).catch(() => process.exit(1));
+if (RUN_NOW || RUN_DAILY_NOW) {
+  runDailyCycle().then(() => RUN_NOW ? runWeeklyCycle() : null).then(() => process.exit(0)).catch(() => process.exit(1));
+} else if (RUN_WEEKLY_NOW) {
+  runWeeklyCycle().then(() => process.exit(0)).catch(() => process.exit(1));
 } else {
-  // Scheduled: every day at 02:00 local time
-  const SCHEDULE = process.env.CRON_SCHEDULE || '0 2 * * *';
-  console.log(`[scheduler] Civic Voice Engine started. Schedule: "${SCHEDULE}"`);
-  console.log('[scheduler] Pass --now flag to run immediately.');
+  const DAILY_SCHEDULE  = process.env.CRON_DAILY  || '0 2 * * *';    // 02:00 every day
+  const WEEKLY_SCHEDULE = process.env.CRON_WEEKLY || '0 3 * * 0';    // 03:00 every Sunday
 
-  cron.schedule(SCHEDULE, () => {
-    runFullCycle();
+  console.log('\n╔══════════════════════════════════════════════════════╗');
+  console.log('║         CIVIC VOICE ENGINE — SCHEDULER STARTED       ║');
+  console.log('╚══════════════════════════════════════════════════════╝');
+  console.log(`  Daily  (bills + votes)    → ${DAILY_SCHEDULE}`);
+  console.log(`  Weekly (member profiles)  → ${WEEKLY_SCHEDULE}`);
+  console.log('\n  Flags: --now (both), --daily, --weekly\n');
+
+  cron.schedule(DAILY_SCHEDULE,  () => runDailyCycle());
+  cron.schedule(WEEKLY_SCHEDULE, () => runWeeklyCycle());
+
+  // Run both tiers immediately on startup
+  console.log('[scheduler] Running initial daily cycle on startup...');
+  runDailyCycle().then(() => {
+    console.log('[scheduler] Running initial weekly cycle on startup...');
+    return runWeeklyCycle();
   });
-
-  // Also run once on startup so Firebase is populated immediately
-  console.log('[scheduler] Running initial cycle on startup...');
-  runFullCycle();
 }

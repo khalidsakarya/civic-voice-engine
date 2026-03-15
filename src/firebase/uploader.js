@@ -21,7 +21,6 @@ async function batchWrite(collectionName, records) {
     for (const record of chunk) {
       const docId = sanitizeId(record.id || record.sourceId || `auto-${Date.now()}-${Math.random()}`);
       const ref = db.collection(collectionName).doc(docId);
-      // Remove undefined values — Firestore rejects them
       batch.set(ref, stripUndefined(record), { merge: true });
     }
 
@@ -33,21 +32,24 @@ async function batchWrite(collectionName, records) {
 }
 
 /**
- * Load the latest file matching a prefix pattern from a directory.
+ * Load the latest file per source prefix from a directory.
  */
-function loadLatestFiles(dir, pattern) {
+function loadLatestFiles(dir) {
   if (!fs.existsSync(dir)) return [];
   const files = fs.readdirSync(dir)
-    .filter(f => f.endsWith('.json') && (!pattern || f.match(pattern)))
+    .filter(f => f.endsWith('.json'))
     .sort();
 
-  // Deduplicate: keep only the latest file per source prefix
   const latest = {};
   for (const file of files) {
     const key = file.replace(/_\d{4}-\d{2}-\d{2}T[\d-]+Z\.json$/, '');
     latest[key] = file;
   }
   return Object.values(latest).map(f => path.join(dir, f));
+}
+
+function withTimestamp(record) {
+  return { ...record, last_updated: new Date().toISOString() };
 }
 
 /**
@@ -61,23 +63,18 @@ async function uploadBills() {
 
   if (files.length === 0) throw new Error('No processed bills found. Run npm run process:bills first.');
 
-  const latest = files[files.length - 1];
-  const { bills } = JSON.parse(fs.readFileSync(path.join(processedDir, latest)));
+  const { bills } = JSON.parse(fs.readFileSync(path.join(processedDir, files[files.length - 1])));
 
-  // Flatten analysis fields to top level for easy Firestore querying
-  const docs = bills.map(bill => ({
+  const docs = bills.map(bill => withTimestamp({
     ...bill,
-    // Promote analysis fields to top level
-    plainLanguageSummary:     bill.analysis?.plainLanguageSummary     ?? null,
-    argumentsFor:             bill.analysis?.argumentsFor             ?? [],
-    argumentsAgainst:         bill.analysis?.argumentsAgainst         ?? [],
-    citizenImpactScore:       bill.analysis?.citizenImpactScore       ?? null,
-    citizenImpactRationale:   bill.analysis?.citizenImpactRationale   ?? null,
-    predictedOutcome:         bill.analysis?.predictedOutcome         ?? null,
-    predictedOutcomeRationale:bill.analysis?.predictedOutcomeRationale?? null,
-    // Keep nested analysis too for completeness
+    plainLanguageSummary:      bill.analysis?.plainLanguageSummary      ?? null,
+    argumentsFor:              bill.analysis?.argumentsFor              ?? [],
+    argumentsAgainst:          bill.analysis?.argumentsAgainst          ?? [],
+    citizenImpactScore:        bill.analysis?.citizenImpactScore        ?? null,
+    citizenImpactRationale:    bill.analysis?.citizenImpactRationale    ?? null,
+    predictedOutcome:          bill.analysis?.predictedOutcome          ?? null,
+    predictedOutcomeRationale: bill.analysis?.predictedOutcomeRationale ?? null,
     analysis: bill.analysis ?? null,
-    uploadedAt: new Date().toISOString(),
   }));
 
   const count = await batchWrite('bills', docs);
@@ -94,7 +91,7 @@ async function uploadMembers() {
 
   for (const file of files) {
     const { records } = JSON.parse(fs.readFileSync(file));
-    allRecords.push(...records.map(r => ({ ...r, uploadedAt: new Date().toISOString() })));
+    allRecords.push(...records.map(withTimestamp));
   }
 
   if (allRecords.length === 0) {
@@ -116,7 +113,7 @@ async function uploadVotes() {
 
   for (const file of files) {
     const { records } = JSON.parse(fs.readFileSync(file));
-    allRecords.push(...records.map(r => ({ ...r, uploadedAt: new Date().toISOString() })));
+    allRecords.push(...records.map(withTimestamp));
   }
 
   if (allRecords.length === 0) {
@@ -131,7 +128,6 @@ async function uploadVotes() {
 
 /**
  * Upload efficiency scores to the `efficiency_scores` collection.
- * Each jurisdiction gets its own document, keyed by jurisdiction code.
  */
 async function uploadEfficiencyScores() {
   const reportPath = path.join(OUTPUT_ROOT, 'efficiency_report.json');
@@ -143,18 +139,18 @@ async function uploadEfficiencyScores() {
   const report = JSON.parse(fs.readFileSync(reportPath));
   const db = getDb();
   const batch = db.batch();
+  const now = new Date().toISOString();
 
   for (const score of report.detail) {
     const ref = db.collection('efficiency_scores').doc(score.code);
-    batch.set(ref, { ...score, uploadedAt: new Date().toISOString() }, { merge: true });
+    batch.set(ref, { ...score, last_updated: now }, { merge: true });
   }
 
-  // Also write a summary doc for easy dashboard consumption
   const summaryRef = db.collection('efficiency_scores').doc('_summary');
   batch.set(summaryRef, {
     generatedAt: report.generatedAt,
     scores: report.summary,
-    uploadedAt: new Date().toISOString(),
+    last_updated: now,
   }, { merge: true });
 
   await batch.commit();
@@ -164,14 +160,14 @@ async function uploadEfficiencyScores() {
 }
 
 /**
- * Run all uploads.
+ * Run all uploads (used for manual one-shot runs).
  */
 async function uploadAll() {
   console.log('[firebase] Starting upload to Firestore...');
   const results = {
-    bills:            await uploadBills(),
-    members:          await uploadMembers(),
-    votes:            await uploadVotes(),
+    bills:             await uploadBills(),
+    members:           await uploadMembers(),
+    votes:             await uploadVotes(),
     efficiency_scores: await uploadEfficiencyScores(),
   };
   const total = Object.values(results).reduce((a, b) => a + b, 0);
@@ -179,7 +175,6 @@ async function uploadAll() {
   return results;
 }
 
-// Firestore doc IDs can't contain '/', replace with '-'
 function sanitizeId(id) {
   return String(id).replace(/\//g, '-').replace(/[^a-zA-Z0-9_\-]/g, '_').slice(0, 500);
 }
