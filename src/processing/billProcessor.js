@@ -9,7 +9,7 @@ const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
  */
 async function processBill(bill) {
   const message = await client.messages.create({
-    model: 'claude-opus-4-6',
+    model: 'claude-haiku-4-5-20251001',
     max_tokens: 1024,
     system: `You are a nonpartisan civic education engine for the Civic Voice app.
 Your job is to analyse government bills and produce clear, accessible, unbiased output for everyday citizens.
