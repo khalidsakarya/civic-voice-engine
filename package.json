@@ -8,15 +8,26 @@
     "ingest": "node src/ingest.js",
     "process:bills": "node src/processBills.js",
     "score:efficiency": "node src/scoreEfficiency.js",
+    "upload:firebase": "node src/uploadToFirebase.js",
+    "scheduler": "node src/scheduler.js",
+    "scheduler:now": "node src/scheduler.js --now",
+    "pipeline:full": "npm run start && npm run process:bills && npm run score:efficiency && npm run upload:firebase",
     "test": "node --experimental-vm-modules node_modules/.bin/jest"
   },
-  "keywords": ["civic", "government", "ai", "data-ingestion"],
+  "keywords": [
+    "civic",
+    "government",
+    "ai",
+    "data-ingestion"
+  ],
   "author": "khalidsakarya",
   "license": "MIT",
   "type": "commonjs",
   "dependencies": {
     "@anthropic-ai/sdk": "^0.78.0",
     "axios": "^1.13.6",
-    "dotenv": "^17.3.1"
+    "dotenv": "^17.3.1",
+    "firebase-admin": "^13.7.0",
+    "node-cron": "^4.2.1"
   }
 }
