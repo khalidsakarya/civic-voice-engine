@@ -160,15 +160,95 @@ async function uploadEfficiencyScores() {
 }
 
 /**
+ * Upload financial disclosures to the `financial_disclosures` collection.
+ */
+async function uploadFinancialDisclosures() {
+  const files = loadLatestFiles(path.join(OUTPUT_ROOT, 'financial_disclosure'));
+  const allRecords = [];
+  for (const file of files) {
+    const { records } = JSON.parse(fs.readFileSync(file));
+    allRecords.push(...records.map(withTimestamp));
+  }
+  if (allRecords.length === 0) {
+    console.log('[firebase] ⚠ financial_disclosures: no records found, skipping');
+    return 0;
+  }
+  const count = await batchWrite('financial_disclosures', allRecords);
+  console.log(`[firebase] ✓ financial_disclosures: ${count} documents written`);
+  return count;
+}
+
+/**
+ * Upload lobbying activity to the `lobbying_activity` collection.
+ */
+async function uploadLobbyingActivity() {
+  const files = loadLatestFiles(path.join(OUTPUT_ROOT, 'lobbying'));
+  const allRecords = [];
+  for (const file of files) {
+    const { records } = JSON.parse(fs.readFileSync(file));
+    allRecords.push(...records.map(withTimestamp));
+  }
+  if (allRecords.length === 0) {
+    console.log('[firebase] ⚠ lobbying_activity: no records found, skipping');
+    return 0;
+  }
+  const count = await batchWrite('lobbying_activity', allRecords);
+  console.log(`[firebase] ✓ lobbying_activity: ${count} documents written`);
+  return count;
+}
+
+/**
+ * Upload government contracts to the `contracts` collection.
+ */
+async function uploadContracts() {
+  const files = loadLatestFiles(path.join(OUTPUT_ROOT, 'contract'));
+  const allRecords = [];
+  for (const file of files) {
+    const { records } = JSON.parse(fs.readFileSync(file));
+    allRecords.push(...records.map(withTimestamp));
+  }
+  if (allRecords.length === 0) {
+    console.log('[firebase] ⚠ contracts: no records found, skipping');
+    return 0;
+  }
+  const count = await batchWrite('contracts', allRecords);
+  console.log(`[firebase] ✓ contracts: ${count} documents written`);
+  return count;
+}
+
+/**
+ * Upload corporate affiliations to the `corporate_affiliations` collection.
+ */
+async function uploadCorporateAffiliations() {
+  const files = loadLatestFiles(path.join(OUTPUT_ROOT, 'corporate_affiliation'));
+  const allRecords = [];
+  for (const file of files) {
+    const { records } = JSON.parse(fs.readFileSync(file));
+    allRecords.push(...records.map(withTimestamp));
+  }
+  if (allRecords.length === 0) {
+    console.log('[firebase] ⚠ corporate_affiliations: no records found, skipping');
+    return 0;
+  }
+  const count = await batchWrite('corporate_affiliations', allRecords);
+  console.log(`[firebase] ✓ corporate_affiliations: ${count} documents written`);
+  return count;
+}
+
+/**
  * Run all uploads (used for manual one-shot runs).
  */
 async function uploadAll() {
   console.log('[firebase] Starting upload to Firestore...');
   const results = {
-    bills:             await uploadBills(),
-    members:           await uploadMembers(),
-    votes:             await uploadVotes(),
-    efficiency_scores: await uploadEfficiencyScores(),
+    bills:                   await uploadBills(),
+    members:                 await uploadMembers(),
+    votes:                   await uploadVotes(),
+    efficiency_scores:       await uploadEfficiencyScores(),
+    financial_disclosures:   await uploadFinancialDisclosures(),
+    lobbying_activity:       await uploadLobbyingActivity(),
+    contracts:               await uploadContracts(),
+    corporate_affiliations:  await uploadCorporateAffiliations(),
   };
   const total = Object.values(results).reduce((a, b) => a + b, 0);
   console.log(`[firebase] Upload complete. ${total} total documents written.`);
@@ -183,4 +263,14 @@ function stripUndefined(obj) {
   return JSON.parse(JSON.stringify(obj, (_, v) => (v === undefined ? null : v)));
 }
 
-module.exports = { uploadAll, uploadBills, uploadMembers, uploadVotes, uploadEfficiencyScores };
+module.exports = {
+  uploadAll,
+  uploadBills,
+  uploadMembers,
+  uploadVotes,
+  uploadEfficiencyScores,
+  uploadFinancialDisclosures,
+  uploadLobbyingActivity,
+  uploadContracts,
+  uploadCorporateAffiliations,
+};

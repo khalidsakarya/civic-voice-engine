@@ -2,7 +2,10 @@ require('dotenv').config();
 const cron = require('node-cron');
 const { runPipeline } = require('./pipeline');
 const { processBill } = require('./processing/billProcessor');
-const { uploadBills, uploadVotes, uploadMembers, uploadEfficiencyScores } = require('./firebase/uploader');
+const {
+  uploadBills, uploadVotes, uploadMembers, uploadEfficiencyScores,
+  uploadFinancialDisclosures, uploadLobbyingActivity, uploadContracts, uploadCorporateAffiliations,
+} = require('./firebase/uploader');
 const fs = require('fs');
 const path = require('path');
 
@@ -11,21 +14,29 @@ const BILL_DIR     = path.resolve(__dirname, '../output/bill');
 
 // ─── Tier definitions ────────────────────────────────────────────────────────
 //
-//  DAILY  (02:00 every day)  — bills + votes
+//  DAILY      (02:00 every day)           — bills + votes
 //    1. Ingest all bill and vote sources
 //    2. Process bills with Claude AI
 //    3. Score government efficiency
 //    4. Upload bills, votes, efficiency_scores to Firestore
 //
-//  WEEKLY (03:00 every Sunday) — member profiles
+//  WEEKLY     (03:00 every Sunday)        — member profiles
 //    1. Ingest all legislator sources
 //    2. Upload members to Firestore
 //
+//  BIMONTHLY  (04:00 on 1st and 15th)    — financial disclosures, lobbying,
+//                                           government contracts, corporate affiliations
+//    1. Ingest financial_disclosure, lobbying, contract, corporate_affiliation sources
+//    2. Upload all four collections to Firestore
+//
 // ─────────────────────────────────────────────────────────────────────────────
 
-const allSources = require('../config/sources.json');
-const dailySources  = allSources.filter(s => s.type === 'bill' || s.type === 'vote');
-const weeklySources = allSources.filter(s => s.type === 'legislator');
+const allSources        = require('../config/sources.json');
+const dailySources      = allSources.filter(s => s.type === 'bill' || s.type === 'vote');
+const weeklySources     = allSources.filter(s => s.type === 'legislator');
+const biMonthlySources  = allSources.filter(s =>
+  ['financial_disclosure', 'lobbying', 'contract', 'corporate_affiliation'].includes(s.type)
+);
 
 // ─── Daily cycle ─────────────────────────────────────────────────────────────
 
@@ -85,6 +96,33 @@ async function runWeeklyCycle() {
   }
 }
 
+// ─── Bimonthly cycle (1st and 15th) ──────────────────────────────────────────
+
+async function runBiMonthlyCycle() {
+  const startedAt = new Date().toISOString();
+  console.log(`\n${'='.repeat(60)}`);
+  console.log(`[scheduler:bimonthly] Cycle started at ${startedAt}`);
+  console.log(`[scheduler:bimonthly] Sources: ${biMonthlySources.map(s => s.name).join(', ')}`);
+  console.log('='.repeat(60));
+
+  try {
+    console.log('\n[scheduler:bimonthly] Step 1/2 — Ingesting financial & lobbying data...');
+    await runPipeline(biMonthlySources);
+
+    console.log('\n[scheduler:bimonthly] Step 2/2 — Uploading to Firebase...');
+    const disclosureCount  = await uploadFinancialDisclosures();
+    const lobbyingCount    = await uploadLobbyingActivity();
+    const contractCount    = await uploadContracts();
+    const corporateCount   = await uploadCorporateAffiliations();
+
+    console.log(`\n[scheduler:bimonthly] ✓ Done at ${new Date().toISOString()}`);
+    console.log(`[scheduler:bimonthly]   financial_disclosures: ${disclosureCount}  lobbying_activity: ${lobbyingCount}  contracts: ${contractCount}  corporate_affiliations: ${corporateCount}`);
+  } catch (err) {
+    console.error(`[scheduler:bimonthly] ✗ Failed: ${err.message}`);
+    console.error(err.stack);
+  }
+}
+
 // ─── Bill processing helper ───────────────────────────────────────────────────
 
 async function processBillsFromOutput() {
@@ -128,32 +166,43 @@ async function processBillsFromOutput() {
 
 // ─── Start ────────────────────────────────────────────────────────────────────
 
-const RUN_NOW        = process.argv.includes('--now');
-const RUN_DAILY_NOW  = process.argv.includes('--daily');
-const RUN_WEEKLY_NOW = process.argv.includes('--weekly');
+const RUN_NOW            = process.argv.includes('--now');
+const RUN_DAILY_NOW      = process.argv.includes('--daily');
+const RUN_WEEKLY_NOW     = process.argv.includes('--weekly');
+const RUN_BIMONTHLY_NOW  = process.argv.includes('--bimonthly');
 
-if (RUN_NOW || RUN_DAILY_NOW) {
-  runDailyCycle().then(() => RUN_NOW ? runWeeklyCycle() : null).then(() => process.exit(0)).catch(() => process.exit(1));
+if (RUN_NOW) {
+  runDailyCycle()
+    .then(() => runWeeklyCycle())
+    .then(() => runBiMonthlyCycle())
+    .then(() => process.exit(0))
+    .catch(() => process.exit(1));
+} else if (RUN_DAILY_NOW) {
+  runDailyCycle().then(() => process.exit(0)).catch(() => process.exit(1));
 } else if (RUN_WEEKLY_NOW) {
   runWeeklyCycle().then(() => process.exit(0)).catch(() => process.exit(1));
+} else if (RUN_BIMONTHLY_NOW) {
+  runBiMonthlyCycle().then(() => process.exit(0)).catch(() => process.exit(1));
 } else {
-  const DAILY_SCHEDULE  = process.env.CRON_DAILY  || '0 2 * * *';    // 02:00 every day
-  const WEEKLY_SCHEDULE = process.env.CRON_WEEKLY || '0 3 * * 0';    // 03:00 every Sunday
+  const DAILY_SCHEDULE      = process.env.CRON_DAILY      || '0 2 * * *';    // 02:00 every day
+  const WEEKLY_SCHEDULE     = process.env.CRON_WEEKLY     || '0 3 * * 0';    // 03:00 every Sunday
+  const BIMONTHLY_SCHEDULE  = process.env.CRON_BIMONTHLY  || '0 4 1,15 * *'; // 04:00 on 1st and 15th
 
   console.log('\n╔══════════════════════════════════════════════════════╗');
   console.log('║         CIVIC VOICE ENGINE — SCHEDULER STARTED       ║');
   console.log('╚══════════════════════════════════════════════════════╝');
-  console.log(`  Daily  (bills + votes)    → ${DAILY_SCHEDULE}`);
-  console.log(`  Weekly (member profiles)  → ${WEEKLY_SCHEDULE}`);
-  console.log('\n  Flags: --now (both), --daily, --weekly\n');
+  console.log(`  Daily      (bills + votes)                     → ${DAILY_SCHEDULE}`);
+  console.log(`  Weekly     (member profiles)                   → ${WEEKLY_SCHEDULE}`);
+  console.log(`  Bimonthly  (disclosures, lobbying, contracts)  → ${BIMONTHLY_SCHEDULE}`);
+  console.log('\n  Flags: --now (all), --daily, --weekly, --bimonthly\n');
 
-  cron.schedule(DAILY_SCHEDULE,  () => runDailyCycle());
-  cron.schedule(WEEKLY_SCHEDULE, () => runWeeklyCycle());
+  cron.schedule(DAILY_SCHEDULE,     () => runDailyCycle());
+  cron.schedule(WEEKLY_SCHEDULE,    () => runWeeklyCycle());
+  cron.schedule(BIMONTHLY_SCHEDULE, () => runBiMonthlyCycle());
 
-  // Run both tiers immediately on startup
-  console.log('[scheduler] Running initial daily cycle on startup...');
-  runDailyCycle().then(() => {
-    console.log('[scheduler] Running initial weekly cycle on startup...');
-    return runWeeklyCycle();
-  });
+  // Run all tiers on startup
+  console.log('[scheduler] Running initial cycles on startup...');
+  runDailyCycle()
+    .then(() => runWeeklyCycle())
+    .then(() => runBiMonthlyCycle());
 }

@@ -80,6 +80,138 @@
     }
   },
   {
+    "_comment": "=== BIMONTHLY: FINANCIAL DISCLOSURES ===",
+    "name": "us_senate_financial_disclosures",
+    "type": "financial_disclosure",
+    "jurisdiction": "US",
+    "url": "https://efts.senate.gov/LATEST/search-index",
+    "method": "GET",
+    "params": {
+      "q": "",
+      "dateFrom": "2024-01-01",
+      "limit": 20
+    },
+    "auth": null
+  },
+  {
+    "name": "canada_financial_disclosures",
+    "type": "financial_disclosure",
+    "jurisdiction": "CA",
+    "url": "https://open.canada.ca/data/api/action/package_search",
+    "method": "GET",
+    "params": {
+      "q": "proactive disclosure travel hospitality minister",
+      "rows": 20,
+      "sort": "metadata_modified desc"
+    },
+    "auth": null
+  },
+  {
+    "_comment": "=== BIMONTHLY: LOBBYING ACTIVITY ===",
+    "name": "us_senate_lobbying_registrants",
+    "type": "lobbying",
+    "jurisdiction": "US",
+    "url": "https://lda.senate.gov/api/v1/registrants/",
+    "method": "GET",
+    "params": {
+      "format": "json",
+      "page_size": 20
+    },
+    "auth": null
+  },
+  {
+    "name": "canada_lobbying_registry",
+    "type": "lobbying",
+    "jurisdiction": "CA",
+    "url": "https://open.canada.ca/data/api/action/package_search",
+    "method": "GET",
+    "params": {
+      "q": "lobbying registry commissioner",
+      "rows": 20,
+      "sort": "metadata_modified desc"
+    },
+    "auth": null
+  },
+  {
+    "_comment": "=== BIMONTHLY: GOVERNMENT CONTRACTS ===",
+    "name": "us_usaspending_contracts",
+    "type": "contract",
+    "jurisdiction": "US",
+    "url": "https://api.usaspending.gov/api/v2/agency/",
+    "method": "GET",
+    "params": {
+      "limit": 20,
+      "order": "desc",
+      "sort": "budgetary_resources"
+    },
+    "auth": null
+  },
+  {
+    "name": "canada_proactive_contracts",
+    "type": "contract",
+    "jurisdiction": "CA",
+    "url": "https://open.canada.ca/data/api/action/package_search",
+    "method": "GET",
+    "params": {
+      "q": "proactive disclosure contracts over 10000",
+      "rows": 20,
+      "sort": "metadata_modified desc"
+    },
+    "auth": null
+  },
+  {
+    "name": "uk_contracts_finder",
+    "type": "contract",
+    "jurisdiction": "UK",
+    "url": "https://www.contractsfinder.service.gov.uk/Published/Notices/PublicSearch/Search",
+    "method": "GET",
+    "params": {
+      "publishedFrom": "2025-01-01",
+      "size": 20
+    },
+    "auth": null
+  },
+  {
+    "name": "australia_contracts",
+    "type": "contract",
+    "jurisdiction": "AU",
+    "url": "https://data.gov.au/data/api/action/package_search",
+    "method": "GET",
+    "params": {
+      "q": "procurement contracts tenders government spending",
+      "rows": 20,
+      "sort": "metadata_modified desc"
+    },
+    "auth": null
+  },
+  {
+    "_comment": "=== BIMONTHLY: CORPORATE AFFILIATIONS ===",
+    "name": "canada_corporate_registry",
+    "type": "corporate_affiliation",
+    "jurisdiction": "CA",
+    "url": "https://open.canada.ca/data/api/action/package_search",
+    "method": "GET",
+    "params": {
+      "q": "corporate registry business federal incorporation",
+      "rows": 20,
+      "sort": "metadata_modified desc"
+    },
+    "auth": null
+  },
+  {
+    "name": "australia_corporate_data",
+    "type": "corporate_affiliation",
+    "jurisdiction": "AU",
+    "url": "https://data.gov.au/data/api/action/package_search",
+    "method": "GET",
+    "params": {
+      "q": "ABN corporate registry business register",
+      "rows": 20,
+      "sort": "metadata_modified desc"
+    },
+    "auth": null
+  },
+  {
     "_comment": "=== AUSTRALIA ===",
     "name": "australia_datagov_bills",
     "type": "bill",
