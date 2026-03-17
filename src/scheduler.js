@@ -2,10 +2,14 @@ require('dotenv').config();
 const cron = require('node-cron');
 const { runPipeline } = require('./pipeline');
 const { processBill } = require('./processing/billProcessor');
+const { fetchAllExpenses } = require('./ingestion/expenseFetcher');
+const { processExpenses }  = require('./processing/expenseProcessor');
+const { detectWaste }      = require('./processing/wasteDetector');
 const {
   uploadBills, uploadVotes, uploadMembers, uploadEfficiencyScores,
   uploadMonthlyEfficiencyScores, uploadBudgetSpending, uploadAuditFindings, uploadDepartmentPerformance,
   uploadFinancialDisclosures, uploadLobbyingActivity, uploadContracts, uploadCorporateAffiliations,
+  uploadFlaggedExpenses, uploadWasteReports,
 } = require('./firebase/uploader');
 const { writeSchedulerStatus } = require('./firebase/statusWriter');
 const fs = require('fs');
@@ -20,6 +24,7 @@ const DAILY_SCHEDULE     = process.env.CRON_DAILY     || '0 2 * * *';    // 02:0
 const WEEKLY_SCHEDULE    = process.env.CRON_WEEKLY    || '0 3 * * 0';    // 03:00 every Sunday
 const MONTHLY_SCHEDULE   = process.env.CRON_MONTHLY   || '0 5 1 * *';    // 05:00 on the 1st
 const BIMONTHLY_SCHEDULE = process.env.CRON_BIMONTHLY || '0 4 1,15 * *'; // 04:00 on 1st and 15th
+const EXPENSE_SCHEDULE   = process.env.CRON_EXPENSE   || '0 1 * * 3';    // 01:00 every Wednesday
 
 // ─── Source lists ─────────────────────────────────────────────────────────────
 
@@ -262,6 +267,65 @@ async function runBiMonthlyCycle() {
   }
 }
 
+// ─── Expense cycle (every Wednesday) ─────────────────────────────────────────
+//
+//  EXPENSE_WEEKLY  (01:00 every Wednesday)  — government expense & waste
+//    1. Fetch raw expense data from CA / US / UK / AU open-data APIs
+//    2. Run Claude AI waste analysis  → expenses_enriched.json
+//    3. Run pattern detector          → waste_report.json
+//    4. Upload flagged_expenses + waste_reports to Firestore
+
+async function runExpenseCycle() {
+  const startedAt = new Date();
+  console.log(`\n${'='.repeat(60)}`);
+  console.log(`[scheduler:expense] Cycle started at ${startedAt.toISOString()}`);
+  console.log('='.repeat(60));
+
+  let expenseCount = 0, wasteCount = 0, aiCalls = 0;
+
+  try {
+    console.log('\n[scheduler:expense] Step 1/4 — Fetching expense data (CA / US / UK / AU)...');
+    await fetchAllExpenses();
+
+    console.log('\n[scheduler:expense] Step 2/4 — Processing with Claude AI waste analysis...');
+    const expenseResult = await processExpenses();
+    aiCalls = expenseResult.apiCallsMade || 0;
+
+    console.log('\n[scheduler:expense] Step 3/4 — Running waste pattern analysis...');
+    await detectWaste();
+
+    console.log('\n[scheduler:expense] Step 4/4 — Uploading to Firebase...');
+    expenseCount = await uploadFlaggedExpenses();
+    wasteCount   = await uploadWasteReports();
+
+    console.log(`\n[scheduler:expense] ✓ Done at ${new Date().toISOString()}`);
+    console.log(`[scheduler:expense]   flagged_expenses: ${expenseCount}  waste_reports: ${wasteCount}`);
+
+    await writeSchedulerStatus('expense_weekly', {
+      startedAt,
+      status:         'success',
+      collections:    ['flagged_expenses', 'waste_reports'],
+      recordsUpdated: expenseCount + wasteCount,
+      recordsSkipped: 0,
+      aiCallsMade:    aiCalls,
+      cronSchedule:   EXPENSE_SCHEDULE,
+    });
+  } catch (err) {
+    console.error(`[scheduler:expense] ✗ Failed: ${err.message}`);
+    console.error(err.stack);
+    await writeSchedulerStatus('expense_weekly', {
+      startedAt,
+      status:         'error',
+      collections:    ['flagged_expenses', 'waste_reports'],
+      recordsUpdated: expenseCount + wasteCount,
+      recordsSkipped: 0,
+      aiCallsMade:    aiCalls,
+      cronSchedule:   EXPENSE_SCHEDULE,
+      errorMessage:   err.message,
+    }).catch(() => {});
+  }
+}
+
 // ─── Bill processing helper ───────────────────────────────────────────────────
 // Returns { total, succeeded, failed } so the daily cycle can track AI stats.
 
@@ -315,12 +379,14 @@ const RUN_DAILY_NOW     = process.argv.includes('--daily');
 const RUN_WEEKLY_NOW    = process.argv.includes('--weekly');
 const RUN_MONTHLY_NOW   = process.argv.includes('--monthly');
 const RUN_BIMONTHLY_NOW = process.argv.includes('--bimonthly');
+const RUN_EXPENSE_NOW   = process.argv.includes('--expenses');
 
 if (RUN_NOW) {
   runDailyCycle()
     .then(() => runWeeklyCycle())
     .then(() => runMonthlyCycle())
     .then(() => runBiMonthlyCycle())
+    .then(() => runExpenseCycle())
     .then(() => process.exit(0))
     .catch(() => process.exit(1));
 } else if (RUN_DAILY_NOW) {
@@ -331,25 +397,30 @@ if (RUN_NOW) {
   runMonthlyCycle().then(() => process.exit(0)).catch(() => process.exit(1));
 } else if (RUN_BIMONTHLY_NOW) {
   runBiMonthlyCycle().then(() => process.exit(0)).catch(() => process.exit(1));
+} else if (RUN_EXPENSE_NOW) {
+  runExpenseCycle().then(() => process.exit(0)).catch(() => process.exit(1));
 } else {
   console.log('\n╔══════════════════════════════════════════════════════╗');
   console.log('║         CIVIC VOICE ENGINE — SCHEDULER STARTED       ║');
   console.log('╚══════════════════════════════════════════════════════╝');
-  console.log(`  Daily      (bills + votes)                          → ${DAILY_SCHEDULE}`);
-  console.log(`  Weekly     (member profiles)                        → ${WEEKLY_SCHEDULE}`);
-  console.log(`  Monthly    (efficiency, budget, audits, performance) → ${MONTHLY_SCHEDULE}`);
-  console.log(`  Bimonthly  (disclosures, lobbying, contracts)        → ${BIMONTHLY_SCHEDULE}`);
-  console.log('\n  Flags: --now (all), --daily, --weekly, --monthly, --bimonthly\n');
+  console.log(`  Daily         (bills + votes)                          → ${DAILY_SCHEDULE}`);
+  console.log(`  Weekly        (member profiles)                        → ${WEEKLY_SCHEDULE}`);
+  console.log(`  Monthly       (efficiency, budget, audits, performance) → ${MONTHLY_SCHEDULE}`);
+  console.log(`  Bimonthly     (disclosures, lobbying, contracts)        → ${BIMONTHLY_SCHEDULE}`);
+  console.log(`  Expense/Waste (expenses + waste analysis, 4 countries)  → ${EXPENSE_SCHEDULE}`);
+  console.log('\n  Flags: --now (all), --daily, --weekly, --monthly, --bimonthly, --expenses\n');
 
   cron.schedule(DAILY_SCHEDULE,     () => runDailyCycle());
   cron.schedule(WEEKLY_SCHEDULE,    () => runWeeklyCycle());
   cron.schedule(MONTHLY_SCHEDULE,   () => runMonthlyCycle());
   cron.schedule(BIMONTHLY_SCHEDULE, () => runBiMonthlyCycle());
+  cron.schedule(EXPENSE_SCHEDULE,   () => runExpenseCycle());
 
   // Run all tiers on startup
   console.log('[scheduler] Running initial cycles on startup...');
   runDailyCycle()
     .then(() => runWeeklyCycle())
     .then(() => runMonthlyCycle())
-    .then(() => runBiMonthlyCycle());
+    .then(() => runBiMonthlyCycle())
+    .then(() => runExpenseCycle());
 }

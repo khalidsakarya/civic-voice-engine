@@ -311,6 +311,125 @@ async function uploadCorporateAffiliations() {
   return count;
 }
 
+// ─── Currency lookup ──────────────────────────────────────────────────────────
+
+const CURRENCY_BY_JUR = { AU: 'AUD', CA: 'CAD', UK: 'GBP', US: 'USD' };
+
+/**
+ * Upload flagged expense records to the `flagged_expenses` collection.
+ * Only isFlagged === true records from expenses_enriched.json are uploaded.
+ * Doc schema matches the requested fields exactly.
+ */
+async function uploadFlaggedExpenses() {
+  const enrichedPath = path.join(OUTPUT_ROOT, 'processed', 'expenses_enriched.json');
+  if (!fs.existsSync(enrichedPath)) {
+    console.log('[firebase] ⚠ flagged_expenses: expenses_enriched.json not found, skipping');
+    return 0;
+  }
+
+  const { records } = JSON.parse(fs.readFileSync(enrichedPath));
+  const flagged = records.filter(r => r.isFlagged);
+
+  if (flagged.length === 0) {
+    console.log('[firebase] ⚠ flagged_expenses: no flagged records found, skipping');
+    return 0;
+  }
+
+  const docs = flagged.map(r => withTimestamp({
+    id:                          r.id,
+    country:                     r.jurisdiction,
+    department:                  r.department    || null,
+    amount:                      r.amount,
+    currency:                    CURRENCY_BY_JUR[r.jurisdiction] || null,
+    date:                        r.date          || null,
+    category:                    r.category      || null,
+    waste_score:                 r.wasteScore,
+    severity:                    r.severity,
+    plain_language_explanation:  r.flagReason    || null,
+    source_url:                  r.sourceUrl     || null,
+    // bonus context fields (useful for the app card display)
+    title:                       r.title         || null,
+    recipient:                   r.recipient     || null,
+  }));
+
+  const count = await batchWrite('flagged_expenses', docs);
+  console.log(`[firebase] ✓ flagged_expenses: ${count} documents written`);
+  return count;
+}
+
+/**
+ * Upload waste analysis summaries to the `waste_reports` collection.
+ * One document per country (doc ID = jurisdiction code: AU | CA | UK | US).
+ * Doc schema: top10WastefulItems, departmentScores, totalFlaggedAmount,
+ *             mostWastefulDepartment, comparedToPreviousPeriod, …
+ */
+async function uploadWasteReports() {
+  const reportPath = path.join(OUTPUT_ROOT, 'processed', 'waste_report.json');
+  if (!fs.existsSync(reportPath)) {
+    console.log('[firebase] ⚠ waste_reports: waste_report.json not found, skipping');
+    return 0;
+  }
+
+  const report = JSON.parse(fs.readFileSync(reportPath));
+  const db  = getDb();
+  const now = new Date().toISOString();
+
+  const jurisdictions = ['AU', 'CA', 'UK', 'US'];
+  const batch = db.batch();
+  let count = 0;
+
+  for (const jur of jurisdictions) {
+    const top10       = report.top10ByCountry?.[jur]       || [];
+    const deptScores  = (report.departmentScores  || []).filter(d => d.jurisdiction === jur);
+    const spikes      = (report.spendSpikes       || []).filter(s => s.jurisdiction === jur);
+    const clusters    = (report.contractorClusters || []).filter(c => c.jurisdictions?.includes(jur));
+    const soleSrcs    = (report.soleSources       || []).filter(s => s.jurisdiction === jur);
+
+    const totalFlaggedAmount = top10.reduce((sum, r) => sum + Math.abs(r.amount || 0), 0);
+
+    // Most wasteful department for this country (highest score, already sorted desc)
+    const topDept = deptScores[0] || null;
+
+    // Period comparison derived from spend spikes
+    const comparedToPreviousPeriod = spikes.length > 0
+      ? spikes.map(s => ({
+          department:      s.department,
+          previousAmount:  s.previousAmount,
+          currentAmount:   s.currentAmount,
+          percentIncrease: s.percentIncrease,
+          reason:          s.reason,
+        }))
+      : null;
+
+    const doc = {
+      country:                  jur,
+      currency:                 CURRENCY_BY_JUR[jur] || null,
+      generatedAt:              report.generatedAt,
+      top10WastefulItems:       top10,
+      departmentScores:         deptScores,
+      totalFlaggedAmount,
+      mostWastefulDepartment:   topDept ? {
+        department:   topDept.department,
+        wasteScore:   topDept.wasteScore,
+        grade:        topDept.grade,
+        totalSpend:   topDept.totalSpend,
+        flaggedCount: topDept.flaggedCount,
+      } : null,
+      comparedToPreviousPeriod,
+      contractorClusters:       clusters,
+      soleSourceContractCount:  soleSrcs.length,
+      last_updated:             now,
+    };
+
+    batch.set(db.collection('waste_reports').doc(jur), doc, { merge: true });
+    count++;
+  }
+
+  await batch.commit();
+  console.log(`[firebase] ✓ waste_reports: ${count} documents written`);
+  return count;
+}
+
 /**
  * Run all uploads (used for manual one-shot runs).
  */
@@ -329,6 +448,8 @@ async function uploadAll() {
     lobbying_activity:          await uploadLobbyingActivity(),
     contracts:                  await uploadContracts(),
     corporate_affiliations:     await uploadCorporateAffiliations(),
+    flagged_expenses:           await uploadFlaggedExpenses(),
+    waste_reports:              await uploadWasteReports(),
   };
   const total = Object.values(results).reduce((a, b) => a + b, 0);
   console.log(`[firebase] Upload complete. ${total} total documents written.`);
@@ -357,4 +478,6 @@ module.exports = {
   uploadLobbyingActivity,
   uploadContracts,
   uploadCorporateAffiliations,
+  uploadFlaggedExpenses,
+  uploadWasteReports,
 };
