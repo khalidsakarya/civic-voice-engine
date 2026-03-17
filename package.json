@@ -16,6 +16,7 @@
     "scheduler:bimonthly": "node src/scheduler.js --bimonthly",
     "scheduler:monthly": "node src/scheduler.js --monthly",
     "scheduler:dryrun": "node src/dryRun.js",
+    "ingest:expenses": "node src/ingestion/expenseFetcher.js",
     "pipeline:full": "npm run start && npm run process:bills && npm run score:efficiency && npm run upload:firebase",
     "test": "node --experimental-vm-modules node_modules/.bin/jest"
   },
