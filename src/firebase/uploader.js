@@ -431,6 +431,66 @@ async function uploadWasteReports() {
 }
 
 /**
+ * Upload enriched leader expense profiles to the `leader_expenses` collection.
+ * One document per leader, keyed by leader id.
+ * Doc schema: person, role, jurisdiction, currency, totalExpenses, tripCount,
+ *             averageTripCost, mostExpensiveTrip, peerAverage, peerRank,
+ *             wasteScore, severity, isFlagged, plainLanguageSummary, flagReason,
+ *             trips (capped to 20 to stay within Firestore doc limits)
+ */
+async function uploadLeaderExpenses() {
+  const enrichedPath = path.join(OUTPUT_ROOT, 'processed', 'leader_expenses_enriched.json');
+  if (!fs.existsSync(enrichedPath)) {
+    console.log('[firebase] ⚠ leader_expenses: leader_expenses_enriched.json not found, skipping');
+    return 0;
+  }
+
+  const { leaders } = JSON.parse(fs.readFileSync(enrichedPath));
+  if (!leaders || leaders.length === 0) {
+    console.log('[firebase] ⚠ leader_expenses: no leader records found, skipping');
+    return 0;
+  }
+
+  const docs = leaders.map(l => withTimestamp({
+    id:                   l.id,
+    person:               l.person               || null,
+    role:                 l.role                 || null,
+    jurisdiction:         l.jurisdiction,
+    currency:             l.currency             || null,
+    department:           l.department           || null,
+    party:                l.party                || null,
+    roleTier:             l.roleTier             || null,
+    hasAmounts:           l.hasAmounts           ?? false,
+    totalExpenses:        l.totalExpenses        ?? null,
+    tripCount:            l.tripCount            ?? 0,
+    averageTripCost:      l.averageTripCost      ?? null,
+    mostExpensiveTrip:    l.mostExpensiveTrip    ?? null,
+    transportation:       l.transportation       ?? null,
+    accommodation:        l.accommodation        ?? null,
+    mealsEntertainment:   l.mealsEntertainment   ?? null,
+    otherExpenses:        l.otherExpenses        ?? null,
+    peerAverage:          l.peerAverage          ?? null,
+    peerRank:             l.peerRank             ?? null,
+    peerGroupSize:        l.peerGroupSize        ?? null,
+    peerComparison:       l.peerComparison       ?? null,
+    wasteScore:           l.wasteScore           ?? null,
+    severity:             l.severity             ?? null,
+    isFlagged:            l.isFlagged            ?? false,
+    plainLanguageSummary: l.plainLanguageSummary ?? null,
+    flagReason:           l.flagReason           ?? null,
+    dataNote:             l.dataNote             ?? null,
+    sourceUrl:            l.sourceUrl            ?? null,
+    processedAt:          l.processedAt          ?? null,
+    // Cap trips array to 20 entries to stay within Firestore 1MB doc limit
+    trips: (l.trips || []).slice(0, 20),
+  }));
+
+  const count = await batchWrite('leader_expenses', docs);
+  console.log(`[firebase] ✓ leader_expenses: ${count} documents written`);
+  return count;
+}
+
+/**
  * Run all uploads (used for manual one-shot runs).
  */
 async function uploadAll() {
@@ -450,6 +510,7 @@ async function uploadAll() {
     corporate_affiliations:     await uploadCorporateAffiliations(),
     flagged_expenses:           await uploadFlaggedExpenses(),
     waste_reports:              await uploadWasteReports(),
+    leader_expenses:            await uploadLeaderExpenses(),
   };
   const total = Object.values(results).reduce((a, b) => a + b, 0);
   console.log(`[firebase] Upload complete. ${total} total documents written.`);
@@ -480,4 +541,5 @@ module.exports = {
   uploadCorporateAffiliations,
   uploadFlaggedExpenses,
   uploadWasteReports,
+  uploadLeaderExpenses,
 };

@@ -22,6 +22,9 @@
     "upload:expenses": "node src/firebase/uploadExpenses.js",
     "scheduler:expenses": "node src/scheduler.js --expenses",
     "ingest:leaders": "node src/ingestion/leaderExpenseFetcher.js",
+    "process:leaders": "node src/processing/leaderExpenseProcessor.js",
+    "upload:leaders": "node src/firebase/uploadLeaderExpenses.js",
+    "pipeline:leaders": "npm run ingest:leaders && npm run process:leaders && npm run upload:leaders",
     "pipeline:full": "npm run start && npm run process:bills && npm run score:efficiency && npm run upload:firebase",
     "test": "node --experimental-vm-modules node_modules/.bin/jest"
   },
