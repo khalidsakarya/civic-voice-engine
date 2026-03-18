@@ -431,6 +431,48 @@ async function uploadWasteReports() {
 }
 
 /**
+ * Upload the expense leaderboard to the `expense_leaderboard` collection.
+ * One document per country (doc ID = jurisdiction: AU | CA | UK | US)
+ * plus one global top-10 document (doc ID = _global).
+ */
+async function uploadLeaderboard() {
+  const leaderboardPath = path.join(OUTPUT_ROOT, 'processed', 'expense_leaderboard.json');
+  if (!fs.existsSync(leaderboardPath)) {
+    console.log('[firebase] ⚠ expense_leaderboard: expense_leaderboard.json not found, skipping');
+    return 0;
+  }
+
+  const leaderboard = JSON.parse(fs.readFileSync(leaderboardPath));
+  const db  = getDb();
+  const now = new Date().toISOString();
+  const batch = db.batch();
+  let count = 0;
+
+  // One doc per country
+  for (const section of leaderboard.countries || []) {
+    const ref = db.collection('expense_leaderboard').doc(section.country);
+    batch.set(ref, { ...section, last_updated: now }, { merge: true });
+    count++;
+  }
+
+  // Global top-10 summary doc
+  if ((leaderboard.globalTop10 || []).length > 0) {
+    const ref = db.collection('expense_leaderboard').doc('_global');
+    batch.set(ref, {
+      generatedAt:  leaderboard.generatedAt,
+      sourceDataAt: leaderboard.sourceDataAt,
+      globalTop10:  leaderboard.globalTop10,
+      last_updated: now,
+    }, { merge: true });
+    count++;
+  }
+
+  await batch.commit();
+  console.log(`[firebase] ✓ expense_leaderboard: ${count} documents written`);
+  return count;
+}
+
+/**
  * Upload enriched leader expense profiles to the `leader_expenses` collection.
  * One document per leader, keyed by leader id.
  * Doc schema: person, role, jurisdiction, currency, totalExpenses, tripCount,
@@ -511,6 +553,7 @@ async function uploadAll() {
     flagged_expenses:           await uploadFlaggedExpenses(),
     waste_reports:              await uploadWasteReports(),
     leader_expenses:            await uploadLeaderExpenses(),
+    expense_leaderboard:        await uploadLeaderboard(),
   };
   const total = Object.values(results).reduce((a, b) => a + b, 0);
   console.log(`[firebase] Upload complete. ${total} total documents written.`);
@@ -542,4 +585,5 @@ module.exports = {
   uploadFlaggedExpenses,
   uploadWasteReports,
   uploadLeaderExpenses,
+  uploadLeaderboard,
 };

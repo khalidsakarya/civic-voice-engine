@@ -25,6 +25,9 @@
     "process:leaders": "node src/processing/leaderExpenseProcessor.js",
     "upload:leaders": "node src/firebase/uploadLeaderExpenses.js",
     "pipeline:leaders": "npm run ingest:leaders && npm run process:leaders && npm run upload:leaders",
+    "build:leaderboard": "node src/processing/leaderLeaderboard.js",
+    "upload:leaderboard": "node -e \"require('dotenv').config(); const {uploadLeaderboard}=require('./src/firebase/uploader'); uploadLeaderboard().then(n=>{ console.log('[upload:leaderboard] Done —',n,'docs'); process.exit(0); }).catch(e=>{ console.error(e.message); process.exit(1); })\"",
+    "scheduler:leader-expenses": "node src/scheduler.js --leader-expenses",
     "pipeline:full": "npm run start && npm run process:bills && npm run score:efficiency && npm run upload:firebase",
     "test": "node --experimental-vm-modules node_modules/.bin/jest"
   },
