@@ -21,6 +21,7 @@
     "detect:waste": "node src/processing/wasteDetector.js",
     "upload:expenses": "node src/firebase/uploadExpenses.js",
     "scheduler:expenses": "node src/scheduler.js --expenses",
+    "ingest:leaders": "node src/ingestion/leaderExpenseFetcher.js",
     "pipeline:full": "npm run start && npm run process:bills && npm run score:efficiency && npm run upload:firebase",
     "test": "node --experimental-vm-modules node_modules/.bin/jest"
   },
