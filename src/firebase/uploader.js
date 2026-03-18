@@ -431,6 +431,81 @@ async function uploadWasteReports() {
 }
 
 /**
+ * Upload expense anomalies to the `expense_anomalies` collection.
+ * One document per anomaly. Also writes per-country summary docs.
+ */
+async function uploadExpenseAnomalies() {
+  const anomaliesPath = path.join(OUTPUT_ROOT, 'processed', 'expense_anomalies.json');
+  if (!fs.existsSync(anomaliesPath)) {
+    console.log('[firebase] ⚠ expense_anomalies: expense_anomalies.json not found, skipping');
+    return 0;
+  }
+
+  const { anomalies, summary, generatedAt } = JSON.parse(fs.readFileSync(anomaliesPath));
+  if (!anomalies || anomalies.length === 0) {
+    console.log('[firebase] ⚠ expense_anomalies: no anomalies found, skipping');
+    return 0;
+  }
+
+  // Upload individual anomaly documents
+  const docs = anomalies.map(a => withTimestamp({
+    id:           a.id,
+    leaderId:     a.leaderId     || null,
+    person:       a.person       || null,
+    role:         a.role         || null,
+    department:   a.department   || null,
+    jurisdiction: a.jurisdiction,
+    currency:     a.currency     || null,
+    anomalyType:  a.anomalyType,
+    headline:     a.headline,
+    description:  a.description  || null,
+    scandalScore: a.scandalScore ?? null,
+    severity:     a.severity     || null,
+    evidence:     a.evidence     || null,
+    detectedAt:   a.detectedAt   || null,
+  }));
+
+  let count = await batchWrite('expense_anomalies', docs);
+
+  // Write per-country summary docs
+  const db  = getDb();
+  const now = new Date().toISOString();
+  const summaryBatch = db.batch();
+  const jurisdictions = [...new Set(anomalies.map(a => a.jurisdiction))];
+
+  for (const jur of jurisdictions) {
+    const jurAnomalies = anomalies.filter(a => a.jurisdiction === jur);
+    const topAnomalies = [...jurAnomalies]
+      .sort((a, b) => (b.scandalScore ?? 0) - (a.scandalScore ?? 0))
+      .slice(0, 10)
+      .map(a => ({
+        id:          a.id,
+        person:      a.person,
+        anomalyType: a.anomalyType,
+        headline:    a.headline,
+        scandalScore: a.scandalScore,
+        severity:    a.severity,
+      }));
+
+    const ref = db.collection('expense_anomalies').doc(`_summary_${jur}`);
+    summaryBatch.set(ref, {
+      country:          jur,
+      generatedAt,
+      totalAnomalies:   jurAnomalies.length,
+      topScandals:      topAnomalies,
+      byType:           summary?.byType ?? {},
+      bySeverity:       summary?.bySeverity ?? {},
+      last_updated:     now,
+    }, { merge: true });
+    count++;
+  }
+
+  await summaryBatch.commit();
+  console.log(`[firebase] ✓ expense_anomalies: ${count} documents written (${docs.length} anomalies + ${jurisdictions.length} summaries)`);
+  return count;
+}
+
+/**
  * Upload the expense leaderboard to the `expense_leaderboard` collection.
  * One document per country (doc ID = jurisdiction: AU | CA | UK | US)
  * plus one global top-10 document (doc ID = _global).
@@ -554,6 +629,7 @@ async function uploadAll() {
     waste_reports:              await uploadWasteReports(),
     leader_expenses:            await uploadLeaderExpenses(),
     expense_leaderboard:        await uploadLeaderboard(),
+    expense_anomalies:          await uploadExpenseAnomalies(),
   };
   const total = Object.values(results).reduce((a, b) => a + b, 0);
   console.log(`[firebase] Upload complete. ${total} total documents written.`);
@@ -586,4 +662,5 @@ module.exports = {
   uploadWasteReports,
   uploadLeaderExpenses,
   uploadLeaderboard,
+  uploadExpenseAnomalies,
 };

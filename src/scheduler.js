@@ -8,11 +8,13 @@ const { detectWaste }             = require('./processing/wasteDetector');
 const { fetchAllLeaderExpenses }  = require('./ingestion/leaderExpenseFetcher');
 const { processLeaderExpenses }   = require('./processing/leaderExpenseProcessor');
 const { buildLeaderboard }        = require('./processing/leaderLeaderboard');
+const { detectLeaderAnomalies }   = require('./processing/leaderAnomalyDetector');
 const {
   uploadBills, uploadVotes, uploadMembers, uploadEfficiencyScores,
   uploadMonthlyEfficiencyScores, uploadBudgetSpending, uploadAuditFindings, uploadDepartmentPerformance,
   uploadFinancialDisclosures, uploadLobbyingActivity, uploadContracts, uploadCorporateAffiliations,
   uploadFlaggedExpenses, uploadWasteReports, uploadLeaderExpenses, uploadLeaderboard,
+  uploadExpenseAnomalies,
 } = require('./firebase/uploader');
 const { writeSchedulerStatus } = require('./firebase/statusWriter');
 const fs = require('fs');
@@ -335,9 +337,9 @@ async function runExpenseCycle() {
 //  LEADER_EXPENSE_WEEKLY  (02:00 every Thursday)  — minister/secretary expenses
 //    1. Fetch leader expense data from CA / US / UK / AU open-data APIs
 //    2. Run Claude AI analysis (waste score, peer comparison, summaries)
-//    3. Build expense leaderboard with trend arrows (vs previous run)
-//    4. Upload leader_expenses to Firestore
-//    5. Upload expense_leaderboard to Firestore
+//    3. Run anomaly detection (second AI pass — 6 pattern types, scandal scores)
+//    4. Build expense leaderboard with trend arrows (vs previous run)
+//    5. Upload leader_expenses + expense_anomalies + expense_leaderboard to Firestore
 
 async function runLeaderExpenseCycle() {
   const startedAt = new Date();
@@ -345,33 +347,38 @@ async function runLeaderExpenseCycle() {
   console.log(`[scheduler:leader-expense] Cycle started at ${startedAt.toISOString()}`);
   console.log('='.repeat(60));
 
-  let leaderCount = 0, leaderboardCount = 0, aiCalls = 0;
+  let leaderCount = 0, anomalyCount = 0, leaderboardCount = 0, aiCalls = 0;
 
   try {
-    console.log('\n[scheduler:leader-expense] Step 1/5 — Fetching leader expenses (CA / US / UK / AU)...');
+    console.log('\n[scheduler:leader-expense] Step 1/6 — Fetching leader expenses (CA / US / UK / AU)...');
     await fetchAllLeaderExpenses();
 
-    console.log('\n[scheduler:leader-expense] Step 2/5 — Processing with Claude AI (waste scores + summaries)...');
+    console.log('\n[scheduler:leader-expense] Step 2/6 — Processing with Claude AI (waste scores + summaries)...');
     const leaderResult = await processLeaderExpenses();
-    aiCalls = leaderResult.apiCallsMade || 0;
+    aiCalls += leaderResult.apiCallsMade || 0;
 
-    console.log('\n[scheduler:leader-expense] Step 3/5 — Building expense leaderboard with trend arrows...');
+    console.log('\n[scheduler:leader-expense] Step 3/6 — Running anomaly detection (6 pattern types)...');
+    const anomalyResult = await detectLeaderAnomalies();
+    aiCalls += anomalyResult.apiCallsMade || 0;
+
+    console.log('\n[scheduler:leader-expense] Step 4/6 — Building expense leaderboard with trend arrows...');
     buildLeaderboard();
 
-    console.log('\n[scheduler:leader-expense] Step 4/5 — Uploading leader_expenses to Firebase...');
-    leaderCount = await uploadLeaderExpenses();
+    console.log('\n[scheduler:leader-expense] Step 5/6 — Uploading leader_expenses + anomalies to Firebase...');
+    leaderCount  = await uploadLeaderExpenses();
+    anomalyCount = await uploadExpenseAnomalies();
 
-    console.log('\n[scheduler:leader-expense] Step 5/5 — Uploading expense_leaderboard to Firebase...');
+    console.log('\n[scheduler:leader-expense] Step 6/6 — Uploading expense_leaderboard to Firebase...');
     leaderboardCount = await uploadLeaderboard();
 
     console.log(`\n[scheduler:leader-expense] ✓ Done at ${new Date().toISOString()}`);
-    console.log(`[scheduler:leader-expense]   leader_expenses: ${leaderCount}  expense_leaderboard: ${leaderboardCount}`);
+    console.log(`[scheduler:leader-expense]   leader_expenses: ${leaderCount}  expense_anomalies: ${anomalyCount}  expense_leaderboard: ${leaderboardCount}`);
 
     await writeSchedulerStatus('leader_expense_weekly', {
       startedAt,
       status:         'success',
-      collections:    ['leader_expenses', 'expense_leaderboard'],
-      recordsUpdated: leaderCount + leaderboardCount,
+      collections:    ['leader_expenses', 'expense_anomalies', 'expense_leaderboard'],
+      recordsUpdated: leaderCount + anomalyCount + leaderboardCount,
       recordsSkipped: 0,
       aiCallsMade:    aiCalls,
       cronSchedule:   LEADER_EXPENSE_SCHEDULE,
@@ -382,8 +389,8 @@ async function runLeaderExpenseCycle() {
     await writeSchedulerStatus('leader_expense_weekly', {
       startedAt,
       status:         'error',
-      collections:    ['leader_expenses', 'expense_leaderboard'],
-      recordsUpdated: leaderCount + leaderboardCount,
+      collections:    ['leader_expenses', 'expense_anomalies', 'expense_leaderboard'],
+      recordsUpdated: leaderCount + anomalyCount + leaderboardCount,
       recordsSkipped: 0,
       aiCallsMade:    aiCalls,
       cronSchedule:   LEADER_EXPENSE_SCHEDULE,
