@@ -689,6 +689,43 @@ async function uploadAnalyticsData() {
 }
 
 /**
+ * Upload quarterly government statistics to the `government_stats` collection.
+ * One document per jurisdiction per quarter (doc ID = {JUR}_{YYYY}_{Q}).
+ * Reads from output/govstats/govstats_{JUR}_{ts}.json files.
+ */
+async function uploadGovStats() {
+  const dir = path.join(OUTPUT_ROOT, 'govstats');
+  if (!fs.existsSync(dir)) {
+    console.log('[firebase] ⚠ government_stats: output/govstats/ not found, skipping');
+    return 0;
+  }
+
+  const files = loadLatestFiles(dir).filter(f => path.basename(f).startsWith('govstats_'));
+  if (files.length === 0) {
+    console.log('[firebase] ⚠ government_stats: no govstats files found, skipping');
+    return 0;
+  }
+
+  const db    = getDb();
+  const batch = db.batch();
+  const now   = new Date().toISOString();
+  let count   = 0;
+
+  for (const file of files) {
+    const data = JSON.parse(fs.readFileSync(file));
+    const docId = sanitizeId(data.id || `${data.country}_${data.year}_${data.quarter}`);
+    if (!docId) continue;
+    const ref = db.collection('government_stats').doc(docId);
+    batch.set(ref, stripUndefined({ ...data, last_updated: now }), { merge: true });
+    count++;
+  }
+
+  await batch.commit();
+  console.log(`[firebase] ✓ government_stats: ${count} documents written`);
+  return count;
+}
+
+/**
  * Run all uploads (used for manual one-shot runs).
  */
 async function uploadAll() {
@@ -713,6 +750,7 @@ async function uploadAll() {
     expense_anomalies:          await uploadExpenseAnomalies(),
     budget_data:                await uploadBudgetData(),
     analytics_data:             await uploadAnalyticsData(),
+    government_stats:           await uploadGovStats(),
   };
   const total = Object.values(results).reduce((a, b) => a + b, 0);
   console.log(`[firebase] Upload complete. ${total} total documents written.`);
@@ -748,4 +786,5 @@ module.exports = {
   uploadExpenseAnomalies,
   uploadBudgetData,
   uploadAnalyticsData,
+  uploadGovStats,
 };

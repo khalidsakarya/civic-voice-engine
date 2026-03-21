@@ -10,12 +10,13 @@ const { processLeaderExpenses }     = require('./processing/leaderExpenseProcess
 const { buildLeaderboard }          = require('./processing/leaderLeaderboard');
 const { detectLeaderAnomalies }     = require('./processing/leaderAnomalyDetector');
 const { fetchAllBudgetAnalytics }   = require('./ingestion/budgetAnalyticsFetcher');
+const { fetchAllGovStats }          = require('./ingestion/govStatsFetcher');
 const {
   uploadBills, uploadVotes, uploadMembers, uploadEfficiencyScores,
   uploadMonthlyEfficiencyScores, uploadBudgetSpending, uploadAuditFindings, uploadDepartmentPerformance,
   uploadFinancialDisclosures, uploadLobbyingActivity, uploadContracts, uploadCorporateAffiliations,
   uploadFlaggedExpenses, uploadWasteReports, uploadLeaderExpenses, uploadLeaderboard,
-  uploadExpenseAnomalies, uploadBudgetData, uploadAnalyticsData,
+  uploadExpenseAnomalies, uploadBudgetData, uploadAnalyticsData, uploadGovStats,
 } = require('./firebase/uploader');
 const { writeSchedulerStatus } = require('./firebase/statusWriter');
 const fs = require('fs');
@@ -33,6 +34,7 @@ const BIMONTHLY_SCHEDULE        = process.env.CRON_BIMONTHLY        || '0 4 1,15
 const EXPENSE_SCHEDULE          = process.env.CRON_EXPENSE          || '0 1 * * 3';    // 01:00 every Wednesday
 const LEADER_EXPENSE_SCHEDULE   = process.env.CRON_LEADER_EXPENSE   || '0 2 * * 4';    // 02:00 every Thursday
 const BUDGET_ANALYTICS_SCHEDULE = process.env.CRON_BUDGET_ANALYTICS || '0 6 1 * *';    // 06:00 on the 1st
+const GOV_STATS_SCHEDULE        = process.env.CRON_GOV_STATS        || '0 7 1 1,4,7,10 *'; // 07:00 on Jan/Apr/Jul/Oct 1st
 
 // ─── Source lists ─────────────────────────────────────────────────────────────
 
@@ -77,6 +79,19 @@ const biMonthlySources = allSources.filter(s =>
 //    1. Fetch budget + analytics data (CA / US / UK / AU)
 //    2. Recalculate government efficiency scores
 //    3. Upload budget_data + analytics_data to Firestore
+//
+//  GOV_STATS QUARTERLY (07:00 Jan/Apr/Jul/Oct 1st) — important government stats
+//                                           Revenue sources breakdown
+//                                           Total spending by department
+//                                           Deficit and surplus figures
+//                                           National debt total
+//                                           Unemployment rate
+//                                           Foreign aid given (ODA)
+//                                           Foreign loans note
+//                                           Grants by department
+//                                           Department spending trends
+//    1. Fetch gov stats (World Bank + BLS + USAspending + open.canada.ca CKAN)
+//    2. Upload government_stats to Firestore
 //
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -466,6 +481,55 @@ async function runBudgetAnalyticsCycle() {
   }
 }
 
+// ─── Government stats cycle (quarterly: Jan/Apr/Jul/Oct 1st) ─────────────────
+//
+//  GOV_STATS_QUARTERLY  (07:00 on 1st of Jan, Apr, Jul, Oct)
+//    1. Fetch all gov stats from World Bank + BLS + USAspending + CKAN sources
+//    2. Upload government_stats collection to Firestore
+
+async function runGovStatsCycle() {
+  const startedAt = new Date();
+  console.log(`\n${'='.repeat(60)}`);
+  console.log(`[scheduler:gov-stats] Cycle started at ${startedAt.toISOString()}`);
+  console.log('='.repeat(60));
+
+  let govStatsCount = 0;
+
+  try {
+    console.log('\n[scheduler:gov-stats] Step 1/2 — Fetching quarterly government stats (CA / US / UK / AU)...');
+    await fetchAllGovStats();
+
+    console.log('\n[scheduler:gov-stats] Step 2/2 — Uploading to Firebase...');
+    govStatsCount = await uploadGovStats();
+
+    console.log(`\n[scheduler:gov-stats] ✓ Done at ${new Date().toISOString()}`);
+    console.log(`[scheduler:gov-stats]   government_stats: ${govStatsCount}`);
+
+    await writeSchedulerStatus('gov_stats_quarterly', {
+      startedAt,
+      status:         'success',
+      collections:    ['government_stats'],
+      recordsUpdated: govStatsCount,
+      recordsSkipped: 0,
+      aiCallsMade:    0,
+      cronSchedule:   GOV_STATS_SCHEDULE,
+    });
+  } catch (err) {
+    console.error(`[scheduler:gov-stats] ✗ Failed: ${err.message}`);
+    console.error(err.stack);
+    await writeSchedulerStatus('gov_stats_quarterly', {
+      startedAt,
+      status:         'error',
+      collections:    ['government_stats'],
+      recordsUpdated: govStatsCount,
+      recordsSkipped: 0,
+      aiCallsMade:    0,
+      cronSchedule:   GOV_STATS_SCHEDULE,
+      errorMessage:   err.message,
+    }).catch(() => {});
+  }
+}
+
 // ─── Bill processing helper ───────────────────────────────────────────────────
 // Returns { total, succeeded, failed } so the daily cycle can track AI stats.
 
@@ -522,6 +586,7 @@ const RUN_BIMONTHLY_NOW         = process.argv.includes('--bimonthly');
 const RUN_EXPENSE_NOW           = process.argv.includes('--expenses');
 const RUN_LEADER_EXPENSE_NOW    = process.argv.includes('--leader-expenses');
 const RUN_BUDGET_ANALYTICS_NOW  = process.argv.includes('--budget-analytics');
+const RUN_GOV_STATS_NOW         = process.argv.includes('--gov-stats');
 
 if (RUN_NOW) {
   runDailyCycle()
@@ -531,6 +596,7 @@ if (RUN_NOW) {
     .then(() => runExpenseCycle())
     .then(() => runLeaderExpenseCycle())
     .then(() => runBudgetAnalyticsCycle())
+    .then(() => runGovStatsCycle())
     .then(() => process.exit(0))
     .catch(() => process.exit(1));
 } else if (RUN_DAILY_NOW) {
@@ -547,6 +613,8 @@ if (RUN_NOW) {
   runLeaderExpenseCycle().then(() => process.exit(0)).catch(() => process.exit(1));
 } else if (RUN_BUDGET_ANALYTICS_NOW) {
   runBudgetAnalyticsCycle().then(() => process.exit(0)).catch(() => process.exit(1));
+} else if (RUN_GOV_STATS_NOW) {
+  runGovStatsCycle().then(() => process.exit(0)).catch(() => process.exit(1));
 } else {
   console.log('\n╔══════════════════════════════════════════════════════╗');
   console.log('║         CIVIC VOICE ENGINE — SCHEDULER STARTED       ║');
@@ -558,7 +626,8 @@ if (RUN_NOW) {
   console.log(`  Expense/Waste    (dept expenses + waste analysis)            → ${EXPENSE_SCHEDULE}`);
   console.log(`  Leader Expenses  (minister/secretary expenses + leaderboard) → ${LEADER_EXPENSE_SCHEDULE}`);
   console.log(`  Budget/Analytics (federal budgets, GDP, unemployment, crime) → ${BUDGET_ANALYTICS_SCHEDULE}`);
-  console.log('\n  Flags: --now (all), --daily, --weekly, --monthly, --bimonthly, --expenses, --leader-expenses, --budget-analytics\n');
+  console.log(`  Gov Stats        (revenue, debt, deficit, ODA, grants)        → ${GOV_STATS_SCHEDULE}`);
+  console.log('\n  Flags: --now (all), --daily, --weekly, --monthly, --bimonthly, --expenses, --leader-expenses, --budget-analytics, --gov-stats\n');
 
   cron.schedule(DAILY_SCHEDULE,            () => runDailyCycle());
   cron.schedule(WEEKLY_SCHEDULE,           () => runWeeklyCycle());
@@ -567,6 +636,7 @@ if (RUN_NOW) {
   cron.schedule(EXPENSE_SCHEDULE,          () => runExpenseCycle());
   cron.schedule(LEADER_EXPENSE_SCHEDULE,   () => runLeaderExpenseCycle());
   cron.schedule(BUDGET_ANALYTICS_SCHEDULE, () => runBudgetAnalyticsCycle());
+  cron.schedule(GOV_STATS_SCHEDULE,        () => runGovStatsCycle());
 
   // Run all tiers on startup
   console.log('[scheduler] Running initial cycles on startup...');
@@ -576,5 +646,6 @@ if (RUN_NOW) {
     .then(() => runBiMonthlyCycle())
     .then(() => runExpenseCycle())
     .then(() => runLeaderExpenseCycle())
-    .then(() => runBudgetAnalyticsCycle());
+    .then(() => runBudgetAnalyticsCycle())
+    .then(() => runGovStatsCycle());
 }
