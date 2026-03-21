@@ -608,6 +608,87 @@ async function uploadLeaderExpenses() {
 }
 
 /**
+ * Upload federal budget distribution, department spending, and "Where the Money
+ * Goes" stats to the `budget_data` collection.
+ * One document per jurisdiction (doc ID = CA | US | UK | AU).
+ * Reads from output/budget_analytics/budget_{JUR}_{ts}.json files.
+ */
+async function uploadBudgetData() {
+  const dir = path.join(OUTPUT_ROOT, 'budget_analytics');
+  if (!fs.existsSync(dir)) {
+    console.log('[firebase] ⚠ budget_data: output/budget_analytics/ not found, skipping');
+    return 0;
+  }
+
+  const files = loadLatestFiles(dir).filter(f => path.basename(f).startsWith('budget_'));
+  if (files.length === 0) {
+    console.log('[firebase] ⚠ budget_data: no budget files found, skipping');
+    return 0;
+  }
+
+  const db    = getDb();
+  const batch = db.batch();
+  const now   = new Date().toISOString();
+  let count   = 0;
+
+  for (const file of files) {
+    const data = JSON.parse(fs.readFileSync(file));
+    const jur  = data.jurisdiction;
+    if (!jur) continue;
+
+    const ref = db.collection('budget_data').doc(jur);
+    batch.set(ref, stripUndefined({ ...data, last_updated: now }), { merge: true });
+    count++;
+  }
+
+  await batch.commit();
+  console.log(`[firebase] ✓ budget_data: ${count} documents written`);
+  return count;
+}
+
+/**
+ * Upload GDP, unemployment, inflation, crime trends, and sector spending stats
+ * to the `analytics_data` collection.
+ * One document per jurisdiction (doc ID = CA | US | UK | AU).
+ * Reads from the latest output/budget_analytics/analytics_{ts}.json file.
+ */
+async function uploadAnalyticsData() {
+  const dir = path.join(OUTPUT_ROOT, 'budget_analytics');
+  if (!fs.existsSync(dir)) {
+    console.log('[firebase] ⚠ analytics_data: output/budget_analytics/ not found, skipping');
+    return 0;
+  }
+
+  const files = loadLatestFiles(dir).filter(f => path.basename(f).startsWith('analytics_'));
+  if (files.length === 0) {
+    console.log('[firebase] ⚠ analytics_data: no analytics files found, skipping');
+    return 0;
+  }
+
+  // loadLatestFiles returns the latest file per prefix; there is only one prefix here
+  const { jurisdictions } = JSON.parse(fs.readFileSync(files[0]));
+  if (!jurisdictions || Object.keys(jurisdictions).length === 0) {
+    console.log('[firebase] ⚠ analytics_data: no jurisdiction records found, skipping');
+    return 0;
+  }
+
+  const db    = getDb();
+  const batch = db.batch();
+  const now   = new Date().toISOString();
+  let count   = 0;
+
+  for (const [jur, data] of Object.entries(jurisdictions)) {
+    const ref = db.collection('analytics_data').doc(jur);
+    batch.set(ref, stripUndefined({ ...data, last_updated: now }), { merge: true });
+    count++;
+  }
+
+  await batch.commit();
+  console.log(`[firebase] ✓ analytics_data: ${count} documents written`);
+  return count;
+}
+
+/**
  * Run all uploads (used for manual one-shot runs).
  */
 async function uploadAll() {
@@ -630,6 +711,8 @@ async function uploadAll() {
     leader_expenses:            await uploadLeaderExpenses(),
     expense_leaderboard:        await uploadLeaderboard(),
     expense_anomalies:          await uploadExpenseAnomalies(),
+    budget_data:                await uploadBudgetData(),
+    analytics_data:             await uploadAnalyticsData(),
   };
   const total = Object.values(results).reduce((a, b) => a + b, 0);
   console.log(`[firebase] Upload complete. ${total} total documents written.`);
@@ -663,4 +746,6 @@ module.exports = {
   uploadLeaderExpenses,
   uploadLeaderboard,
   uploadExpenseAnomalies,
+  uploadBudgetData,
+  uploadAnalyticsData,
 };
