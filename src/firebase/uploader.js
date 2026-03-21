@@ -689,35 +689,60 @@ async function uploadAnalyticsData() {
 }
 
 /**
- * Upload quarterly government statistics to the `government_stats` collection.
+ * Upload AI-enriched quarterly government statistics to `government_stats`.
  * One document per jurisdiction per quarter (doc ID = {JUR}_{YYYY}_{Q}).
- * Reads from output/govstats/govstats_{JUR}_{ts}.json files.
+ *
+ * Prefers output/processed/gov_stats_enriched.json (post-Claude AI analysis).
+ * Falls back to raw output/govstats/govstats_{JUR}_{ts}.json files if enriched
+ * file is absent.
+ *
+ * Firestore fields: country, quarter, year, revenue, spending, deficit,
+ * nationalDebt, unemployment, foreignAid, grants, departmentTrends,
+ * fiscalHealthScore, fiscalHealthRating, plainLanguageSummary,
+ * keyInsights, alerts, processedAt, last_updated.
  */
 async function uploadGovStats() {
-  const dir = path.join(OUTPUT_ROOT, 'govstats');
-  if (!fs.existsSync(dir)) {
-    console.log('[firebase] ⚠ government_stats: output/govstats/ not found, skipping');
-    return 0;
-  }
-
-  const files = loadLatestFiles(dir).filter(f => path.basename(f).startsWith('govstats_'));
-  if (files.length === 0) {
-    console.log('[firebase] ⚠ government_stats: no govstats files found, skipping');
-    return 0;
-  }
+  const enrichedPath = path.join(OUTPUT_ROOT, 'processed', 'gov_stats_enriched.json');
+  const rawDir       = path.join(OUTPUT_ROOT, 'govstats');
 
   const db    = getDb();
   const batch = db.batch();
   const now   = new Date().toISOString();
   let count   = 0;
 
-  for (const file of files) {
-    const data = JSON.parse(fs.readFileSync(file));
-    const docId = sanitizeId(data.id || `${data.country}_${data.year}_${data.quarter}`);
-    if (!docId) continue;
-    const ref = db.collection('government_stats').doc(docId);
-    batch.set(ref, stripUndefined({ ...data, last_updated: now }), { merge: true });
-    count++;
+  if (fs.existsSync(enrichedPath)) {
+    // ── Preferred: AI-enriched file ───────────────────────────────────────
+    const { countries } = JSON.parse(fs.readFileSync(enrichedPath));
+    if (!countries || countries.length === 0) {
+      console.log('[firebase] ⚠ government_stats: enriched file has no countries, skipping');
+      return 0;
+    }
+    for (const doc of countries) {
+      const docId = sanitizeId(doc.id || `${doc.country}_${doc.year}_${doc.quarter}`);
+      if (!docId) continue;
+      const ref = db.collection('government_stats').doc(docId);
+      batch.set(ref, stripUndefined({ ...doc, last_updated: now }), { merge: true });
+      count++;
+    }
+  } else if (fs.existsSync(rawDir)) {
+    // ── Fallback: raw govstats files ──────────────────────────────────────
+    console.log('[firebase] ⚠ government_stats: enriched file not found, falling back to raw govstats');
+    const files = loadLatestFiles(rawDir).filter(f => path.basename(f).startsWith('govstats_'));
+    if (files.length === 0) {
+      console.log('[firebase] ⚠ government_stats: no govstats files found, skipping');
+      return 0;
+    }
+    for (const file of files) {
+      const data  = JSON.parse(fs.readFileSync(file));
+      const docId = sanitizeId(data.id || `${data.country}_${data.year}_${data.quarter}`);
+      if (!docId) continue;
+      const ref = db.collection('government_stats').doc(docId);
+      batch.set(ref, stripUndefined({ ...data, last_updated: now }), { merge: true });
+      count++;
+    }
+  } else {
+    console.log('[firebase] ⚠ government_stats: output/govstats/ not found, skipping');
+    return 0;
   }
 
   await batch.commit();

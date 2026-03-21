@@ -11,6 +11,7 @@ const { buildLeaderboard }          = require('./processing/leaderLeaderboard');
 const { detectLeaderAnomalies }     = require('./processing/leaderAnomalyDetector');
 const { fetchAllBudgetAnalytics }   = require('./ingestion/budgetAnalyticsFetcher');
 const { fetchAllGovStats }          = require('./ingestion/govStatsFetcher');
+const { processGovStats }           = require('./processing/govStatsProcessor');
 const {
   uploadBills, uploadVotes, uploadMembers, uploadEfficiencyScores,
   uploadMonthlyEfficiencyScores, uploadBudgetSpending, uploadAuditFindings, uploadDepartmentPerformance,
@@ -493,17 +494,22 @@ async function runGovStatsCycle() {
   console.log(`[scheduler:gov-stats] Cycle started at ${startedAt.toISOString()}`);
   console.log('='.repeat(60));
 
-  let govStatsCount = 0;
+  let govStatsCount  = 0;
+  let aiCallsMadeGov = 0;
 
   try {
-    console.log('\n[scheduler:gov-stats] Step 1/2 — Fetching quarterly government stats (CA / US / UK / AU)...');
+    console.log('\n[scheduler:gov-stats] Step 1/3 — Fetching quarterly government stats (CA / US / UK / AU)...');
     await fetchAllGovStats();
 
-    console.log('\n[scheduler:gov-stats] Step 2/2 — Uploading to Firebase...');
+    console.log('\n[scheduler:gov-stats] Step 2/3 — Processing through Claude AI...');
+    const processResult = await processGovStats();
+    aiCallsMadeGov = processResult.apiCallsMade || 0;
+
+    console.log('\n[scheduler:gov-stats] Step 3/3 — Uploading to Firebase...');
     govStatsCount = await uploadGovStats();
 
     console.log(`\n[scheduler:gov-stats] ✓ Done at ${new Date().toISOString()}`);
-    console.log(`[scheduler:gov-stats]   government_stats: ${govStatsCount}`);
+    console.log(`[scheduler:gov-stats]   government_stats: ${govStatsCount}  AI calls: ${aiCallsMadeGov}`);
 
     await writeSchedulerStatus('gov_stats_quarterly', {
       startedAt,
@@ -511,7 +517,7 @@ async function runGovStatsCycle() {
       collections:    ['government_stats'],
       recordsUpdated: govStatsCount,
       recordsSkipped: 0,
-      aiCallsMade:    0,
+      aiCallsMade:    aiCallsMadeGov,
       cronSchedule:   GOV_STATS_SCHEDULE,
     });
   } catch (err) {
@@ -523,7 +529,7 @@ async function runGovStatsCycle() {
       collections:    ['government_stats'],
       recordsUpdated: govStatsCount,
       recordsSkipped: 0,
-      aiCallsMade:    0,
+      aiCallsMade:    aiCallsMadeGov,
       cronSchedule:   GOV_STATS_SCHEDULE,
       errorMessage:   err.message,
     }).catch(() => {});

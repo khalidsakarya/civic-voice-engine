@@ -34,6 +34,7 @@
     "ingest:budget-analytics": "node src/ingestion/budgetAnalyticsFetcher.js",
     "scheduler:gov-stats": "node src/scheduler.js --gov-stats",
     "ingest:gov-stats": "node src/ingestion/govStatsFetcher.js",
+    "process:gov-stats": "node src/processing/govStatsProcessor.js",
     "pipeline:full": "npm run start && npm run process:bills && npm run score:efficiency && npm run upload:firebase",
     "test": "node --experimental-vm-modules node_modules/.bin/jest"
   },
