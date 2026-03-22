@@ -2,22 +2,26 @@
  * Social Statistics Fetcher — Civic Voice Engine
  *
  * Fetches quarterly social statistics for Canada, USA, United Kingdom, Australia:
- *   - Unemployment rate (monthly / annual)
- *   - Inflation (CPI, annual %)
- *   - House prices (index or median value)
- *   - Rent / housing costs
- *   - Immigration / net migration
- *   - Homelessness
+ *
+ *  Existing metrics:
+ *   - Unemployment rate      - Inflation (CPI)        - House prices
+ *   - Rent / housing costs   - Immigration             - Homelessness
+ *
+ *  New metrics (each saved with value, unit, date, sourceUrl, updateFrequency):
+ *   - Crime rate             - Drug overdoses          - Homicide rate
+ *   - Road fatalities        - Life expectancy         - Obesity rate
+ *   - Poverty rate           - Graduation rates        - Student debt
  *
  * Data Sources
  * ─────────────────────────────────────────────────────────────────────────────
  * Core indicators (all 4):     World Bank API (api.worldbank.org)
  * US unemployment (monthly):   BLS Public Data API v1 (api.bls.gov)
  * US CPI + rent index:         BLS Public Data API v1 (api.bls.gov)
- * US housing + immigration:    U.S. Census Bureau ACS (api.census.gov)
+ * US housing/education/poverty: U.S. Census Bureau ACS (api.census.gov)
+ * US drug overdoses:           CDC VSRR Socrata API (data.cdc.gov)
  * CA indicators:               StatCan Web Data Service (www150.statcan.gc.ca)
  * CA datasets:                 open.canada.ca CKAN
- * UK datasets:                 data.gov.uk CKAN (ONS / MHCLG)
+ * UK datasets:                 data.gov.uk CKAN (ONS / MHCLG / Home Office)
  * AU indicators:               ABS SDMX-JSON API (api.data.abs.gov.au)
  * AU datasets:                 data.gov.au CKAN (ABS / AIHW)
  *
@@ -66,20 +70,60 @@ function calcPctChange(current, previous) {
   return parseFloat(((current - previous) / Math.abs(previous) * 100).toFixed(2));
 }
 
+/**
+ * Standardised stat shape requested for new metrics.
+ * @param {number|null} value    - The numeric value
+ * @param {string}      unit     - Human-readable unit (e.g. "per 100,000 population")
+ * @param {string|null} date     - ISO year or YYYY-MM period string
+ * @param {string}      sourceUrl - Canonical source URL
+ * @param {string}      updateFrequency - How often this is updated (e.g. "Annual", "Monthly")
+ * @param {object}      extra    - Optional extra fields merged into the object
+ */
+function stat(value, unit, date, sourceUrl, updateFrequency, extra = {}) {
+  return {
+    value: value ?? null,
+    unit,
+    date: date != null ? String(date) : null,
+    sourceUrl,
+    updateFrequency,
+    trend: extra.trend ?? null,
+    ...extra,
+  };
+}
+
 // ─── World Bank: core social indicators ───────────────────────────────────────
 //
+//  Existing:
 //  FP.CPI.TOTL.ZG  = Consumer price inflation (% annual)
 //  SL.UEM.TOTL.ZS  = Unemployment rate (ILO modelled, % of labour force)
 //  SM.POP.TOTL.ZS  = International migrant stock (% of population)
 //  SM.POP.NETM     = Net migration (5-year cumulative estimate)
 //  SP.POP.TOTL     = Total population
+//
+//  New:
+//  SP.DYN.LE00.IN  = Life expectancy at birth, total (years)
+//  VC.IHR.PSRC.P5  = Intentional homicides (per 100,000 people)
+//  SH.STA.TRAF.P5  = Road traffic mortality rate (per 100,000)
+//  SH.STA.OWAD.ZS  = Prevalence of overweight adults, BMI ≥ 25 (% of adults)
+//  SI.POV.NAHC     = Poverty headcount at national poverty line (% of population)
+//  SE.SEC.CUAT.UP.ZS = Pop 25+ with at least upper-secondary education (%)
+//  SE.TER.CUAT.BA.ZS = Pop 25+ with at least Bachelor's degree or equivalent (%)
+//  SE.XPD.TOTL.GD.ZS = Government expenditure on education (% of GDP)
 
 const WB_INDICATORS = {
-  population:      'SP.POP.TOTL',
-  unemployment:    'SL.UEM.TOTL.ZS',
-  inflation:       'FP.CPI.TOTL.ZG',
-  migrantStockPct: 'SM.POP.TOTL.ZS',
-  netMigration:    'SM.POP.NETM',
+  population:        'SP.POP.TOTL',
+  unemployment:      'SL.UEM.TOTL.ZS',
+  inflation:         'FP.CPI.TOTL.ZG',
+  migrantStockPct:   'SM.POP.TOTL.ZS',
+  netMigration:      'SM.POP.NETM',
+  lifeExpectancy:    'SP.DYN.LE00.IN',
+  homicideRate:      'VC.IHR.PSRC.P5',
+  roadFatalities:    'SH.STA.TRAF.P5',
+  obesityRate:       'SH.STA.OWAD.ZS',
+  povertyRate:       'SI.POV.NAHC',
+  upperSecondaryEdu: 'SE.SEC.CUAT.UP.ZS',
+  tertiaryEdu:       'SE.TER.CUAT.BA.ZS',
+  govtEdSpend:       'SE.XPD.TOTL.GD.ZS',
 };
 
 async function fetchWBIndicator(indicatorId) {
@@ -152,50 +196,107 @@ async function fetchUSBLSData() {
   };
 }
 
-// ─── US: Census Bureau ACS — median rent, home value, immigration ─────────────
+// ─── US: Census Bureau ACS — housing, immigration, education, poverty ─────────
 //
-//  Uses the ACS 1-Year Summary File (Profile table DP04 for housing, DP02 for people).
-//  No API key required for basic profile queries (rate-limited without key).
-//  DP04_0134E = Median gross rent ($/month)
-//  DP04_0089E = Median value of owner-occupied housing units ($)
-//  DP02_0093E = Foreign-born population (persons)
-//  DP02_0094PE = Foreign-born, percent of total population
+//  Profile table DP02 (people):
+//    DP02_0060PE = High school graduate or higher, % of persons 25+
+//    DP02_0067PE = Bachelor's degree or higher, % of persons 25+
+//    DP02_0093E  = Foreign-born population (count)
+//    DP02_0094PE = Foreign-born, % of total population
+//
+//  Profile table DP03 (economic):
+//    DP03_0119PE = % of all people below poverty level
+//
+//  Profile table DP04 (housing):
+//    DP04_0134E  = Median gross rent ($/month)
+//    DP04_0089E  = Median value of owner-occupied housing units ($)
+//
+//  No API key required for profile queries (rate-limited without key).
+//  ACS 1-Year lags ~18 months; tries CURRENT_YEAR-2 first.
 
 async function fetchUSCensusACS() {
-  console.log('[socialstats:US] Fetching Census ACS housing and immigration data...');
-  // ACS 1-Year lags ~18 months; try CURRENT_YEAR-2 first, then CURRENT_YEAR-3
+  console.log('[socialstats:US] Fetching Census ACS housing, education, poverty, immigration...');
   for (const yr of [CURRENT_YEAR - 2, CURRENT_YEAR - 3]) {
     try {
-      const [housingResp, peopleResp] = await Promise.all([
+      const [housingResp, peopleResp, econResp] = await Promise.all([
         axios.get(
           `https://api.census.gov/data/${yr}/acs/acs1/profile?get=DP04_0134E,DP04_0089E,NAME&for=us:1`,
           { timeout: TIMEOUT_MS }
         ),
         axios.get(
-          `https://api.census.gov/data/${yr}/acs/acs1/profile?get=DP02_0093E,DP02_0094PE,NAME&for=us:1`,
+          `https://api.census.gov/data/${yr}/acs/acs1/profile?get=DP02_0060PE,DP02_0067PE,DP02_0093E,DP02_0094PE,NAME&for=us:1`,
+          { timeout: TIMEOUT_MS }
+        ),
+        axios.get(
+          `https://api.census.gov/data/${yr}/acs/acs1/profile?get=DP03_0119PE,NAME&for=us:1`,
           { timeout: TIMEOUT_MS }
         ),
       ]);
 
       const hRows = housingResp.data;
       const pRows = peopleResp.data;
+      const eRows = econResp.data;
       if (!Array.isArray(hRows) || hRows.length < 2) continue;
 
-      const hObj = {}, pObj = {};
+      const hObj = {}, pObj = {}, eObj = {};
       hRows[0].forEach((h, i) => { hObj[h] = hRows[1][i]; });
       pRows[0].forEach((h, i) => { pObj[h] = pRows[1][i]; });
+      eRows[0].forEach((h, i) => { eObj[h] = eRows[1][i]; });
 
-      console.log(`[socialstats:US] ✓ Census ACS ${yr} housing + people data fetched`);
+      console.log(`[socialstats:US] ✓ Census ACS ${yr} fetched`);
       return {
-        medianGrossRent:  safeNum(hObj['DP04_0134E']),
-        medianHomeValue:  safeNum(hObj['DP04_0089E']),
-        foreignBornCount: safeNum(pObj['DP02_0093E']),
-        foreignBornPct:   safeNum(pObj['DP02_0094PE']),
+        medianGrossRent:        safeNum(hObj['DP04_0134E']),
+        medianHomeValue:        safeNum(hObj['DP04_0089E']),
+        foreignBornCount:       safeNum(pObj['DP02_0093E']),
+        foreignBornPct:         safeNum(pObj['DP02_0094PE']),
+        highSchoolGradPct:      safeNum(pObj['DP02_0060PE']),
+        bachelorsPlusPct:       safeNum(pObj['DP02_0067PE']),
+        povertyRatePct:         safeNum(eObj['DP03_0119PE']),
         year: yr,
+        sourceUrl: `https://api.census.gov/data/${yr}/acs/acs1/profile`,
         source: `U.S. Census Bureau — American Community Survey 1-Year ${yr} (api.census.gov)`,
       };
     } catch (err) {
       console.warn(`[socialstats:US] Census ACS ${yr} failed: ${err.message}`);
+    }
+  }
+  return null;
+}
+
+// ─── US: CDC Socrata API — drug overdose deaths ───────────────────────────────
+//
+//  VSRR Provisional Drug Overdose Death Counts (NCHS).
+//  Endpoint: data.cdc.gov Socrata dataset — filters for US national total.
+//  Falls back to second endpoint if first returns no data.
+
+async function fetchUSCDCDrugOverdoses() {
+  console.log('[socialstats:US] Fetching CDC drug overdose data...');
+  const ENDPOINTS = [
+    // VSRR Provisional Drug Overdose Death Counts — filter for US total, most recent periods
+    'https://data.cdc.gov/resource/xkb8-kh2a.json?$where=state=%27US%27%20AND%20indicator=%27Number%20of%20Drug%20Overdose%20Deaths%27&$order=year%20DESC,month%20DESC&$limit=3',
+    // Fallback: broader CDC drug death dataset
+    'https://data.cdc.gov/resource/95ax-ymtc.json?$where=state=%27United%20States%27&$order=year%20DESC&$limit=3',
+  ];
+
+  for (const url of ENDPOINTS) {
+    try {
+      const resp = await axios.get(url, { timeout: TIMEOUT_MS, headers: { 'X-App-Token': '' } });
+      const rows = resp.data;
+      if (!Array.isArray(rows) || rows.length === 0) continue;
+      const latest = rows[0];
+      const value  = safeNum(latest.data_value ?? latest.deaths ?? latest.value);
+      if (value == null) continue;
+      console.log(`[socialstats:US] ✓ CDC drug overdoses — ${value}`);
+      return {
+        totalDeaths:    value,
+        period:         `${latest.month ?? ''} ${latest.year ?? ''}`.trim() || null,
+        year:           safeNum(latest.year),
+        indicator:      safeStr(latest.indicator ?? 'Drug Overdose Deaths'),
+        sourceUrl:      'https://data.cdc.gov/resource/xkb8-kh2a.json',
+        source:         'CDC — VSRR Provisional Drug Overdose Death Counts (data.cdc.gov)',
+      };
+    } catch (err) {
+      console.warn(`[socialstats:US] CDC endpoint failed: ${err.message}`);
     }
   }
   return null;
@@ -206,6 +307,7 @@ async function fetchUSCensusACS() {
 //  v2064705   = Unemployment rate, Canada, both sexes, 15+, SA (14-10-0287-01)
 //  v41690914  = CPI All-items, Canada, not SA, 2002=100 (18-10-0004-01)
 //  v111181756 = New Housing Price Index, Canada, total composite (18-10-0205-01)
+//  v30288897  = Crime Severity Index, Canada, total (35-10-0026-01)
 
 async function fetchStatCanVector(vectorId, n = 3) {
   const url  = `https://www150.statcan.gc.ca/t1/tbl1/en/dtbl/getDataFromVectorsAndLatestNPeriods/v${vectorId}/${n}`;
@@ -226,20 +328,22 @@ async function fetchStatCanVector(vectorId, n = 3) {
 }
 
 async function fetchCAStatCanData() {
-  console.log('[socialstats:CA] Fetching StatCan unemployment, CPI, housing price index...');
-  const [unemployment, cpi, housingPriceIndex] = await Promise.allSettled([
+  console.log('[socialstats:CA] Fetching StatCan unemployment, CPI, housing, crime index...');
+  const [unemployment, cpi, housingPriceIndex, crimeSeverityIndex] = await Promise.allSettled([
     fetchStatCanVector(2064705,   3),   // Unemployment rate
     fetchStatCanVector(41690914,  3),   // CPI All-items
     fetchStatCanVector(111181756, 3),   // New Housing Price Index
+    fetchStatCanVector(30288897,  3),   // Crime Severity Index, total
   ]);
   return {
-    unemployment:      unemployment.status      === 'fulfilled' ? unemployment.value      : null,
-    cpi:               cpi.status               === 'fulfilled' ? cpi.value               : null,
-    housingPriceIndex: housingPriceIndex.status === 'fulfilled' ? housingPriceIndex.value : null,
+    unemployment:        unemployment.status        === 'fulfilled' ? unemployment.value        : null,
+    cpi:                 cpi.status                 === 'fulfilled' ? cpi.value                 : null,
+    housingPriceIndex:   housingPriceIndex.status   === 'fulfilled' ? housingPriceIndex.value   : null,
+    crimeSeverityIndex:  crimeSeverityIndex.status  === 'fulfilled' ? crimeSeverityIndex.value  : null,
   };
 }
 
-// ─── CA: open.canada.ca CKAN — immigration, homelessness, housing ─────────────
+// ─── CA: open.canada.ca CKAN — immigration, homelessness, housing, drugs ──────
 
 async function fetchCAOpenDataset(queries) {
   for (const q of queries) {
@@ -267,7 +371,7 @@ async function fetchCAOpenDataset(queries) {
 
 async function fetchCASupplements() {
   console.log('[socialstats:CA] Fetching open.canada.ca datasets...');
-  const [immigration, homelessness, housing] = await Promise.allSettled([
+  const [immigration, homelessness, housing, drugOverdoses, graduationRates] = await Promise.allSettled([
     fetchCAOpenDataset([
       'immigration permanent residents admissions IRCC federal',
       'immigration newcomers landed immigrants annual',
@@ -280,15 +384,25 @@ async function fetchCASupplements() {
       'rental housing vacancy rate CMHC affordability',
       'housing affordability rent residential price',
     ]),
+    fetchCAOpenDataset([
+      'opioid overdose deaths apparent drug toxicity mortality',
+      'drug overdose poisoning death public health',
+    ]),
+    fetchCAOpenDataset([
+      'graduation rates secondary school completion youth',
+      'high school graduation diploma attainment education',
+    ]),
   ]);
   return {
-    immigration:  immigration.status  === 'fulfilled' ? immigration.value  : null,
-    homelessness: homelessness.status === 'fulfilled' ? homelessness.value : null,
-    housing:      housing.status      === 'fulfilled' ? housing.value      : null,
+    immigration:     immigration.status     === 'fulfilled' ? immigration.value     : null,
+    homelessness:    homelessness.status    === 'fulfilled' ? homelessness.value    : null,
+    housing:         housing.status         === 'fulfilled' ? housing.value         : null,
+    drugOverdoses:   drugOverdoses.status   === 'fulfilled' ? drugOverdoses.value   : null,
+    graduationRates: graduationRates.status === 'fulfilled' ? graduationRates.value : null,
   };
 }
 
-// ─── UK: data.gov.uk CKAN — house prices, rent, immigration, homelessness ─────
+// ─── UK: data.gov.uk CKAN — house prices, rent, immigration, homelessness, etc.
 
 async function fetchUKDataset(queries) {
   const HEADERS = { 'User-Agent': 'Mozilla/5.0 (compatible; CivicBot/1.0)' };
@@ -317,7 +431,10 @@ async function fetchUKDataset(queries) {
 
 async function fetchUKSupplements() {
   console.log('[socialstats:UK] Fetching data.gov.uk datasets...');
-  const [housePrices, rent, immigration, homelessness] = await Promise.allSettled([
+  const [
+    housePrices, rent, immigration, homelessness,
+    crimeStats, drugDeaths, roadCasualties, studentLoans,
+  ] = await Promise.allSettled([
     fetchUKDataset([
       'UK House Price Index ONS residential property HPI',
       'land registry house price index UK housing',
@@ -334,12 +451,32 @@ async function fetchUKSupplements() {
       'statutory homelessness MHCLG temporary accommodation',
       'rough sleeping count autumn homelessness England',
     ]),
+    fetchUKDataset([
+      'crime in England and Wales police recorded crime ONS',
+      'Home Office crime statistics police data',
+    ]),
+    fetchUKDataset([
+      'drug misuse deaths drug-related mortality ONS England Wales',
+      'drug poisoning deaths drug related statistics',
+    ]),
+    fetchUKDataset([
+      'reported road casualties Great Britain DVSA RRCGB',
+      'road accidents road safety statistics Department Transport',
+    ]),
+    fetchUKDataset([
+      'student loans company SLC statistics outstanding balance',
+      'higher education student finance loans repayments',
+    ]),
   ]);
   return {
     housePrices:  housePrices.status  === 'fulfilled' ? housePrices.value  : null,
     rent:         rent.status         === 'fulfilled' ? rent.value         : null,
     immigration:  immigration.status  === 'fulfilled' ? immigration.value  : null,
     homelessness: homelessness.status === 'fulfilled' ? homelessness.value : null,
+    crimeStats:   crimeStats.status   === 'fulfilled' ? crimeStats.value   : null,
+    drugDeaths:   drugDeaths.status   === 'fulfilled' ? drugDeaths.value   : null,
+    roadCasualties: roadCasualties.status === 'fulfilled' ? roadCasualties.value : null,
+    studentLoans: studentLoans.status === 'fulfilled' ? studentLoans.value : null,
   };
 }
 
@@ -370,7 +507,6 @@ function parseAbsSdmx(resp) {
     const series = ds.series[seriesKeys[0]];
     const observations = series.observations || {};
 
-    // Higher index = more recent period in SDMX-JSON
     const sortedIdx = Object.keys(observations).map(Number).sort((a, b) => b - a);
     if (sortedIdx.length === 0) return null;
 
@@ -399,8 +535,8 @@ async function fetchABSIndicator(dataflowId, dataKey) {
 async function fetchAUABSData() {
   console.log('[socialstats:AU] Fetching ABS SDMX data (CPI YoY%, unemployment)...');
   const [cpi, labourForce] = await Promise.allSettled([
-    fetchABSIndicator('CPI', '3.10001.10.50.Q'),   // CPI all groups, % change YoY, quarterly
-    fetchABSIndicator('LF',  '1.3.1599.20.M'),      // Unemployment rate, SA, monthly
+    fetchABSIndicator('CPI', '3.10001.10.50.Q'),
+    fetchABSIndicator('LF',  '1.3.1599.20.M'),
   ]);
   return {
     cpi:         cpi.status         === 'fulfilled' ? cpi.value         : null,
@@ -408,7 +544,7 @@ async function fetchAUABSData() {
   };
 }
 
-// ─── AU: data.gov.au CKAN — house prices, homelessness, immigration ───────────
+// ─── AU: data.gov.au CKAN — house prices, homelessness, immigration, etc. ─────
 
 async function fetchAUDataset(queries) {
   const OPT = { maxRedirects: 10, headers: { 'User-Agent': 'Mozilla/5.0 (compatible; CivicBot/1.0)' } };
@@ -437,24 +573,40 @@ async function fetchAUDataset(queries) {
 
 async function fetchAUSupplements() {
   console.log('[socialstats:AU] Fetching data.gov.au datasets...');
-  const [housePrices, homelessness, immigration] = await Promise.allSettled([
-    fetchAUDataset([
-      'residential property price index ABS housing dwelling',
-      'house price index quarterly dwelling values Australia',
-    ]),
-    fetchAUDataset([
-      'specialist homelessness services AIHW clients Australia',
-      'homelessness rough sleeping count Australia',
-    ]),
-    fetchAUDataset([
-      'net overseas migration permanent temporary visa arrivals',
-      'immigration arrivals departures Department Home Affairs',
-    ]),
-  ]);
+  const [housePrices, homelessness, immigration, crimeStats, drugDeaths, roadFatalities] =
+    await Promise.allSettled([
+      fetchAUDataset([
+        'residential property price index ABS housing dwelling',
+        'house price index quarterly dwelling values Australia',
+      ]),
+      fetchAUDataset([
+        'specialist homelessness services AIHW clients Australia',
+        'homelessness rough sleeping count Australia',
+      ]),
+      fetchAUDataset([
+        'net overseas migration permanent temporary visa arrivals',
+        'immigration arrivals departures Department Home Affairs',
+      ]),
+      fetchAUDataset([
+        'recorded crime victims ABS offences Australia',
+        'crime statistics police recorded offences states',
+      ]),
+      fetchAUDataset([
+        'drug caused deaths AIHW drug-induced mortality',
+        'alcohol drug overdose deaths Australia statistics',
+      ]),
+      fetchAUDataset([
+        'road deaths Australia BITRE road traffic fatalities',
+        'road fatalities motor vehicle accidents annual',
+      ]),
+    ]);
   return {
-    housePrices:  housePrices.status  === 'fulfilled' ? housePrices.value  : null,
-    homelessness: homelessness.status === 'fulfilled' ? homelessness.value : null,
-    immigration:  immigration.status  === 'fulfilled' ? immigration.value  : null,
+    housePrices:   housePrices.status   === 'fulfilled' ? housePrices.value   : null,
+    homelessness:  homelessness.status  === 'fulfilled' ? homelessness.value  : null,
+    immigration:   immigration.status   === 'fulfilled' ? immigration.value   : null,
+    crimeStats:    crimeStats.status    === 'fulfilled' ? crimeStats.value    : null,
+    drugDeaths:    drugDeaths.status    === 'fulfilled' ? drugDeaths.value    : null,
+    roadFatalities: roadFatalities.status === 'fulfilled' ? roadFatalities.value : null,
   };
 }
 
@@ -499,21 +651,18 @@ function buildSocialStatsDoc(jur, wbData, sup) {
   };
 
   // ── Inflation (CPI, annual %) ──────────────────────────────────────────────
-  // World Bank annual % is the primary figure; country APIs provide index levels / recency.
   let inflationPct, inflationContext, inflationYear, inflationSource;
 
   if (jur === 'AU' && sup.abs?.cpi?.value != null) {
-    // ABS gives YoY % directly (measure=3 in SDMX key)
     inflationPct     = sup.abs.cpi.value;
     inflationContext = `ABS period: ${sup.abs.cpi.period}`;
     inflationYear    = sup.abs.cpi.period ? parseInt(sup.abs.cpi.period) : wbData.inflation?.year;
     inflationSource  = 'Australian Bureau of Statistics — CPI All Groups, YoY %, CPI dataflow SDMX';
   } else {
-    inflationPct     = wbData.inflation?.value;
-    inflationContext  = null;
-    inflationYear    = wbData.inflation?.year;
-    inflationSource  = 'World Bank — Consumer price inflation (% annual) FP.CPI.TOTL.ZG';
-    // Supplement with BLS / StatCan index for recency note
+    inflationPct    = wbData.inflation?.value;
+    inflationContext = null;
+    inflationYear   = wbData.inflation?.year;
+    inflationSource = 'World Bank — Consumer price inflation (% annual) FP.CPI.TOTL.ZG';
     if (jur === 'US' && sup.blsCpiAllItems) {
       inflationContext = `BLS CPI-U index (SA): ${sup.blsCpiAllItems.value} (${sup.blsCpiAllItems.period} ${sup.blsCpiAllItems.year}, 1982-84=100)`;
       inflationSource += '; U.S. Bureau of Labor Statistics — CPI-U series CUSR0000SA0';
@@ -570,8 +719,7 @@ function buildSocialStatsDoc(jur, wbData, sup) {
     };
   } else {
     housePrices = {
-      note:   'House price data not available from open API sources for this jurisdiction. ' +
-              'Published by: FHFA/Case-Shiller (US), CMHC (CA), ONS Land Registry (UK), ABS RPPI (AU).',
+      note:   'House price data not available from open API sources for this jurisdiction.',
       source: null,
     };
   }
@@ -587,9 +735,9 @@ function buildSocialStatsDoc(jur, wbData, sup) {
         source:             sup.census.source,
       };
       if (sup.blsCpiRent) {
-        rent.cpiRentIndex = sup.blsCpiRent.value;
+        rent.cpiRentIndex  = sup.blsCpiRent.value;
         rent.cpiRentPeriod = `${sup.blsCpiRent.period} ${sup.blsCpiRent.year}`;
-        rent.cpiRentNote  = 'BLS CPI-U Rent of Primary Residence (CUSR0000SEHA), 1982-84=100.';
+        rent.cpiRentNote   = 'BLS CPI-U Rent of Primary Residence (CUSR0000SEHA), 1982-84=100.';
       }
     } else if (sup.blsCpiRent) {
       rent = {
@@ -602,27 +750,16 @@ function buildSocialStatsDoc(jur, wbData, sup) {
       rent = { note: 'Rent data not available.', source: null };
     }
   } else if (jur === 'CA' && sup.caCkan?.housing?.records?.length > 0) {
-    rent = {
-      datasetTitle: sup.caCkan.housing.packageTitle,
-      records:      sup.caCkan.housing.records.slice(0, 10),
-      source:       sup.caCkan.housing.source,
-    };
+    rent = { datasetTitle: sup.caCkan.housing.packageTitle, records: sup.caCkan.housing.records.slice(0, 10), source: sup.caCkan.housing.source };
   } else if (jur === 'UK' && sup.ukCkan?.rent?.records?.length > 0) {
-    rent = {
-      datasetTitle: sup.ukCkan.rent.packageTitle,
-      records:      sup.ukCkan.rent.records.slice(0, 10),
-      source:       sup.ukCkan.rent.source,
-    };
+    rent = { datasetTitle: sup.ukCkan.rent.packageTitle, records: sup.ukCkan.rent.records.slice(0, 10), source: sup.ukCkan.rent.source };
   } else {
-    rent = {
-      note:   'Rental price data not available from open API sources for this jurisdiction.',
-      source: null,
-    };
+    rent = { note: 'Rental price data not available from open API sources for this jurisdiction.', source: null };
   }
 
   // ── Immigration ────────────────────────────────────────────────────────────
-  const migrantPct  = wbData.migrantStockPct?.value ?? null;
-  const netMig      = wbData.netMigration?.value    ?? null;
+  const migrantPct = wbData.migrantStockPct?.value ?? null;
+  const netMig     = wbData.netMigration?.value    ?? null;
 
   let immigrationDataset = null;
   if (jur === 'CA') immigrationDataset = sup.caCkan?.immigration;
@@ -641,8 +778,7 @@ function buildSocialStatsDoc(jur, wbData, sup) {
   const immigration = {
     migrantStockPctOfPopulation: migrantPct,
     migrantStockYear:            wbData.migrantStockPct?.year ?? null,
-    estimatedMigrantCount:       migrantPct && population
-      ? Math.round((migrantPct / 100) * population) : null,
+    estimatedMigrantCount:       migrantPct && population ? Math.round((migrantPct / 100) * population) : null,
     netMigration5yr:             netMig,
     netMigrationYear:            wbData.netMigration?.year ?? null,
     trend: {
@@ -668,38 +804,355 @@ function buildSocialStatsDoc(jur, wbData, sup) {
     records:      homelessnessDataset.records.slice(0, 15),
     source:       homelessnessDataset.source,
   } : {
-    note:   'Point-in-time homelessness count data not available from open CKAN API sources. ' +
-            'Annual reports published by: HUD (US), ESDC/Reaching Home (CA), MHCLG (UK), AIHW (AU).',
+    note:   'Point-in-time homelessness count not available from open CKAN API sources. ' +
+            'Published annually by: HUD (US), ESDC/Reaching Home (CA), MHCLG (UK), AIHW (AU).',
     source: null,
   };
 
+  // ══════════════════════════════════════════════════════════════════════════
+  // NEW METRICS — each in standardised { value, unit, date, sourceUrl, updateFrequency } shape
+  // ══════════════════════════════════════════════════════════════════════════
+
+  // ── Crime Rate ────────────────────────────────────────────────────────────
+  // Primary: country-specific supplement; fallback: World Bank homicide rate as proxy
+  let crimeRate;
+  if (jur === 'CA' && sup.statcan?.crimeSeverityIndex?.value != null) {
+    const csi = sup.statcan.crimeSeverityIndex;
+    crimeRate = stat(
+      csi.value,
+      'Crime Severity Index (CSI, 2006=100)',
+      csi.refPer ?? String(CURRENT_YEAR - 2),
+      'https://www150.statcan.gc.ca/t1/tbl1/en/tv.action?pid=3510002601',
+      'Annual',
+      {
+        prevValue:     csi.prevValue,
+        trend:         { direction: calcTrend(csi.value, csi.prevValue), percentChange: calcPctChange(csi.value, csi.prevValue) },
+        note: 'The CSI measures the volume and severity of police-reported crime in Canada. ' +
+              'A rising CSI means more and/or more-serious crime relative to base year 2006.',
+      }
+    );
+  } else if (jur === 'UK' && sup.ukCkan?.crimeStats?.records?.length > 0) {
+    crimeRate = stat(
+      null,
+      'police-recorded offences',
+      String(CURRENT_YEAR - 2),
+      'https://data.gov.uk',
+      'Annual',
+      { dataset: sup.ukCkan.crimeStats.packageTitle, records: sup.ukCkan.crimeStats.records.slice(0, 10), source: sup.ukCkan.crimeStats.source }
+    );
+  } else if (jur === 'AU' && sup.auCkan?.crimeStats?.records?.length > 0) {
+    crimeRate = stat(
+      null,
+      'recorded offences',
+      String(CURRENT_YEAR - 2),
+      'https://data.gov.au',
+      'Annual',
+      { dataset: sup.auCkan.crimeStats.packageTitle, records: sup.auCkan.crimeStats.records.slice(0, 10), source: sup.auCkan.crimeStats.source }
+    );
+  } else {
+    // Fallback: use WB homicide rate as a crime severity proxy
+    crimeRate = stat(
+      wbData.homicideRate?.value,
+      'intentional homicides per 100,000 population (proxy)',
+      String(wbData.homicideRate?.year ?? CURRENT_YEAR - 2),
+      'https://api.worldbank.org/v2/country/indicator/VC.IHR.PSRC.P5?format=json',
+      'Annual',
+      { note: 'Full crime rate not available via open API. Homicide rate used as comparative proxy. ' +
+               'US: FBI Crime Data Explorer (crime.fbi.gov). UK: ONS Crime in England & Wales. ' +
+               'AU: ABS Recorded Crime Victims (abs.gov.au).' }
+    );
+  }
+
+  // ── Drug Overdoses ────────────────────────────────────────────────────────
+  let drugOverdoses;
+  if (jur === 'US' && sup.cdcDrugOverdoses) {
+    drugOverdoses = stat(
+      sup.cdcDrugOverdoses.totalDeaths,
+      'drug overdose deaths (national total)',
+      sup.cdcDrugOverdoses.year ? String(sup.cdcDrugOverdoses.year) : null,
+      'https://data.cdc.gov/resource/xkb8-kh2a.json',
+      'Monthly (provisional)',
+      { period: sup.cdcDrugOverdoses.period, indicator: sup.cdcDrugOverdoses.indicator, source: sup.cdcDrugOverdoses.source }
+    );
+  } else if (jur === 'CA' && sup.caCkan?.drugOverdoses?.records?.length > 0) {
+    drugOverdoses = stat(
+      null,
+      'apparent opioid toxicity deaths',
+      String(CURRENT_YEAR - 2),
+      'https://open.canada.ca',
+      'Quarterly',
+      { dataset: sup.caCkan.drugOverdoses.packageTitle, records: sup.caCkan.drugOverdoses.records.slice(0, 10), source: sup.caCkan.drugOverdoses.source }
+    );
+  } else if (jur === 'UK' && sup.ukCkan?.drugDeaths?.records?.length > 0) {
+    drugOverdoses = stat(
+      null,
+      'drug misuse deaths',
+      String(CURRENT_YEAR - 2),
+      'https://data.gov.uk',
+      'Annual',
+      { dataset: sup.ukCkan.drugDeaths.packageTitle, records: sup.ukCkan.drugDeaths.records.slice(0, 10), source: sup.ukCkan.drugDeaths.source }
+    );
+  } else if (jur === 'AU' && sup.auCkan?.drugDeaths?.records?.length > 0) {
+    drugOverdoses = stat(
+      null,
+      'drug-induced deaths',
+      String(CURRENT_YEAR - 2),
+      'https://data.gov.au',
+      'Annual',
+      { dataset: sup.auCkan.drugDeaths.packageTitle, records: sup.auCkan.drugDeaths.records.slice(0, 10), source: sup.auCkan.drugDeaths.source }
+    );
+  } else {
+    const DRUG_SOURCE_URLS = {
+      US: 'https://www.cdc.gov/nchs/nvss/vsrr/drug-overdose-data.htm',
+      CA: 'https://health-infobase.canada.ca/substance-related-harms/opioids-stimulants/',
+      UK: 'https://www.ons.gov.uk/peoplepopulationandcommunity/birthsdeathsandmarriages/deaths/bulletins/deathsrelatedtodrugpoisoninginenglandandwales/latest',
+      AU: 'https://www.aihw.gov.au/reports/illicit-use-of-drugs/alcohol-and-other-drug-deaths',
+    };
+    drugOverdoses = stat(
+      null, 'drug-related deaths', null, DRUG_SOURCE_URLS[jur], 'Annual',
+      { note: 'Drug overdose death data not available via open API for this jurisdiction. See source URL for official report.' }
+    );
+  }
+
+  // ── Homicide Rate ─────────────────────────────────────────────────────────
+  const homicideRate = stat(
+    wbData.homicideRate?.value != null ? parseFloat(wbData.homicideRate.value.toFixed(2)) : null,
+    'intentional homicides per 100,000 population',
+    String(wbData.homicideRate?.year ?? CURRENT_YEAR - 2),
+    'https://api.worldbank.org/v2/country/indicator/VC.IHR.PSRC.P5?format=json',
+    'Annual',
+    {
+      prevValue: wbData.homicideRate?.prevValue,
+      trend: {
+        direction:     calcTrend(wbData.homicideRate?.value, wbData.homicideRate?.prevValue),
+        percentChange: calcPctChange(wbData.homicideRate?.value, wbData.homicideRate?.prevValue),
+      },
+      note: 'UNODC data hosted by World Bank. Covers intentional homicide (murder). ' +
+            'Excludes attempted homicide and non-intentional killings.',
+    }
+  );
+
+  // ── Road Fatalities ───────────────────────────────────────────────────────
+  let roadFatalityValue = wbData.roadFatalities?.value;
+  let roadFatalitySource = 'https://api.worldbank.org/v2/country/indicator/SH.STA.TRAF.P5?format=json';
+  let roadFatalityNote = 'WHO Global Status Report on Road Safety. Rate per 100,000 population.';
+
+  if (jur === 'UK' && sup.ukCkan?.roadCasualties?.records?.length > 0) {
+    roadFatalitySource = 'https://data.gov.uk';
+    roadFatalityNote = sup.ukCkan.roadCasualties.source;
+  } else if (jur === 'AU' && sup.auCkan?.roadFatalities?.records?.length > 0) {
+    roadFatalitySource = 'https://data.gov.au';
+    roadFatalityNote = sup.auCkan.roadFatalities.source;
+  }
+
+  const roadFatalities = stat(
+    roadFatalityValue != null ? parseFloat(roadFatalityValue.toFixed(2)) : null,
+    'road traffic deaths per 100,000 population',
+    String(wbData.roadFatalities?.year ?? CURRENT_YEAR - 2),
+    roadFatalitySource,
+    'Annual (every 3–5 years for WHO; annual for country-specific)',
+    {
+      prevValue: wbData.roadFatalities?.prevValue,
+      trend: {
+        direction:     calcTrend(wbData.roadFatalities?.value, wbData.roadFatalities?.prevValue),
+        percentChange: calcPctChange(wbData.roadFatalities?.value, wbData.roadFatalities?.prevValue),
+      },
+      note: roadFatalityNote,
+      supplementDataset: jur === 'UK' ? sup.ukCkan?.roadCasualties?.packageTitle
+                       : jur === 'AU' ? sup.auCkan?.roadFatalities?.packageTitle : null,
+    }
+  );
+
+  // ── Life Expectancy ───────────────────────────────────────────────────────
+  const lifeExpectancy = stat(
+    wbData.lifeExpectancy?.value != null ? parseFloat(wbData.lifeExpectancy.value.toFixed(1)) : null,
+    'years at birth (total population)',
+    String(wbData.lifeExpectancy?.year ?? CURRENT_YEAR - 2),
+    'https://api.worldbank.org/v2/country/indicator/SP.DYN.LE00.IN?format=json',
+    'Annual',
+    {
+      prevValue: wbData.lifeExpectancy?.prevValue,
+      trend: {
+        direction:     calcTrend(wbData.lifeExpectancy?.value, wbData.lifeExpectancy?.prevValue),
+        percentChange: calcPctChange(wbData.lifeExpectancy?.value, wbData.lifeExpectancy?.prevValue),
+      },
+      note: 'World Bank / WHO estimate. Life expectancy at birth indicates overall mortality levels ' +
+            'across all age groups. COVID-19 caused notable declines in 2020–2021 for all 4 countries.',
+    }
+  );
+
+  // ── Obesity Rate ──────────────────────────────────────────────────────────
+  // WB SH.STA.OWAD.ZS = % adults with BMI ≥ 25 (overweight incl. obese).
+  // This is overweight, not strictly obese (BMI ≥ 30). Noted in the stat.
+  const obesityRate = stat(
+    wbData.obesityRate?.value != null ? parseFloat(wbData.obesityRate.value.toFixed(1)) : null,
+    '% of adults with BMI ≥ 25 (overweight, incl. obese)',
+    String(wbData.obesityRate?.year ?? CURRENT_YEAR - 2),
+    'https://api.worldbank.org/v2/country/indicator/SH.STA.OWAD.ZS?format=json',
+    'Annual (WHO NCD data, typically 3–5 year lag)',
+    {
+      prevValue: wbData.obesityRate?.prevValue,
+      trend: {
+        direction:     calcTrend(wbData.obesityRate?.value, wbData.obesityRate?.prevValue),
+        percentChange: calcPctChange(wbData.obesityRate?.value, wbData.obesityRate?.prevValue),
+      },
+      note: 'WHO Global Health Observatory data via World Bank. Indicator SH.STA.OWAD.ZS covers ' +
+            'all adults with BMI ≥ 25 (overweight including obese). For obesity only (BMI ≥ 30) ' +
+            'see: CDC NHANES (US), StatCan CHMS (CA), NHS Digital (UK), AIHW (AU).',
+      strictObesitySourceUrls: {
+        US: 'https://www.cdc.gov/obesity/data/adult.html',
+        CA: 'https://www150.statcan.gc.ca/n1/pub/82-625-x/2019001/article/00005-eng.htm',
+        UK: 'https://digital.nhs.uk/data-and-information/publications/statistical/health-survey-for-england',
+        AU: 'https://www.aihw.gov.au/reports/overweight-obesity/overweight-and-obesity',
+      },
+    }
+  );
+
+  // ── Poverty Rate ──────────────────────────────────────────────────────────
+  // World Bank SI.POV.NAHC covers national poverty lines but often has gaps for rich countries.
+  // US: supplement with Census ACS DP03_0119PE (% all people below federal poverty level).
+  let povertyValue  = wbData.povertyRate?.value;
+  let povertyDate   = String(wbData.povertyRate?.year ?? CURRENT_YEAR - 2);
+  let povertyUrl    = 'https://api.worldbank.org/v2/country/indicator/SI.POV.NAHC?format=json';
+  let povertyUnit   = '% of population below national poverty line';
+  let povertyNote   = 'World Bank — national poverty line definitions differ across countries; not directly comparable.';
+
+  if (jur === 'US' && sup.census?.povertyRatePct != null) {
+    povertyValue = sup.census.povertyRatePct;
+    povertyDate  = String(sup.census.year);
+    povertyUrl   = sup.census.sourceUrl;
+    povertyUnit  = '% of all people below the federal poverty level';
+    povertyNote  = 'U.S. Census Bureau ACS 1-Year. Federal poverty thresholds set by HHS.';
+  }
+
+  const povertyRate = stat(
+    povertyValue != null ? parseFloat(povertyValue.toFixed(1)) : null,
+    povertyUnit,
+    povertyDate,
+    povertyUrl,
+    'Annual',
+    {
+      prevValue: jur !== 'US' ? wbData.povertyRate?.prevValue : null,
+      trend: jur !== 'US' ? {
+        direction:     calcTrend(wbData.povertyRate?.value, wbData.povertyRate?.prevValue),
+        percentChange: calcPctChange(wbData.povertyRate?.value, wbData.povertyRate?.prevValue),
+      } : null,
+      note: povertyNote,
+    }
+  );
+
+  // ── Graduation Rates ──────────────────────────────────────────────────────
+  // World Bank: SE.SEC.CUAT.UP.ZS = % pop 25+ with at least upper secondary education.
+  //             SE.TER.CUAT.BA.ZS = % pop 25+ with at least Bachelor's degree.
+  // US supplement: Census ACS DP02_0060PE (% 25+ high school grad+), DP02_0067PE (% 25+ bachelor's+).
+  let highSchoolGradPct = wbData.upperSecondaryEdu?.value;
+  let bachelorsPct      = wbData.tertiaryEdu?.value;
+  let gradDate          = String(wbData.upperSecondaryEdu?.year ?? CURRENT_YEAR - 2);
+  let gradUrl           = 'https://api.worldbank.org/v2/country/indicator/SE.SEC.CUAT.UP.ZS?format=json';
+  let gradSource        = 'World Bank — UNESCO Institute for Statistics (UIS) educational attainment data';
+
+  if (jur === 'US' && sup.census) {
+    if (sup.census.highSchoolGradPct != null) highSchoolGradPct = sup.census.highSchoolGradPct;
+    if (sup.census.bachelorsPlusPct  != null) bachelorsPct      = sup.census.bachelorsPlusPct;
+    gradDate   = String(sup.census.year);
+    gradUrl    = sup.census.sourceUrl;
+    gradSource = `U.S. Census Bureau — ACS 1-Year ${sup.census.year}, DP02 (api.census.gov)`;
+  }
+
+  const graduationRates = stat(
+    highSchoolGradPct != null ? parseFloat(highSchoolGradPct.toFixed(1)) : null,
+    '% of population aged 25+ with at least upper secondary / high school education',
+    gradDate,
+    gradUrl,
+    'Annual',
+    {
+      highSchoolOrEquivalentPct: highSchoolGradPct != null ? parseFloat(highSchoolGradPct.toFixed(1)) : null,
+      bachelorsDegreeOrHigherPct: bachelorsPct != null ? parseFloat(bachelorsPct.toFixed(1)) : null,
+      govtExpenditureOnEducationPctGDP: wbData.govtEdSpend?.value != null
+        ? parseFloat(wbData.govtEdSpend.value.toFixed(2)) : null,
+      govtEdSpendYear: wbData.govtEdSpend?.year ?? null,
+      note: gradSource,
+      supplementDataset: jur === 'CA' ? sup.caCkan?.graduationRates?.packageTitle : null,
+    }
+  );
+
+  // ── Student Debt ──────────────────────────────────────────────────────────
+  // No country provides total outstanding student debt via an open JSON API.
+  // UK Student Loans Company publishes annual statistics; UK supplement CKAN may find it.
+  // US: Federal Student Aid portfolio summary (studentaid.gov — no API).
+  // CA: National Student Loans Service Centre (NSLSC) — no API.
+  // AU: HELP debt tracked by ATO — no API.
+  const STUDENT_DEBT_URLS = {
+    US: 'https://studentaid.gov/data-center/student/portfolio',
+    CA: 'https://www.canada.ca/en/employment-social-development/programs/canada-student-loans.html',
+    UK: 'https://www.slc.co.uk/official-statistics/student-support-statistics/england/student-loans-outstanding-balance.aspx',
+    AU: 'https://www.aihw.gov.au/reports/higher-education/higher-education-debt',
+  };
+
+  let studentDebtRecords = null;
+  let studentDebtValue   = null;
+  let studentDebtNote    = `Student debt data not available via open JSON API. See: ${STUDENT_DEBT_URLS[jur]}`;
+
+  if (jur === 'UK' && sup.ukCkan?.studentLoans?.records?.length > 0) {
+    studentDebtRecords = sup.ukCkan.studentLoans.records.slice(0, 10);
+    studentDebtNote    = `Dataset: ${sup.ukCkan.studentLoans.packageTitle}`;
+  }
+
+  const studentDebt = stat(
+    studentDebtValue,
+    'total outstanding student loan balance (national)',
+    null,
+    STUDENT_DEBT_URLS[jur],
+    'Annual',
+    {
+      note:    studentDebtNote,
+      records: studentDebtRecords,
+      govtEdSpendPctGDP: wbData.govtEdSpend?.value != null ? parseFloat(wbData.govtEdSpend.value.toFixed(2)) : null,
+      govtEdSpendYear:   wbData.govtEdSpend?.year ?? null,
+      govtEdSpendNote:   'Government expenditure on education (% of GDP) — World Bank SE.XPD.TOTL.GD.ZS. ' +
+                         'Related proxy for public investment in education.',
+    }
+  );
+
   // ── Final document ─────────────────────────────────────────────────────────
   return {
-    id:          `${jur}_${QUARTER_YEAR}_${QUARTER}_social`,
-    country:     jur,
-    quarter:     QUARTER,
-    year:        QUARTER_YEAR,
+    id:      `${jur}_${QUARTER_YEAR}_${QUARTER}_social`,
+    country: jur,
+    quarter: QUARTER,
+    year:    QUARTER_YEAR,
     population,
+    // ── Existing metrics ──
     unemployment,
     inflation,
     housePrices,
     rent,
     immigration,
     homelessness,
+    // ── New metrics ──
+    crimeRate,
+    drugOverdoses,
+    homicideRate,
+    roadFatalities,
+    lifeExpectancy,
+    obesityRate,
+    povertyRate,
+    graduationRates,
+    studentDebt,
     dataSources: [
       'World Bank Open Data (api.worldbank.org)',
       ...(jur === 'US' ? [
         'U.S. Bureau of Labor Statistics (api.bls.gov)',
         'U.S. Census Bureau — ACS 1-Year (api.census.gov)',
+        'CDC VSRR Drug Overdose Data (data.cdc.gov)',
       ] : []),
       ...(jur === 'CA' ? [
         'Statistics Canada Web Data Service (www150.statcan.gc.ca)',
         'open.canada.ca CKAN',
       ] : []),
-      ...(jur === 'UK' ? ['data.gov.uk CKAN (ONS / MHCLG)'] : []),
+      ...(jur === 'UK' ? ['data.gov.uk CKAN (ONS / MHCLG / Home Office / DfT / SLC)'] : []),
       ...(jur === 'AU' ? [
         'ABS SDMX-JSON API (api.data.abs.gov.au)',
-        'data.gov.au CKAN',
+        'data.gov.au CKAN (ABS / AIHW / BITRE)',
       ] : []),
     ],
   };
@@ -715,14 +1168,16 @@ async function fetchAllSocialStats() {
   const wbData = await fetchAllWorldBankData();
 
   // 2. US supplements
-  let blsUnemployment = null, blsCpiAllItems = null, blsCpiRent = null, census = null;
+  let blsUnemployment = null, blsCpiAllItems = null, blsCpiRent = null;
+  let census = null, cdcDrugOverdoses = null;
   try {
     const bls = await fetchUSBLSData();
     blsUnemployment = bls.unemployment;
     blsCpiAllItems  = bls.cpiAllItems;
     blsCpiRent      = bls.cpiRent;
   } catch (e) { console.error(`[socialstats:US] ✗ BLS: ${e.message}`); }
-  try { census = await fetchUSCensusACS(); } catch (e) { console.error(`[socialstats:US] ✗ Census: ${e.message}`); }
+  try { census          = await fetchUSCensusACS();          } catch (e) { console.error(`[socialstats:US] ✗ Census: ${e.message}`); }
+  try { cdcDrugOverdoses = await fetchUSCDCDrugOverdoses();  } catch (e) { console.error(`[socialstats:US] ✗ CDC: ${e.message}`); }
 
   // 3. Canada supplements
   let statcan = null, caCkan = null;
@@ -740,7 +1195,7 @@ async function fetchAllSocialStats() {
 
   // 6. Assemble and save per-country documents
   const supplementsByJur = {
-    US: { blsUnemployment, blsCpiAllItems, blsCpiRent, census },
+    US: { blsUnemployment, blsCpiAllItems, blsCpiRent, census, cdcDrugOverdoses },
     CA: { statcan, caCkan },
     UK: { ukCkan },
     AU: { abs, auCkan },
