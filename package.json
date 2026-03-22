@@ -40,6 +40,8 @@
     "process:gov-stats": "node src/processing/govStatsProcessor.js",
     "audit:apis": "node src/audit/govApiAudit.js",
     "live:fetch": "node src/ingestion/liveFetch.js",
+    "upload:live-stats": "node src/firebase/uploadLiveStats.js",
+    "pipeline:live-stats": "npm run live:fetch && npm run upload:live-stats",
     "pipeline:full": "npm run start && npm run process:bills && npm run score:efficiency && npm run upload:firebase",
     "test": "node --experimental-vm-modules node_modules/.bin/jest"
   },

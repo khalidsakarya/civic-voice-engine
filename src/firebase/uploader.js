@@ -964,6 +964,85 @@ async function uploadGovStats() {
   return count;
 }
 
+// ── Update frequency by metric name ──────────────────────────────────────────
+const LIVE_STAT_UPDATE_FREQ = {
+  exchangeRate_USDCAD:   'Daily',
+  bankRate:              'As-announced (Bank of Canada)',
+  corraOvernightRate:    'Daily',
+  gocBondYield_2yr:      'Daily',
+  gocBondYield_10yr:     'Daily',
+  unemploymentRate:      'Monthly',
+  cpiAllItems:           'Monthly',
+  cpiRentIndex:          'Monthly',
+  medianGrossRent:       'Annual (ACS)',
+  medianHomeValue:       'Annual (ACS)',
+  povertyRate:           'Annual (ACS)',
+  drugOverdoseDeaths:    'Monthly (provisional, CDC VSRR)',
+  federalAgencySpending: 'Monthly (fiscal period, USAspending)',
+  cpiInflation:          'Monthly',
+};
+
+/**
+ * Upload live-fetched social stats to the `social_stats` collection.
+ *
+ * Reads the most recent output/socialstats/live_fetch_*.json file and writes
+ * one Firestore document per record, keyed by {COUNTRY}_{METRIC}.
+ *
+ * Schema: country, statName, value, unit, date, sourceUrl, updateFrequency,
+ *         source (human-readable label), fetchedAt, last_updated.
+ * Extra field `topAgencies` is stored when present (federalAgencySpending).
+ */
+async function uploadLiveStats() {
+  const dir = path.join(OUTPUT_ROOT, 'socialstats');
+  if (!fs.existsSync(dir)) {
+    console.log('[firebase] ⚠ social_stats (live): output/socialstats/ not found, skipping');
+    return 0;
+  }
+
+  // Pick the most recent live_fetch_*.json file
+  const liveFiles = fs.readdirSync(dir)
+    .filter(f => f.startsWith('live_fetch_') && f.endsWith('.json'))
+    .sort();
+
+  if (liveFiles.length === 0) {
+    console.log('[firebase] ⚠ social_stats (live): no live_fetch files found. Run npm run live:fetch first.');
+    return 0;
+  }
+
+  const latestFile = path.join(dir, liveFiles[liveFiles.length - 1]);
+  const { records, fetchedAt } = JSON.parse(fs.readFileSync(latestFile));
+
+  if (!records || records.length === 0) {
+    console.log('[firebase] ⚠ social_stats (live): file has no records');
+    return 0;
+  }
+
+  const now  = new Date().toISOString();
+  const docs = records.map(r => {
+    const docId = sanitizeId(`${r.country}_${r.metric}`);
+    const doc   = stripUndefined({
+      id:              docId,
+      country:         r.country,
+      statName:        r.metric,
+      value:           r.value  ?? null,
+      unit:            r.unit   ?? null,
+      date:            r.date   != null ? String(r.date) : null,
+      sourceUrl:       r.sourceUrl ?? null,
+      source:          r.source    ?? null,
+      updateFrequency: LIVE_STAT_UPDATE_FREQ[r.metric] ?? null,
+      fetchedAt:       fetchedAt ?? r.fetchedAt ?? null,
+      last_updated:    now,
+    });
+    // Preserve topAgencies for federalAgencySpending
+    if (r.topAgencies) doc.topAgencies = r.topAgencies;
+    return doc;
+  });
+
+  const count = await batchWrite('social_stats', docs);
+  console.log(`[firebase] ✓ social_stats (live): ${count} documents written`);
+  return count;
+}
+
 /**
  * Run all uploads (used for manual one-shot runs).
  */
@@ -1028,4 +1107,5 @@ module.exports = {
   uploadAnalyticsData,
   uploadGovStats,
   uploadSocialStats,
+  uploadLiveStats,
 };
