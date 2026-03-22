@@ -964,6 +964,218 @@ async function uploadGovStats() {
   return count;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Canonical social_stats schema
+// 8 statNames × 4 countries = 32 documents
+// Shape: { country, statName, value, source, sourceUrl, updated }
+// ─────────────────────────────────────────────────────────────────────────────
+
+const CANONICAL_COUNTRIES = ['CA', 'US', 'UK', 'AU'];
+
+/**
+ * For each stat, per-country metadata (source, sourceUrl) plus a `liveKey`
+ * pointing to the matching `metric` in the live_fetch records.
+ * `valueTransform` optionally re-shapes the raw value.
+ */
+const CANONICAL_STAT_DEFS = {
+
+  unemploymentRate: {
+    CA: { source: 'Statistics Canada — Labour Force Survey',
+          sourceUrl: 'https://www150.statcan.gc.ca/t1/tbl1/en/tv.action?pid=1410028703',
+          liveKey: null },  // not in live_fetch — null
+    US: { source: 'Bureau of Labor Statistics — CPS series LNS14000000',
+          sourceUrl: 'https://api.bls.gov/publicAPI/v1/timeseries/data/LNS14000000',
+          liveKey: 'unemploymentRate' },
+    UK: { source: 'Office for National Statistics — ILO unemployment rate, series MGSX',
+          sourceUrl: 'https://www.ons.gov.uk/employmentandlabourmarket/peoplenotinwork/unemployment/timeseries/mgsx/lms/data',
+          liveKey: 'unemploymentRate' },
+    AU: { source: 'Australian Bureau of Statistics — Labour Force Survey, series M13',
+          sourceUrl: 'https://api.data.abs.gov.au/data/LF/M13.3.1599.20.AUS.M',
+          liveKey: 'unemploymentRate' },
+  },
+
+  cpiInflation: {
+    CA: { source: 'Statistics Canada — Consumer Price Index',
+          sourceUrl: 'https://www150.statcan.gc.ca/t1/tbl1/en/tv.action?pid=1810000401',
+          liveKey: null },
+    US: { source: 'Bureau of Labor Statistics — CPI All Items seasonally adjusted (index 1982-84=100)',
+          sourceUrl: 'https://api.bls.gov/publicAPI/v1/timeseries/data/CUSR0000SA0',
+          liveKey: 'cpiAllItems' },
+    UK: { source: 'Office for National Statistics — CPI 12-month rate, series D7G7',
+          sourceUrl: 'https://www.ons.gov.uk/economy/inflationandpriceindices/timeseries/d7g7/data',
+          liveKey: 'cpiInflation' },
+    AU: { source: 'Australian Bureau of Statistics — CPI All Groups YoY%, CPI dataflow',
+          sourceUrl: 'https://api.data.abs.gov.au/data/CPI/3.10001.10.50.M',
+          liveKey: 'cpiInflation' },
+  },
+
+  medianHomeValue: {
+    CA: { source: 'Canada Mortgage and Housing Corporation — Housing Market Statistics',
+          sourceUrl: 'https://www.cmhc-schl.gc.ca/professionals/housing-markets-data-and-research',
+          liveKey: null },
+    US: { source: 'U.S. Census Bureau — ACS 1-Year Estimates',
+          sourceUrl: 'https://api.census.gov/data/2024/acs/acs1/profile',
+          liveKey: 'medianHomeValue' },
+    UK: { source: 'HM Land Registry — UK House Price Index',
+          sourceUrl: 'https://landregistry.data.gov.uk/app/ukhpi',
+          liveKey: null },
+    AU: { source: 'Australian Bureau of Statistics — Residential Property Price Indexes',
+          sourceUrl: 'https://www.abs.gov.au/statistics/economy/price-indexes-and-inflation/residential-property-price-indexes-eight-capital-cities',
+          liveKey: null },
+  },
+
+  bankRate: {
+    CA: { source: 'Bank of Canada — Bank Rate (series V122530)',
+          sourceUrl: 'https://www.bankofcanada.ca/valet/observations/V122530/json',
+          liveKey: 'bankRate' },
+    US: { source: 'Federal Reserve — Federal Funds Target Rate',
+          sourceUrl: 'https://www.federalreserve.gov/releases/h15/',
+          liveKey: null },
+    UK: { source: 'Bank of England — Official Bank Rate',
+          sourceUrl: 'https://www.bankofengland.co.uk/monetary-policy/the-interest-rate-bank-rate',
+          liveKey: null },
+    AU: { source: 'Reserve Bank of Australia — Cash Rate Target',
+          sourceUrl: 'https://www.rba.gov.au/statistics/cash-rate/',
+          liveKey: null },
+  },
+
+  medianGrossRent: {
+    CA: { source: 'Canada Mortgage and Housing Corporation — Rental Market Report',
+          sourceUrl: 'https://www.cmhc-schl.gc.ca/professionals/housing-markets-data-and-research/market-reports/rental-market-reports',
+          liveKey: null },
+    US: { source: 'U.S. Census Bureau — ACS 1-Year Estimates',
+          sourceUrl: 'https://api.census.gov/data/2024/acs/acs1/profile',
+          liveKey: 'medianGrossRent' },
+    UK: { source: 'Office for National Statistics — Private Rental Market Statistics',
+          sourceUrl: 'https://www.ons.gov.uk/economy/inflationandpriceindices/bulletins/indexofprivatehousingrentalprices',
+          liveKey: null },
+    AU: { source: 'Australian Bureau of Statistics — Housing Occupancy and Costs',
+          sourceUrl: 'https://www.abs.gov.au/statistics/people/housing',
+          liveKey: null },
+  },
+
+  drugOverdoseDeaths: {
+    CA: { source: 'Public Health Agency of Canada — Opioid- and Stimulant-related Harms',
+          sourceUrl: 'https://health-infobase.canada.ca/substance-related-harms/opioids-stimulants/',
+          liveKey: null },
+    US: { source: 'CDC — VSRR Provisional Drug Overdose Death Counts (NCHS)',
+          sourceUrl: 'https://data.cdc.gov/resource/xkb8-kh2a.json',
+          liveKey: 'drugOverdoseDeaths' },
+    UK: { source: 'Office for National Statistics — Deaths related to drug poisoning in England and Wales',
+          sourceUrl: 'https://www.ons.gov.uk/peoplepopulationandcommunity/birthsdeathsandmarriages/deaths/bulletins/deathsrelatedtodrugpoisoninginenglandandwales',
+          liveKey: null },
+    AU: { source: 'Australian Institute of Health and Welfare — Drug-induced deaths',
+          sourceUrl: 'https://www.aihw.gov.au/reports/alcohol/alcohol-tobacco-other-drugs-australia',
+          liveKey: null },
+  },
+
+  povertyRate: {
+    CA: { source: 'Statistics Canada — Canadian Income Survey',
+          sourceUrl: 'https://www150.statcan.gc.ca/t1/tbl1/en/tv.action?pid=1110013501',
+          liveKey: null },
+    US: { source: 'U.S. Census Bureau — ACS 1-Year Estimates',
+          sourceUrl: 'https://api.census.gov/data/2024/acs/acs1/profile',
+          liveKey: 'povertyRate' },
+    UK: { source: 'Department for Work and Pensions — Households Below Average Income',
+          sourceUrl: 'https://www.gov.uk/government/statistics/households-below-average-income-for-financial-years-ending-1995-to-2023',
+          liveKey: null },
+    AU: { source: 'Melbourne Institute — Poverty Lines Australia',
+          sourceUrl: 'https://melbourneinstitute.unimelb.edu.au/publications/poverty-lines',
+          liveKey: null },
+  },
+
+  federalAgencySpending: {
+    CA: { source: 'Treasury Board of Canada Secretariat — GC InfoBase',
+          sourceUrl: 'https://www.tbs-sct.canada.ca/ems-sgd/edb-bdd/index-eng.html',
+          liveKey: null },
+    US: { source: 'USAspending.gov — Agency Budget Authority',
+          sourceUrl: 'https://api.usaspending.gov/api/v2/spending/',
+          liveKey: 'federalAgencySpending' },
+    UK: { source: 'HM Treasury — Public Expenditure Statistical Analyses',
+          sourceUrl: 'https://www.gov.uk/government/collections/public-expenditure-statistical-analyses-pesa',
+          liveKey: null },
+    AU: { source: 'Australian Government — Budget Strategy and Outlook',
+          sourceUrl: 'https://budget.gov.au/',
+          liveKey: null },
+  },
+
+};
+
+/**
+ * Upload the canonical 8×4 social_stats matrix to Firestore.
+ *
+ * - Reads the latest live_fetch_*.json for values
+ * - Produces exactly 32 documents (8 statNames × 4 countries)
+ * - Doc shape: { country, statName, value, source, sourceUrl, updated }
+ * - Doc ID: {COUNTRY}_{statName}  e.g. US_unemploymentRate
+ * - Wipes the entire collection first so no stale docs remain
+ */
+async function uploadSocialStatsCanonical() {
+  const dir = path.join(OUTPUT_ROOT, 'socialstats');
+  if (!fs.existsSync(dir)) {
+    console.log('[firebase] ⚠ social_stats: output/socialstats/ not found, skipping');
+    return 0;
+  }
+
+  const liveFiles = fs.readdirSync(dir)
+    .filter(f => f.startsWith('live_fetch_') && f.endsWith('.json'))
+    .sort();
+
+  if (liveFiles.length === 0) {
+    console.log('[firebase] ⚠ social_stats: no live_fetch files found. Run npm run live:fetch first.');
+    return 0;
+  }
+
+  const { records } = JSON.parse(fs.readFileSync(path.join(dir, liveFiles[liveFiles.length - 1])));
+
+  // Index live records by country+metric for O(1) lookup
+  const liveIndex = {};
+  for (const r of (records || [])) {
+    liveIndex[`${r.country}_${r.metric}`] = r;
+  }
+
+  const db  = getDb();
+  const now = new Date().toISOString();
+
+  // ── 1. Wipe existing collection ───────────────────────────────────────────
+  const existing = await db.collection('social_stats').get();
+  if (existing.size > 0) {
+    const delBatch = db.batch();
+    existing.docs.forEach(d => delBatch.delete(d.ref));
+    await delBatch.commit();
+    console.log(`[firebase]   Cleared ${existing.size} existing social_stats docs`);
+  }
+
+  // ── 2. Build & write canonical 32 docs ───────────────────────────────────
+  const writeBatch = db.batch();
+  let count = 0;
+
+  for (const [statName, countryDefs] of Object.entries(CANONICAL_STAT_DEFS)) {
+    for (const country of CANONICAL_COUNTRIES) {
+      const def   = countryDefs[country];
+      const live  = def.liveKey ? liveIndex[`${country}_${def.liveKey}`] : null;
+      const docId = sanitizeId(`${country}_${statName}`);
+
+      const doc = stripUndefined({
+        country,
+        statName,
+        value:     live?.value  ?? null,
+        source:    def.source,
+        sourceUrl: def.sourceUrl,
+        updated:   live?.date   ?? null,
+        last_updated: now,
+      });
+
+      writeBatch.set(db.collection('social_stats').doc(docId), doc);
+      count++;
+    }
+  }
+
+  await writeBatch.commit();
+  console.log(`[firebase] ✓ social_stats: ${count} canonical documents written (${Object.keys(CANONICAL_STAT_DEFS).length} stats × ${CANONICAL_COUNTRIES.length} countries)`);
+  return count;
+}
+
 // ── Update frequency by metric name ──────────────────────────────────────────
 const LIVE_STAT_UPDATE_FREQ = {
   exchangeRate_USDCAD:   'Daily',
@@ -1108,4 +1320,5 @@ module.exports = {
   uploadGovStats,
   uploadSocialStats,
   uploadLiveStats,
+  uploadSocialStatsCanonical,
 };
