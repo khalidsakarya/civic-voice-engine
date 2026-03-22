@@ -19,8 +19,9 @@
  * US CPI + rent index:         BLS Public Data API v1 (api.bls.gov)
  * US housing/education/poverty: U.S. Census Bureau ACS (api.census.gov)
  * US drug overdoses:           CDC VSRR Socrata API (data.cdc.gov)
- * CA indicators:               StatCan Web Data Service (www150.statcan.gc.ca)
+ * CA indicators:               Bank of Canada Valet API (bankofcanada.ca/valet)
  * CA datasets:                 open.canada.ca CKAN
+ * UK CPI + unemployment:       ONS timeseries (www.ons.gov.uk) — confirmed working 2026-03-22
  * UK datasets:                 data.gov.uk CKAN (ONS / MHCLG / Home Office)
  * AU indicators:               ABS SDMX-JSON API (api.data.abs.gov.au)
  * AU datasets:                 data.gov.au CKAN (ABS / AIHW)
@@ -302,45 +303,46 @@ async function fetchUSCDCDrugOverdoses() {
   return null;
 }
 
-// ─── CA: StatCan Web Data Service — unemployment, CPI, housing price index ────
+// ─── CA: Bank of Canada Valet API — interest rates, exchange rates ────────────
 //
-//  v2064705   = Unemployment rate, Canada, both sexes, 15+, SA (14-10-0287-01)
-//  v41690914  = CPI All-items, Canada, not SA, 2002=100 (18-10-0004-01)
-//  v111181756 = New Housing Price Index, Canada, total composite (18-10-0205-01)
-//  v30288897  = Crime Severity Index, Canada, total (35-10-0026-01)
+//  Confirmed working (audit 2026-03-22): bankofcanada.ca/valet — 15,267 series.
+//  StatCan WDS (www150.statcan.gc.ca/t1/tbl1/en/dtbl/) is returning HTTP 404
+//  for all calls as of 2026-03-22; BoC Valet is the confirmed CA replacement.
+//
+//  Series used (all confirmed working 2026-03-22):
+//  FXUSDCAD         = Canadian dollar per US dollar (daily)
+//  V122530          = Bank rate — official BoC rate (monthly %)
+//  CORRA_RATE_AT_TRIM = Overnight CORRA rate (daily %)
+//  BD.CDN.2YR.DQ.YLD  = 2-year GoC benchmark bond yield (daily %)
+//  BD.CDN.10YR.DQ.YLD = 10-year GoC benchmark bond yield (daily %)
 
-async function fetchStatCanVector(vectorId, n = 3) {
-  const url  = `https://www150.statcan.gc.ca/t1/tbl1/en/dtbl/getDataFromVectorsAndLatestNPeriods/v${vectorId}/${n}`;
-  const resp = await axios.get(url, { timeout: TIMEOUT_MS });
-  if (resp.data?.status !== 'SUCCESS') return null;
-  const series = resp.data?.object?.[0];
-  if (!series) return null;
-  const points = [...(series.vectorDataPoint || [])].sort((a, b) =>
-    new Date(b.refPer) - new Date(a.refPer)
+const BOC_SERIES = ['FXUSDCAD', 'V122530', 'CORRA_RATE_AT_TRIM', 'BD.CDN.2YR.DQ.YLD', 'BD.CDN.10YR.DQ.YLD'];
+
+async function fetchCABoCData() {
+  console.log('[socialstats:CA] Fetching Bank of Canada Valet rates...');
+  const BOC_BASE = 'https://www.bankofcanada.ca/valet/observations';
+  const results = await Promise.allSettled(
+    BOC_SERIES.map(s => axios.get(`${BOC_BASE}/${s}/json?recent=3`, { timeout: TIMEOUT_MS }))
   );
-  if (points.length === 0) return null;
-  return {
-    value:     points[0]?.value ?? null,
-    prevValue: points[1]?.value ?? null,
-    refPer:    points[0]?.refPer ?? null,
-    productId: series.productId,
-  };
-}
-
-async function fetchCAStatCanData() {
-  console.log('[socialstats:CA] Fetching StatCan unemployment, CPI, housing, crime index...');
-  const [unemployment, cpi, housingPriceIndex, crimeSeverityIndex] = await Promise.allSettled([
-    fetchStatCanVector(2064705,   3),   // Unemployment rate
-    fetchStatCanVector(41690914,  3),   // CPI All-items
-    fetchStatCanVector(111181756, 3),   // New Housing Price Index
-    fetchStatCanVector(30288897,  3),   // Crime Severity Index, total
-  ]);
-  return {
-    unemployment:        unemployment.status        === 'fulfilled' ? unemployment.value        : null,
-    cpi:                 cpi.status                 === 'fulfilled' ? cpi.value                 : null,
-    housingPriceIndex:   housingPriceIndex.status   === 'fulfilled' ? housingPriceIndex.value   : null,
-    crimeSeverityIndex:  crimeSeverityIndex.status  === 'fulfilled' ? crimeSeverityIndex.value  : null,
-  };
+  const out = {};
+  for (let i = 0; i < BOC_SERIES.length; i++) {
+    const key = BOC_SERIES[i];
+    const r   = results[i];
+    if (r.status === 'fulfilled') {
+      const obs  = r.value.data?.observations ?? [];
+      const sorted = [...obs].sort((a, b) => b.d.localeCompare(a.d));
+      const latest = sorted[0];
+      const prev   = sorted[1];
+      if (latest) {
+        out[key] = {
+          value:     safeNum(latest[key]?.v),
+          prevValue: prev ? safeNum(prev[key]?.v) : null,
+          date:      latest.d,
+        };
+      }
+    }
+  }
+  return out;
 }
 
 // ─── CA: open.canada.ca CKAN — immigration, homelessness, housing, drugs ──────
@@ -478,6 +480,53 @@ async function fetchUKSupplements() {
     roadCasualties: roadCasualties.status === 'fulfilled' ? roadCasualties.value : null,
     studentLoans: studentLoans.status === 'fulfilled' ? studentLoans.value : null,
   };
+}
+
+// ─── UK: ONS timeseries API — CPI, unemployment ───────────────────────────────
+//
+//  Confirmed working (audit 2026-03-22): www.ons.gov.uk/{category}/timeseries/{id}/data
+//  with Accept: application/json header returns JSON with months[]/quarters[]/years[] arrays.
+//  Note: api.ons.gov.uk/v1/timeseries/{id}/data returns HTTP 404 — use www.ons.gov.uk instead.
+//
+//  D7G7  = CPI 12-month rate (%)   — economy/inflationandpriceindices
+//  MGSX  = ILO unemployment rate (%) — employmentandlabourmarket
+
+const ONS_TS = {
+  cpiRate: {
+    url:   'https://www.ons.gov.uk/economy/inflationandpriceindices/timeseries/d7g7/data',
+    label: 'CPI 12-month rate (%)',
+  },
+  unemployment: {
+    url:   'https://www.ons.gov.uk/employmentandlabourmarket/peoplenotinwork/unemployment/timeseries/mgsx/lms/data',
+    label: 'ILO unemployment rate (%)',
+  },
+};
+
+async function fetchUKONSTimeseries() {
+  console.log('[socialstats:UK] Fetching ONS timeseries (CPI, unemployment)...');
+  const HEADERS = { 'User-Agent': 'Mozilla/5.0 (compatible; CivicBot/1.0)', Accept: 'application/json' };
+  const out = {};
+  for (const [key, { url, label }] of Object.entries(ONS_TS)) {
+    try {
+      const resp   = await axios.get(url, { timeout: TIMEOUT_MS, headers: HEADERS });
+      const months = resp.data?.months ?? [];
+      if (months.length === 0) { out[key] = null; continue; }
+      const sorted = [...months].sort((a, b) => b.date.localeCompare(a.date));
+      const latest = sorted[0];
+      const prev   = sorted[1];
+      out[key] = {
+        value:     safeNum(latest?.value),
+        prevValue: safeNum(prev?.value),
+        period:    latest?.date ?? null,
+        label,
+      };
+      console.log(`[socialstats:UK] ✓ ONS ${key}: ${latest?.value} (${latest?.date})`);
+    } catch (err) {
+      console.warn(`[socialstats:UK] ONS ${key} failed: ${err.message}`);
+      out[key] = null;
+    }
+  }
+  return out;
 }
 
 // ─── AU: ABS SDMX-JSON API — CPI (YoY %), unemployment rate ──────────────────
@@ -622,11 +671,11 @@ function buildSocialStatsDoc(jur, wbData, sup) {
     uPeriod = `${sup.blsUnemployment.period} ${sup.blsUnemployment.year}`;
     uYear   = sup.blsUnemployment.year;
     uSource = 'U.S. Bureau of Labor Statistics — CPS series LNS14000000 (api.bls.gov)';
-  } else if (jur === 'CA' && sup.statcan?.unemployment) {
-    uRate   = sup.statcan.unemployment.value;
-    uPeriod = sup.statcan.unemployment.refPer;
+  } else if (jur === 'UK' && sup.onsTimeseries?.unemployment?.value != null) {
+    uRate   = sup.onsTimeseries.unemployment.value;
+    uPeriod = sup.onsTimeseries.unemployment.period;
     uYear   = uPeriod ? parseInt(uPeriod) : wbData.unemployment?.year;
-    uSource = 'Statistics Canada — Labour Force Survey, Table 14-10-0287-01 (WDS v2064705)';
+    uSource = 'Office for National Statistics — ILO unemployment rate, series MGSX (www.ons.gov.uk)';
   } else if (jur === 'AU' && sup.abs?.labourForce) {
     uRate   = sup.abs.labourForce.value;
     uPeriod = sup.abs.labourForce.period;
@@ -653,7 +702,12 @@ function buildSocialStatsDoc(jur, wbData, sup) {
   // ── Inflation (CPI, annual %) ──────────────────────────────────────────────
   let inflationPct, inflationContext, inflationYear, inflationSource;
 
-  if (jur === 'AU' && sup.abs?.cpi?.value != null) {
+  if (jur === 'UK' && sup.onsTimeseries?.cpiRate?.value != null) {
+    inflationPct     = sup.onsTimeseries.cpiRate.value;
+    inflationContext = `ONS CPI period: ${sup.onsTimeseries.cpiRate.period}`;
+    inflationYear    = sup.onsTimeseries.cpiRate.period ? parseInt(sup.onsTimeseries.cpiRate.period) : wbData.inflation?.year;
+    inflationSource  = 'Office for National Statistics — CPI 12-month rate, series D7G7 (www.ons.gov.uk)';
+  } else if (jur === 'AU' && sup.abs?.cpi?.value != null) {
     inflationPct     = sup.abs.cpi.value;
     inflationContext = `ABS period: ${sup.abs.cpi.period}`;
     inflationYear    = sup.abs.cpi.period ? parseInt(sup.abs.cpi.period) : wbData.inflation?.year;
@@ -666,9 +720,9 @@ function buildSocialStatsDoc(jur, wbData, sup) {
     if (jur === 'US' && sup.blsCpiAllItems) {
       inflationContext = `BLS CPI-U index (SA): ${sup.blsCpiAllItems.value} (${sup.blsCpiAllItems.period} ${sup.blsCpiAllItems.year}, 1982-84=100)`;
       inflationSource += '; U.S. Bureau of Labor Statistics — CPI-U series CUSR0000SA0';
-    } else if (jur === 'CA' && sup.statcan?.cpi) {
-      inflationContext = `StatCan CPI index (not SA): ${sup.statcan.cpi.value} (${sup.statcan.cpi.refPer}, 2002=100)`;
-      inflationSource += '; Statistics Canada — CPI All-items, Table 18-10-0004-01 (WDS v41690914)';
+    } else if (jur === 'CA' && sup.boc?.['V122530']) {
+      inflationContext = `Bank of Canada Bank Rate: ${sup.boc['V122530'].value}% (${sup.boc['V122530'].date}); Overnight CORRA: ${sup.boc['CORRA_RATE_AT_TRIM']?.value ?? 'n/a'}% (${sup.boc['CORRA_RATE_AT_TRIM']?.date ?? 'n/a'})`;
+      inflationSource += '; Bank of Canada Valet API — V122530 (Bank Rate), CORRA (bankofcanada.ca/valet)';
     }
   }
 
@@ -691,19 +745,6 @@ function buildSocialStatsDoc(jur, wbData, sup) {
       dataYear:           sup.census.year,
       note:               'Median value of owner-occupied housing units. ACS 1-Year Survey.',
       source:             sup.census.source,
-    };
-  } else if (jur === 'CA' && sup.statcan?.housingPriceIndex) {
-    const hpi = sup.statcan.housingPriceIndex;
-    housePrices = {
-      newHousingPriceIndex: hpi.value,
-      prevIndex:            hpi.prevValue,
-      period:               hpi.refPer,
-      trend: {
-        direction:     calcTrend(hpi.value, hpi.prevValue),
-        percentChange: calcPctChange(hpi.value, hpi.prevValue),
-      },
-      note:   'New Housing Price Index (composite), base 2016=100. StatCan Table 18-10-0205-01.',
-      source: 'Statistics Canada — New Housing Price Index, WDS v111181756',
     };
   } else if (jur === 'UK' && sup.ukCkan?.housePrices?.records?.length > 0) {
     housePrices = {
@@ -816,22 +857,7 @@ function buildSocialStatsDoc(jur, wbData, sup) {
   // ── Crime Rate ────────────────────────────────────────────────────────────
   // Primary: country-specific supplement; fallback: World Bank homicide rate as proxy
   let crimeRate;
-  if (jur === 'CA' && sup.statcan?.crimeSeverityIndex?.value != null) {
-    const csi = sup.statcan.crimeSeverityIndex;
-    crimeRate = stat(
-      csi.value,
-      'Crime Severity Index (CSI, 2006=100)',
-      csi.refPer ?? String(CURRENT_YEAR - 2),
-      'https://www150.statcan.gc.ca/t1/tbl1/en/tv.action?pid=3510002601',
-      'Annual',
-      {
-        prevValue:     csi.prevValue,
-        trend:         { direction: calcTrend(csi.value, csi.prevValue), percentChange: calcPctChange(csi.value, csi.prevValue) },
-        note: 'The CSI measures the volume and severity of police-reported crime in Canada. ' +
-              'A rising CSI means more and/or more-serious crime relative to base year 2006.',
-      }
-    );
-  } else if (jur === 'UK' && sup.ukCkan?.crimeStats?.records?.length > 0) {
+  if (jur === 'UK' && sup.ukCkan?.crimeStats?.records?.length > 0) {
     crimeRate = stat(
       null,
       'police-recorded offences',
@@ -1146,10 +1172,13 @@ function buildSocialStatsDoc(jur, wbData, sup) {
         'CDC VSRR Drug Overdose Data (data.cdc.gov)',
       ] : []),
       ...(jur === 'CA' ? [
-        'Statistics Canada Web Data Service (www150.statcan.gc.ca)',
+        'Bank of Canada Valet API (bankofcanada.ca/valet)',
         'open.canada.ca CKAN',
       ] : []),
-      ...(jur === 'UK' ? ['data.gov.uk CKAN (ONS / MHCLG / Home Office / DfT / SLC)'] : []),
+      ...(jur === 'UK' ? [
+        'Office for National Statistics timeseries (www.ons.gov.uk)',
+        'data.gov.uk CKAN (ONS / MHCLG / Home Office / DfT / SLC)',
+      ] : []),
       ...(jur === 'AU' ? [
         'ABS SDMX-JSON API (api.data.abs.gov.au)',
         'data.gov.au CKAN (ABS / AIHW / BITRE)',
@@ -1180,13 +1209,14 @@ async function fetchAllSocialStats() {
   try { cdcDrugOverdoses = await fetchUSCDCDrugOverdoses();  } catch (e) { console.error(`[socialstats:US] ✗ CDC: ${e.message}`); }
 
   // 3. Canada supplements
-  let statcan = null, caCkan = null;
-  try { statcan = await fetchCAStatCanData(); } catch (e) { console.error(`[socialstats:CA] ✗ StatCan: ${e.message}`); }
-  try { caCkan  = await fetchCASupplements(); } catch (e) { console.error(`[socialstats:CA] ✗ CKAN: ${e.message}`); }
+  let boc = null, caCkan = null;
+  try { boc    = await fetchCABoCData();    } catch (e) { console.error(`[socialstats:CA] ✗ Bank of Canada: ${e.message}`); }
+  try { caCkan = await fetchCASupplements(); } catch (e) { console.error(`[socialstats:CA] ✗ CKAN: ${e.message}`); }
 
   // 4. UK supplements
-  let ukCkan = null;
-  try { ukCkan = await fetchUKSupplements(); } catch (e) { console.error(`[socialstats:UK] ✗ CKAN: ${e.message}`); }
+  let ukCkan = null, onsTimeseries = null;
+  try { ukCkan        = await fetchUKSupplements();   } catch (e) { console.error(`[socialstats:UK] ✗ CKAN: ${e.message}`); }
+  try { onsTimeseries = await fetchUKONSTimeseries(); } catch (e) { console.error(`[socialstats:UK] ✗ ONS: ${e.message}`); }
 
   // 5. Australia supplements
   let abs = null, auCkan = null;
@@ -1196,8 +1226,8 @@ async function fetchAllSocialStats() {
   // 6. Assemble and save per-country documents
   const supplementsByJur = {
     US: { blsUnemployment, blsCpiAllItems, blsCpiRent, census, cdcDrugOverdoses },
-    CA: { statcan, caCkan },
-    UK: { ukCkan },
+    CA: { boc, caCkan },
+    UK: { ukCkan, onsTimeseries },
     AU: { abs, auCkan },
   };
 
