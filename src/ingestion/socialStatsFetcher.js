@@ -531,25 +531,31 @@ async function fetchUKONSTimeseries() {
 
 // ─── AU: ABS SDMX-JSON API — CPI (YoY %), unemployment rate ──────────────────
 //
-//  CPI dataflow — key: 3.10001.10.50.Q
-//    Dimension 1 (MEASURE):   3 = % change from corresponding quarter of previous year
-//    Dimension 2 (REGION):    10001 = Weighted avg of 8 capital cities
-//    Dimension 3 (INDEX):     10 = All groups
-//    Dimension 4 (UNIT):      50 = Index number / %
-//    Dimension 5 (FREQ):      Q = Quarterly
+//  Keys use actual code IDs (confirmed working 2026-03-22):
 //
-//  LF dataflow — key: 1.3.1599.20.M
-//    Dimension 1 (SEX):       1 = Persons
-//    Dimension 2 (ITEM):      3 = Unemployment rate
-//    Dimension 3 (REGION):    1599 = Australia
-//    Dimension 4 (ADJ):       20 = Seasonally adjusted
-//    Dimension 5 (FREQ):      M = Monthly
+//  CPI dataflow — key: 3.10001.10.50.M
+//    MEASURE=3  (% change from corresponding month of previous year)
+//    INDEX=10001 (All groups CPI)
+//    TSEST=10   (Original)
+//    REGION=50  (Australia)
+//    FREQ=M     (Monthly) — quarterly key 404s; monthly works
+//
+//  LF dataflow — key: M13.3.1599.20.AUS.M
+//    MEASURE=M13 (Unemployment rate, ILO definition)
+//    SEX=3      (Persons)
+//    AGE=1599   (Total, 15 years and over)
+//    TSEST=20   (Seasonally adjusted)
+//    REGION=AUS (Australia total)
+//    FREQ=M     (Monthly)
 
 function parseAbsSdmx(resp) {
   try {
-    const ds     = resp.data?.data?.dataSets?.[0];
-    const obsDim = resp.data?.data?.structure?.dimensions?.observation?.find(d => d.id === 'TIME_PERIOD');
-    if (!ds || !obsDim) return null;
+    // ABS SDMX-JSON v2: dataSets at data.data.dataSets OR data.dataSets;
+    // structures at data.data.structures (array, not nested .structure)
+    const ds         = resp.data?.data?.dataSets?.[0] ?? resp.data?.dataSets?.[0];
+    const structures = resp.data?.data?.structures   ?? resp.data?.structures ?? [];
+    const obsDim     = structures[0]?.dimensions?.observation?.[0];
+    if (!ds) return null;
 
     const seriesKeys = Object.keys(ds.series || {});
     if (seriesKeys.length === 0) return null;
@@ -565,15 +571,15 @@ function parseAbsSdmx(resp) {
     return {
       value:     observations[latestIdx]?.[0]  ?? null,
       prevValue: prevIdx != null ? (observations[prevIdx]?.[0] ?? null) : null,
-      period:    obsDim.values[latestIdx]?.id ?? null,
+      period:    obsDim?.values?.[latestIdx]?.id ?? null,
     };
   } catch (_) {
     return null;
   }
 }
 
-async function fetchABSIndicator(dataflowId, dataKey) {
-  const url = `https://api.data.abs.gov.au/data/${dataflowId}/${dataKey}/?format=jsondata&startPeriod=${CURRENT_YEAR - 2}`;
+async function fetchABSIndicator(dataflowId, dataKey, startPeriod) {
+  const url = `https://api.data.abs.gov.au/data/${dataflowId}/${dataKey}?format=jsondata&startPeriod=${startPeriod}`;
   const resp = await axios.get(url, {
     timeout: TIMEOUT_MS,
     headers: { Accept: 'application/vnd.sdmx.data+json' },
@@ -584,8 +590,8 @@ async function fetchABSIndicator(dataflowId, dataKey) {
 async function fetchAUABSData() {
   console.log('[socialstats:AU] Fetching ABS SDMX data (CPI YoY%, unemployment)...');
   const [cpi, labourForce] = await Promise.allSettled([
-    fetchABSIndicator('CPI', '3.10001.10.50.Q'),
-    fetchABSIndicator('LF',  '1.3.1599.20.M'),
+    fetchABSIndicator('CPI', '3.10001.10.50.M',    `${CURRENT_YEAR - 1}-01`),
+    fetchABSIndicator('LF',  'M13.3.1599.20.AUS.M', `${CURRENT_YEAR - 1}-01`),
   ]);
   return {
     cpi:         cpi.status         === 'fulfilled' ? cpi.value         : null,
