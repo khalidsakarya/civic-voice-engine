@@ -35,6 +35,8 @@
     "scheduler:gov-stats": "node src/scheduler.js --gov-stats",
     "ingest:gov-stats": "node src/ingestion/govStatsFetcher.js",
     "ingest:social-stats": "node src/ingestion/socialStatsFetcher.js",
+    "upload:social-stats": "node -e \"require('dotenv').config(); const {uploadSocialStats}=require('./src/firebase/uploader'); uploadSocialStats().then(n=>{ console.log('[upload:social-stats] Done —',n,'docs'); process.exit(0); }).catch(e=>{ console.error(e.message); process.exit(1); })\"",
+    "pipeline:social-stats": "npm run ingest:social-stats && npm run upload:social-stats",
     "process:gov-stats": "node src/processing/govStatsProcessor.js",
     "pipeline:full": "npm run start && npm run process:bills && npm run score:efficiency && npm run upload:firebase",
     "test": "node --experimental-vm-modules node_modules/.bin/jest"

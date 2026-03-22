@@ -689,6 +689,220 @@ async function uploadAnalyticsData() {
 }
 
 /**
+ * Upload social statistics to the `social_stats` collection.
+ *
+ * Each stat becomes one flat Firestore document keyed by
+ * {JUR}_{YYYY}_{Q}_{statName}, e.g. US_2026_Q1_homicideRate.
+ *
+ * Schema: country, quarter, year, statName, value, unit, date,
+ *         sourceUrl, updateFrequency, last_updated.
+ *
+ * Reads from output/socialstats/socialstats_{JUR}_{ts}.json (one per country).
+ */
+
+// Source URL lookup for legacy metrics that store source as a string.
+const SOCIAL_STAT_SOURCE_URLS = {
+  unemployment: {
+    US: 'https://api.bls.gov/publicAPI/v1/timeseries/data/LNS14000000?latest=true',
+    CA: 'https://www150.statcan.gc.ca/t1/tbl1/en/tv.action?pid=1410028703',
+    UK: 'https://api.worldbank.org/v2/country/GB/indicator/SL.UEM.TOTL.ZS?format=json',
+    AU: 'https://api.data.abs.gov.au/data/LF/1.3.1599.20.M/',
+  },
+  inflation: {
+    default: 'https://api.worldbank.org/v2/country/indicator/FP.CPI.TOTL.ZG?format=json',
+  },
+  housePrices: {
+    US: 'https://api.census.gov/data',
+    CA: 'https://www150.statcan.gc.ca/t1/tbl1/en/tv.action?pid=1810020501',
+    UK: 'https://data.gov.uk',
+    AU: 'https://data.gov.au',
+  },
+  rent: {
+    US: 'https://api.bls.gov/publicAPI/v1/timeseries/data/CUSR0000SEHA?latest=true',
+    CA: 'https://open.canada.ca',
+    UK: 'https://data.gov.uk',
+    AU: 'https://data.gov.au',
+  },
+  immigration: {
+    default: 'https://api.worldbank.org/v2/country/indicator/SM.POP.TOTL.ZS?format=json',
+  },
+  homelessness: {
+    US: 'https://www.huduser.gov/portal/datasets/ahar.html',
+    CA: 'https://www.canada.ca/en/employment-social-development/programs/homelessness.html',
+    UK: 'https://www.gov.uk/government/statistics/statutory-homelessness-in-england',
+    AU: 'https://www.aihw.gov.au/reports/homelessness-services/specialist-homelessness-services-annual-report',
+  },
+};
+
+/**
+ * Flatten one country's socialstats document into an array of flat stat records
+ * matching the { country, statName, value, unit, date, sourceUrl, updateFrequency } schema.
+ */
+function flattenSocialStatDocs(doc, now) {
+  const { country, quarter, year } = doc;
+  const qKey = `${country}_${year}_${quarter}`;
+  const docs = [];
+
+  function push(statName, value, unit, date, sourceUrl, updateFrequency, extra = {}) {
+    docs.push(stripUndefined({
+      id:              `${qKey}_${statName}`,
+      country,
+      quarter,
+      year,
+      statName,
+      value:           value ?? null,
+      unit:            unit  ?? null,
+      date:            date  != null ? String(date) : null,
+      sourceUrl:       sourceUrl ?? null,
+      updateFrequency: updateFrequency ?? null,
+      ...extra,
+      last_updated: now,
+    }));
+  }
+
+  function srcUrl(statName, jur) {
+    const map = SOCIAL_STAT_SOURCE_URLS[statName] || {};
+    return map[jur] || map.default || null;
+  }
+
+  // ── Legacy metrics (richer nested shape — extract primary value) ────────────
+
+  push(
+    'unemployment',
+    doc.unemployment?.rate,
+    '% of labour force',
+    doc.unemployment?.year ?? doc.unemployment?.period,
+    srcUrl('unemployment', country),
+    country === 'UK' ? 'Annual (World Bank)' : 'Monthly'
+  );
+
+  push(
+    'inflation',
+    doc.inflation?.annualPct,
+    '% annual change in CPI',
+    doc.inflation?.dataYear,
+    srcUrl('inflation', country),
+    'Annual'
+  );
+
+  // House prices: median home value (US) or housing price index (CA) or null (UK/AU)
+  const hpValue = doc.housePrices?.medianHomeValueUSD ?? doc.housePrices?.newHousingPriceIndex ?? null;
+  const hpUnit  = doc.housePrices?.medianHomeValueUSD  ? 'USD (median owner-occupied home value)'
+                : doc.housePrices?.newHousingPriceIndex ? 'New Housing Price Index (2016=100)' : null;
+  push(
+    'housePrices',
+    hpValue,
+    hpUnit,
+    doc.housePrices?.dataYear ?? doc.housePrices?.period ?? null,
+    srcUrl('housePrices', country),
+    country === 'CA' ? 'Monthly' : 'Annual'
+  );
+
+  // Rent: median gross rent (US Census) or CPI rent index (BLS)
+  const rentValue = doc.rent?.medianGrossRentUSD ?? doc.rent?.cpiRentIndex ?? null;
+  const rentUnit  = doc.rent?.medianGrossRentUSD ? 'USD/month (median gross rent)'
+                  : doc.rent?.cpiRentIndex       ? 'CPI index (1982-84=100)' : null;
+  push(
+    'rent',
+    rentValue,
+    rentUnit,
+    doc.rent?.dataYear ?? doc.rent?.period ?? null,
+    srcUrl('rent', country),
+    country === 'US' ? 'Annual (ACS) / Monthly (BLS)' : 'Annual'
+  );
+
+  push(
+    'immigration',
+    doc.immigration?.migrantStockPctOfPopulation,
+    '% of population that are international migrants',
+    doc.immigration?.migrantStockYear,
+    srcUrl('immigration', country),
+    'Every 5 years (UN/World Bank estimates)'
+  );
+
+  // Homelessness: value is usually null (published as reports, not open APIs)
+  push(
+    'homelessness',
+    null,
+    'point-in-time homeless count (not available via open API)',
+    null,
+    srcUrl('homelessness', country),
+    'Annual'
+  );
+
+  // ── New metrics — already in { value, unit, date, sourceUrl, updateFrequency } shape ──
+  const NEW_STAT_KEYS = [
+    'crimeRate', 'drugOverdoses', 'homicideRate', 'roadFatalities',
+    'lifeExpectancy', 'obesityRate', 'povertyRate', 'graduationRates', 'studentDebt',
+  ];
+
+  for (const key of NEW_STAT_KEYS) {
+    const s = doc[key];
+    if (!s) continue;
+
+    if (key === 'graduationRates') {
+      // Two values: high-school-level and bachelor's-level graduation rates
+      push(
+        'graduationRates_highSchool',
+        s.highSchoolOrEquivalentPct ?? s.value ?? null,
+        '% of population 25+ with at least upper-secondary / high-school education',
+        s.date,
+        s.sourceUrl,
+        s.updateFrequency,
+        { govtEdSpendPctGDP: s.govtEdSpendPctGDP ?? null }
+      );
+      push(
+        'graduationRates_tertiary',
+        s.bachelorsDegreeOrHigherPct ?? null,
+        '% of population 25+ with at least a Bachelor\'s degree',
+        s.date,
+        s.sourceUrl,
+        s.updateFrequency
+      );
+    } else {
+      push(key, s.value, s.unit, s.date, s.sourceUrl, s.updateFrequency);
+    }
+  }
+
+  return docs;
+}
+
+async function uploadSocialStats() {
+  const dir = path.join(OUTPUT_ROOT, 'socialstats');
+  if (!fs.existsSync(dir)) {
+    console.log('[firebase] ⚠ social_stats: output/socialstats/ not found, skipping');
+    return 0;
+  }
+
+  const files = loadLatestFiles(dir).filter(f => path.basename(f).startsWith('socialstats_'));
+  if (files.length === 0) {
+    console.log('[firebase] ⚠ social_stats: no socialstats files found. Run npm run ingest:social-stats first.');
+    return 0;
+  }
+
+  const now  = new Date().toISOString();
+  const docs = [];
+
+  for (const file of files) {
+    try {
+      const raw = JSON.parse(fs.readFileSync(file));
+      docs.push(...flattenSocialStatDocs(raw, now));
+    } catch (err) {
+      console.warn(`[firebase] ⚠ social_stats: could not parse ${path.basename(file)}: ${err.message}`);
+    }
+  }
+
+  if (docs.length === 0) {
+    console.log('[firebase] ⚠ social_stats: no stat records to upload');
+    return 0;
+  }
+
+  const count = await batchWrite('social_stats', docs);
+  console.log(`[firebase] ✓ social_stats: ${count} documents written (${files.length} countries × ~${Math.round(count / files.length)} stats each)`);
+  return count;
+}
+
+/**
  * Upload AI-enriched quarterly government statistics to `government_stats`.
  * One document per jurisdiction per quarter (doc ID = {JUR}_{YYYY}_{Q}).
  *
@@ -776,6 +990,7 @@ async function uploadAll() {
     budget_data:                await uploadBudgetData(),
     analytics_data:             await uploadAnalyticsData(),
     government_stats:           await uploadGovStats(),
+    social_stats:               await uploadSocialStats(),
   };
   const total = Object.values(results).reduce((a, b) => a + b, 0);
   console.log(`[firebase] Upload complete. ${total} total documents written.`);
@@ -812,4 +1027,5 @@ module.exports = {
   uploadBudgetData,
   uploadAnalyticsData,
   uploadGovStats,
+  uploadSocialStats,
 };
