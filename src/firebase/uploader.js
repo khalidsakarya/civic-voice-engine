@@ -1019,9 +1019,9 @@ const CANONICAL_STAT_DEFS = {
     UK: { source: 'HM Land Registry — UK House Price Index, average price',
           sourceUrl: 'https://landregistry.data.gov.uk/data/ukhpi/region/united-kingdom/month.json?_sort=-refMonth',
           liveKey: 'medianHomeValue' },
-    AU: { source: 'Australian Bureau of Statistics — Residential Property Price Indexes',
-          sourceUrl: 'https://www.abs.gov.au/statistics/economy/price-indexes-and-inflation/residential-property-price-indexes-eight-capital-cities',
-          liveKey: null },
+    AU: { source: 'OECD — Residential House Prices Index (HOUSE_PRICES), quarterly, 2015=100',
+          sourceUrl: 'https://stats.oecd.org/Index.aspx?DataSetCode=HOUSE_PRICES',
+          liveKey: 'medianHomeValue' },
   },
 
   bankRate: {
@@ -1034,9 +1034,9 @@ const CANONICAL_STAT_DEFS = {
     UK: { source: 'Bank of England — Official Bank Rate, series IUDBEDR',
           sourceUrl: 'https://www.bankofengland.co.uk/boeapps/database/_iadb-FromShowColumns.asp?SeriesCodes=IUDBEDR',
           liveKey: 'bankRate' },
-    AU: { source: 'Reserve Bank of Australia — Cash Rate Target',
-          sourceUrl: 'https://www.rba.gov.au/statistics/cash-rate/',
-          liveKey: null },
+    AU: { source: 'Reserve Bank of Australia — Cash Rate Target, F1 Statistical Table (daily)',
+          sourceUrl: 'https://www.rba.gov.au/statistics/tables/csv/f1-data.csv',
+          liveKey: 'bankRate' },
   },
 
   medianGrossRent: {
@@ -1079,9 +1079,9 @@ const CANONICAL_STAT_DEFS = {
     UK: { source: 'OECD — Relative poverty rate, Income Distribution Database (IDD)',
           sourceUrl: 'https://stats.oecd.org/Index.aspx?DataSetCode=IDD',
           liveKey: 'povertyRate' },
-    AU: { source: 'Melbourne Institute — Poverty Lines Australia',
-          sourceUrl: 'https://melbourneinstitute.unimelb.edu.au/publications/poverty-lines',
-          liveKey: null },
+    AU: { source: 'OECD — Relative poverty rate, Income Distribution Database (IDD)',
+          sourceUrl: 'https://stats.oecd.org/Index.aspx?DataSetCode=IDD',
+          liveKey: 'povertyRate' },
   },
 
   federalAgencySpending: {

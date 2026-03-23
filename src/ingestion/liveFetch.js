@@ -415,6 +415,108 @@ async function fetchONSTimeseries() {
   return records;
 }
 
+// ─── AU: RBA F1 CSV — Cash Rate Target ───────────────────────────────────────
+
+async function fetchAUBankRate() {
+  const MONTH_MAP = { Jan:'01',Feb:'02',Mar:'03',Apr:'04',May:'05',Jun:'06',Jul:'07',Aug:'08',Sep:'09',Oct:'10',Nov:'11',Dec:'12' };
+  const resp = await axios.get(
+    'https://www.rba.gov.au/statistics/tables/csv/f1-data.csv',
+    { timeout: TIMEOUT_MS, headers: { 'User-Agent': BROWSER_UA } }
+  );
+  // F1 CSV: ~10 header rows then data rows of the form "DD-Mon-YYYY,rate,..."
+  const lines = String(resp.data).split('\n')
+    .map(l => l.trim())
+    .filter(l => /^\d{2}-[A-Za-z]{3}-\d{4}/.test(l));
+  if (lines.length === 0) throw new Error('RBA F1: no data rows found');
+  const lastLine = lines[lines.length - 1];
+  const parts = lastLine.split(',');
+  const dateStr = parts[0].trim(); // "16-Mar-2026"
+  const val = safeNum(parts[1]);   // Cash Rate Target (column index 1)
+  if (val == null) throw new Error('RBA F1: could not parse rate from: ' + lastLine);
+  const [dd, mon, yyyy] = dateStr.split('-');
+  const isoDate = `${yyyy}-${MONTH_MAP[mon] ?? '??'}-${dd}`;
+  console.log(`  [AU] bankRate: ${val}% (${isoDate})`);
+  return [record('AU', 'bankRate', val, '% per annum (Cash Rate Target)',
+    isoDate,
+    'Reserve Bank of Australia — Cash Rate Target, F1 Statistical Table (daily)',
+    'https://www.rba.gov.au/statistics/tables/csv/f1-data.csv')];
+}
+
+// ─── AU: OECD HPI — Residential House Price Index ─────────────────────────────
+
+async function fetchAUHousePrices() {
+  // OECD HOUSE_PRICES — AUS HPI quarterly index (2015=100). ABS RPPI API is CEASED.
+  // The dataset contains 578 series (all countries). We filter to the AUS+Q+HPI+IX
+  // series by dynamically looking up each dimension's value index.
+  // NOTE: tDim (time) is non-chronological, so we find the latest period by string sort.
+  const resp = await axios.get(
+    'https://stats.oecd.org/sdmx-json/data/HOUSE_PRICES/AUS.RHP/all?startPeriod=2024-Q1',
+    { timeout: TIMEOUT_MS }
+  );
+  const ds     = resp.data.data?.dataSets?.[0];
+  const struct = resp.data.data?.structures?.[0];
+  if (!ds || !struct) throw new Error('OECD HPI: unexpected response structure');
+
+  const tDim   = struct.dimensions?.observation?.[0];
+  const serDims = struct.dimensions?.series ?? [];
+  // Series dimensions: [0] REF_AREA, [1] FREQ, [2] MEASURE, [3] UNIT_MEASURE
+  const ausIdx  = serDims[0]?.values?.findIndex(v => v.id === 'AUS') ?? -1;
+  const qIdx    = serDims[1]?.values?.findIndex(v => v.id === 'Q') ?? -1;
+  // Use RHP (Residential House Prices, 2015=100) — HPI has historical data only for AUS
+  const rhpIdx  = serDims[2]?.values?.findIndex(v => v.id === 'RHP') ?? -1;
+  const ixIdx   = serDims[3]?.values?.findIndex(v => v.id === 'IX') ?? -1;
+  if (ausIdx === -1 || qIdx === -1 || rhpIdx === -1 || ixIdx === -1)
+    throw new Error(`OECD HPI: dimension lookup failed (AUS=${ausIdx} Q=${qIdx} RHP=${rhpIdx} IX=${ixIdx})`);
+
+  // Target series key: "ausIdx:qIdx:rhpIdx:ixIdx"
+  const targetKey = `${ausIdx}:${qIdx}:${rhpIdx}:${ixIdx}`;
+  const series = ds.series?.[targetKey];
+  if (!series) throw new Error(`OECD HPI: series '${targetKey}' (AUS Q HPI IX) not found`);
+
+  // tDim is non-chronological — find latest quarterly period by string comparison
+  let bestVal = null, bestPeriod = null;
+  for (const [idxStr, obsArr] of Object.entries(series.observations ?? {})) {
+    const period = tDim?.values?.[Number(idxStr)]?.id;
+    if (!period?.includes('Q')) continue;
+    const val = safeNum(obsArr[0]);
+    if (val == null) continue;
+    if (bestPeriod === null || period > bestPeriod) { bestPeriod = period; bestVal = val; }
+  }
+  if (bestVal == null) throw new Error('OECD HPI: no quarterly obs found in AUS HPI IX series');
+
+  console.log(`  [AU] medianHomeValue (OECD HPI index): ${bestVal} (${bestPeriod})`);
+  return [record('AU', 'medianHomeValue', bestVal, 'Residential Property Price Index (Australia, 2015=100)',
+    bestPeriod,
+    'OECD — Residential House Prices Index (HOUSE_PRICES), quarterly, 2015=100',
+    'https://stats.oecd.org/Index.aspx?DataSetCode=HOUSE_PRICES')];
+}
+
+// ─── AU: OECD IDD — relative poverty rate ────────────────────────────────────
+
+async function fetchAUPovertyRate() {
+  const resp = await axios.get(
+    'https://stats.oecd.org/sdmx-json/data/IDD/AUS.POVERTY_RATE50_WG.TOTAL.AGEHD.D_CUR/all?lastNObservations=5',
+    { timeout: TIMEOUT_MS }
+  );
+  const ds     = resp.data.data?.dataSets?.[0];
+  const struct = resp.data.data?.structures?.[0];
+  const tDim   = struct?.dimensions?.observation?.[0];
+  if (!ds) throw new Error('OECD IDD AUS: no dataSets');
+  const firstSeries = Object.values(ds.series ?? {})[0];
+  if (!firstSeries) throw new Error('OECD IDD AUS: no series');
+  const obs       = firstSeries.observations ?? {};
+  const sortedIdx = Object.keys(obs).map(Number).sort((a, b) => b - a);
+  const latestIdx = sortedIdx.find(i => obs[i]?.[0] != null);
+  if (latestIdx === undefined) throw new Error('OECD IDD AUS: all observations null');
+  const val    = safeNum(obs[latestIdx][0]);
+  const period = tDim?.values?.[latestIdx]?.id ?? String(latestIdx);
+  console.log(`  [AU] povertyRate (OECD relative): ${val}% (${period})`);
+  return [record('AU', 'povertyRate', val, '% below 50% of median income (OECD relative poverty)',
+    period,
+    'OECD — Relative poverty rate, Income Distribution Database (IDD)',
+    'https://stats.oecd.org/Index.aspx?DataSetCode=IDD')];
+}
+
 // ─── AU: ABS SDMX-JSON — CPI and labour force ────────────────────────────────
 
 async function fetchABSData() {
@@ -518,6 +620,15 @@ async function main() {
 
   console.log('\n[UK] ONS — CPI inflation + unemployment');
   try { allRecords.push(...await fetchONSTimeseries()); } catch (e) { console.error(`  [UK] ONS error: ${e.message}`); }
+
+  console.log('\n[AU] RBA F1 — Cash Rate Target');
+  try { allRecords.push(...await fetchAUBankRate()); } catch (e) { console.error(`  [AU] RBA bank rate error: ${e.message}`); }
+
+  console.log('\n[AU] OECD HPI — Residential House Price Index');
+  try { allRecords.push(...await fetchAUHousePrices()); } catch (e) { console.error(`  [AU] OECD HPI error: ${e.message}`); }
+
+  console.log('\n[AU] OECD IDD — relative poverty rate');
+  try { allRecords.push(...await fetchAUPovertyRate()); } catch (e) { console.error(`  [AU] OECD poverty error: ${e.message}`); }
 
   console.log('\n[AU] ABS — CPI inflation + unemployment rate');
   try { allRecords.push(...await fetchABSData()); } catch (e) { console.error(`  [AU] ABS error: ${e.message}`); }
