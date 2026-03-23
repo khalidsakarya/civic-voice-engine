@@ -422,6 +422,99 @@ async function fetchCANHPI() {
     'https://www150.statcan.gc.ca/t1/tbl1/en/tv.action?pid=1810020501')];
 }
 
+// ─── CA: StatCan — Gini coefficient of after-tax income (table 11-10-0134-01) ─
+
+async function fetchCAGiniCoefficient() {
+  // 14 KB ZIP (compressedSize=0 in local header — inflateRaw handles trailing ZIP bytes fine).
+  // Income concept "Adjusted after-tax income" is the standard headline Gini for Canada.
+  const resp = await axios.get(
+    'https://www150.statcan.gc.ca/n1/tbl/csv/11100134-eng.zip',
+    { responseType: 'arraybuffer', timeout: 30000, headers: { 'User-Agent': BROWSER_UA } }
+  );
+  const buf = Buffer.from(resp.data);
+  if (buf.readUInt32LE(0) !== 0x04034b50) throw new Error('StatCan Gini: not a ZIP file');
+  const fnLen    = buf.readUInt16LE(26);
+  const extLen   = buf.readUInt16LE(28);
+  const compSize = buf.readUInt32LE(18);
+  const dataStart = 30 + fnLen + extLen;
+  // compSize=0 → streaming ZIP; slice to end of buffer (inflateRaw ignores trailing ZIP metadata)
+  const compressed = buf.slice(dataStart, compSize > 0 ? dataStart + compSize : undefined);
+  const csv = (await inflateRaw(compressed)).toString('utf-8').replace(/^\uFEFF/, '');
+
+  const lines  = csv.split('\n');
+  const header = parseCSVLine(lines[0]);
+  const colIdx = {
+    date:    header.findIndex(c => c === 'REF_DATE'),
+    geo:     header.findIndex(c => c === 'GEO'),
+    concept: header.findIndex(c => c.includes('Income concept')),
+    value:   header.findIndex(c => c === 'VALUE'),
+  };
+
+  let bestDate = '', bestValue = null;
+  for (let i = 1; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (!line || !line.includes('Canada') || !line.includes('after-tax')) continue;
+    const cols = parseCSVLine(line);
+    if (cols[colIdx.geo] !== 'Canada') continue;
+    if (cols[colIdx.concept] !== 'Adjusted after-tax income') continue;
+    const val = cols[colIdx.value], date = cols[colIdx.date];
+    if (!val || val === '..' || !date) continue;
+    if (date > bestDate) { bestDate = date; bestValue = parseFloat(val); }
+  }
+
+  if (bestValue === null) throw new Error('StatCan Gini: no Canada after-tax value found');
+  console.log(`  [CA] giniCoefficient (StatCan after-tax): ${bestValue} (${bestDate})`);
+  return [record('CA', 'giniCoefficient', bestValue,
+    'Gini coefficient (adjusted after-tax income, Canada)',
+    bestDate,
+    'Statistics Canada — Gini coefficients of market, total and after-tax income, table 11-10-0134-01',
+    'https://www150.statcan.gc.ca/t1/tbl1/en/tv.action?pid=1110013401')];
+}
+
+// ─── CA: Open Government Portal — federal minimum wage (canada.ca data) ───────
+
+async function fetchCAMinWage() {
+  // Open Government Portal CSV — historical general minimum wage rates, jurisdiction "FJ" = Federal
+  // Effective Date format: "DD-Mon-YY" e.g. "01-Apr-25"
+  const MONTH_MAP = { Jan:'01', Feb:'02', Mar:'03', Apr:'04', May:'05', Jun:'06',
+                      Jul:'07', Aug:'08', Sep:'09', Oct:'10', Nov:'11', Dec:'12' };
+
+  const resp = await axios.get(
+    'https://open.canada.ca/data/dataset/390ee890-59bb-4f34-a37c-9732781ef8a0/resource/2ddfbfd4-8347-467d-b6d5-797c5421f4fb/download/general-historical-minimum-wage.csv',
+    { timeout: 15000, headers: { 'User-Agent': BROWSER_UA } }
+  );
+
+  const lines = String(resp.data).replace(/^\uFEFF/, '').trim().split('\n');
+  // header: Jurisdiction,Effective Date,Minimum Wage,Note
+  const header = parseCSVLine(lines[0]);
+  const colJur  = header.indexOf('Jurisdiction');
+  const colDate = header.findIndex(c => c.includes('Effective'));
+  const colWage = header.findIndex(c => c.includes('Minimum Wage') || c.includes('Minimum wage'));
+
+  let bestDate = '', bestVal = null;
+  for (let i = 1; i < lines.length; i++) {
+    const cols = parseCSVLine(lines[i].trim());
+    if (cols[colJur] !== 'FJ') continue;                           // Federal Jurisdiction only
+    const rawWage = cols[colWage]?.replace(/[$ ]/g, '');           // "$17.75" → "17.75"
+    if (!rawWage || rawWage === 'NA' || isNaN(parseFloat(rawWage))) continue;
+    const rawDate = cols[colDate]?.trim();                         // "01-Apr-25"
+    if (!rawDate || !rawDate.includes('-')) continue;
+    const [dd, mon, yy] = rawDate.split('-');
+    const yyInt = parseInt(yy);
+    const yyyy  = yyInt >= 50 ? 1900 + yyInt : 2000 + yyInt; // 65→1965, 86→1986, 25→2025
+    const isoDate = `${yyyy}-${MONTH_MAP[mon] ?? '??'}-${dd.padStart(2,'0')}`;
+    if (isoDate > bestDate) { bestDate = isoDate; bestVal = parseFloat(rawWage); }
+  }
+
+  if (bestVal === null) throw new Error('CA MinWage: no Federal Jurisdiction rate found');
+  console.log(`  [CA] minWageGap (federal min wage): $${bestVal}/hr (${bestDate})`);
+  return [record('CA', 'minWageGap', bestVal,
+    'CAD $/hour (federal minimum wage, Canada Labour Code)',
+    bestDate,
+    'Employment and Social Development Canada — Federal Minimum Wage (Open Government Portal)',
+    'https://open.canada.ca/data/en/dataset/390ee890-59bb-4f34-a37c-9732781ef8a0')];
+}
+
 // ─── CA: Bank of Canada Valet — CPIX YoY inflation ───────────────────────────
 
 async function fetchCACpiInflation() {
@@ -775,6 +868,12 @@ async function main() {
 
   console.log('\n[CA] StatCan NHPI — new housing price index (table 18-10-0205-01)');
   try { allRecords.push(...await fetchCANHPI()); } catch (e) { console.error(`  [CA] StatCan NHPI error: ${e.message}`); }
+
+  console.log('\n[CA] StatCan — Gini coefficient of after-tax income (table 11-10-0134-01)');
+  try { allRecords.push(...await fetchCAGiniCoefficient()); } catch (e) { console.error(`  [CA] StatCan Gini error: ${e.message}`); }
+
+  console.log('\n[CA] Open Government Portal — federal minimum wage');
+  try { allRecords.push(...await fetchCAMinWage()); } catch (e) { console.error(`  [CA] CA MinWage error: ${e.message}`); }
 
   console.log('\n[CA] Bank of Canada Valet — CPIX inflation (ATOM_V41693242)');
   try { allRecords.push(...await fetchCACpiInflation()); } catch (e) { console.error(`  [CA] BoC CPIX error: ${e.message}`); }

@@ -1084,6 +1084,36 @@ const CANONICAL_STAT_DEFS = {
           liveKey: 'povertyRate' },
   },
 
+  giniCoefficient: {
+    CA: { source: 'Statistics Canada — Gini coefficients of market, total and after-tax income, table 11-10-0134-01',
+          sourceUrl: 'https://www150.statcan.gc.ca/t1/tbl1/en/tv.action?pid=1110013401',
+          liveKey: 'giniCoefficient' },
+    US: { source: 'U.S. Census Bureau — Income and Poverty in the United States',
+          sourceUrl: 'https://www.census.gov/library/publications/2024/demo/p60-282.html',
+          liveKey: null },
+    UK: { source: 'Office for National Statistics — Household income inequality, UK',
+          sourceUrl: 'https://www.ons.gov.uk/peoplepopulationandcommunity/personalandhouseholdfinances/incomeandwealth/bulletins/householdincomeinequalityfinancial/financialyearending2023',
+          liveKey: null },
+    AU: { source: 'Australian Bureau of Statistics — Household Income and Wealth, Australia',
+          sourceUrl: 'https://www.abs.gov.au/statistics/economy/finance/household-income-and-wealth-australia',
+          liveKey: null },
+  },
+
+  minWageGap: {
+    CA: { source: 'Employment and Social Development Canada — Federal Minimum Wage (Open Government Portal)',
+          sourceUrl: 'https://open.canada.ca/data/en/dataset/390ee890-59bb-4f34-a37c-9732781ef8a0',
+          liveKey: 'minWageGap' },
+    US: { source: 'U.S. Department of Labor — Federal Minimum Wage',
+          sourceUrl: 'https://www.dol.gov/agencies/whd/minimum-wage/history',
+          liveKey: null },
+    UK: { source: 'GOV.UK — National Minimum Wage and National Living Wage rates',
+          sourceUrl: 'https://www.gov.uk/national-minimum-wage-rates',
+          liveKey: null },
+    AU: { source: 'Fair Work Commission — National Minimum Wage',
+          sourceUrl: 'https://www.fairwork.gov.au/pay-and-wages/minimum-wages',
+          liveKey: null },
+  },
+
   federalAgencySpending: {
     CA: { source: 'Treasury Board of Canada Secretariat — GC InfoBase',
           sourceUrl: 'https://www.tbs-sct.canada.ca/ems-sgd/edb-bdd/index-eng.html',
