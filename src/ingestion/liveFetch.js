@@ -16,9 +16,12 @@
  */
 
 require('dotenv').config();
-const axios = require('axios');
-const fs    = require('fs');
-const path  = require('path');
+const axios  = require('axios');
+const fs     = require('fs');
+const path   = require('path');
+const zlib   = require('zlib');
+const { promisify } = require('util');
+const inflateRaw = promisify(zlib.inflateRaw);
 
 const OUTPUT_DIR = path.resolve(__dirname, '../../output/socialstats');
 const TIMEOUT_MS = 25000;
@@ -26,6 +29,20 @@ const BROWSER_UA = 'Mozilla/5.0 (compatible; CivicBot/1.0)';
 const FETCHED_AT = new Date().toISOString();
 
 const safeNum = v => { const n = parseFloat(String(v ?? '').replace(/,/g, '')); return isNaN(n) ? null : n; };
+
+// ─── CSV helper ────────────────────────────────────────────────────────────────
+
+function parseCSVLine(line) {
+  const fields = [];
+  let cur = '', inQ = false;
+  for (const c of line) {
+    if (c === '"') { inQ = !inQ; }
+    else if (c === ',' && !inQ) { fields.push(cur); cur = ''; }
+    else { cur += c; }
+  }
+  fields.push(cur);
+  return fields;
+}
 
 // ─── Record builder ────────────────────────────────────────────────────────────
 
@@ -216,22 +233,193 @@ async function fetchUSASpending() {
   return [];
 }
 
-// ─── CA: World Bank — unemployment rate (ILO modeled) ────────────────────────
+// ─── CA: StatCan LFS — unemployment rate (table 14-10-0017-01, streaming ZIP) ─
 
-async function fetchCAUnemployment() {
+async function fetchCALFS() {
+  // Table 14-10-0017-01: Labour force characteristics by province/territory,
+  // three-month moving average, seasonally adjusted. 54 MB ZIP.
+  // Streams the ZIP to avoid loading the full decompressed CSV (~500 MB) into memory.
+  // Reads compressed-size from the local file header so we feed inflateRaw only the
+  // exact compressed bytes and cleanly end the stream, avoiding spurious zlib errors
+  // from the ZIP central directory that follows.
+  const resp = await axios({
+    method: 'GET',
+    url: 'https://www150.statcan.gc.ca/n1/tbl/csv/14100017-eng.zip',
+    responseType: 'stream',
+    timeout: 120000,
+    headers: { 'User-Agent': BROWSER_UA },
+  });
+
+  return new Promise((resolve, reject) => {
+    const source   = resp.data;
+    const inflater = zlib.createInflateRaw();
+
+    let zipBuf         = Buffer.alloc(0);
+    let zipHeaderDone  = false;
+    let compressedSize = 0;
+    let bytesWritten   = 0;
+    let lineBuffer     = '';
+    let csvHeader      = null;
+    let colIdx         = {};
+    let bestDate = '', bestValue = null;
+    let finished = false;
+
+    function finish(err) {
+      if (finished) return;
+      finished = true;
+      source.destroy();
+      if (err) return reject(err);
+      if (bestValue !== null) {
+        console.log(`  [CA] unemploymentRate (StatCan LFS): ${bestValue}% (${bestDate})`);
+        resolve([record('CA', 'unemploymentRate', bestValue,
+          '% (3-month moving average, seasonally adjusted)',
+          bestDate,
+          'Statistics Canada — Labour Force Survey, table 14-10-0017-01',
+          'https://www150.statcan.gc.ca/t1/tbl1/en/tv.action?pid=1410001701')]);
+      } else {
+        reject(new Error('StatCan LFS: no Canada unemployment rate found in stream'));
+      }
+    }
+
+    function processCSVChunk(chunk) {
+      lineBuffer += chunk.toString('utf-8');
+      const lines = lineBuffer.split('\n');
+      lineBuffer = lines.pop(); // hold incomplete last line
+      for (const rawLine of lines) {
+        const line = rawLine.trim();
+        if (!line) continue;
+        if (!csvHeader) {
+          csvHeader = line;
+          const cols = parseCSVLine(line.replace(/^\uFEFF/, ''));
+          colIdx = {
+            date:   cols.findIndex(c => c === 'REF_DATE'),
+            geo:    cols.findIndex(c => c === 'GEO'),
+            chars:  cols.findIndex(c => c.includes('Labour force characteristics')),
+            gender: cols.findIndex(c => c === 'Gender' || c === 'Sex'),
+            age:    cols.findIndex(c => c === 'Age group'),
+            value:  cols.findIndex(c => c === 'VALUE'),
+          };
+          continue;
+        }
+        // Quick substring pre-filter before full CSV parse
+        if (!line.includes('Canada')) continue;
+        if (!line.includes('Unemployment rate')) continue;
+        if (!line.includes('15 years and over')) continue;
+        const cols = parseCSVLine(line);
+        if (cols[colIdx.geo] !== 'Canada') continue;
+        if (!cols[colIdx.chars]?.includes('Unemployment rate')) continue;
+        const gender = cols[colIdx.gender];
+        if (gender !== 'Total - Gender' && gender !== 'Both sexes') continue;
+        if (cols[colIdx.age] !== '15 years and over') continue;
+        const val  = cols[colIdx.value];
+        const date = cols[colIdx.date];
+        if (!val || val === '..' || !date) continue;
+        if (date > bestDate) { bestDate = date; bestValue = parseFloat(val); }
+      }
+    }
+
+    inflater.on('data', chunk => processCSVChunk(chunk));
+    inflater.on('end',  () => finish(null));
+    inflater.on('error', err => finish(null)); // error after DEFLATE end = ZIP metadata bytes; use whatever we found
+
+    source.on('data', chunk => {
+      if (finished) return;
+
+      // Once ZIP header is parsed, feed bytes to inflater
+      if (zipHeaderDone) {
+        if (compressedSize > 0) {
+          // Known size: feed exactly compressedSize bytes then end cleanly
+          const remaining = compressedSize - bytesWritten;
+          if (remaining <= 0) return;
+          const toWrite = chunk.length <= remaining ? chunk : chunk.slice(0, remaining);
+          inflater.write(toWrite);
+          bytesWritten += toWrite.length;
+          if (bytesWritten >= compressedSize) inflater.end();
+        } else {
+          // compressedSize=0 (streaming/data-descriptor ZIP): feed until inflater errors
+          inflater.write(chunk);
+          bytesWritten += chunk.length;
+        }
+        return;
+      }
+
+      // Buffer until we have enough bytes to parse the ZIP local file header
+      zipBuf = Buffer.concat([zipBuf, chunk]);
+      if (zipBuf.length < 30) return;
+
+      if (zipBuf.readUInt32LE(0) !== 0x04034b50) { finish(new Error('StatCan LFS: not a ZIP file')); return; }
+      const fnLen    = zipBuf.readUInt16LE(26);
+      const extLen   = zipBuf.readUInt16LE(28);
+      compressedSize = zipBuf.readUInt32LE(18); // 0 = streaming ZIP with data descriptor
+      const dataStart = 30 + fnLen + extLen;
+      if (zipBuf.length < dataStart) return; // wait for more data
+
+      zipHeaderDone = true;
+      const initial   = zipBuf.slice(dataStart);
+      zipBuf = null;
+
+      if (compressedSize > 0) {
+        const toWrite = initial.length <= compressedSize ? initial : initial.slice(0, compressedSize);
+        inflater.write(toWrite);
+        bytesWritten += toWrite.length;
+        if (bytesWritten >= compressedSize) inflater.end();
+      } else {
+        // Streaming ZIP: feed all initial bytes; subsequent chunks handled above
+        inflater.write(initial);
+        bytesWritten += initial.length;
+      }
+    });
+
+    source.on('end',   () => { if (!finished && zipHeaderDone) inflater.end(); else finish(new Error('Stream ended before ZIP header')); });
+    source.on('error', err => finish(err));
+  });
+}
+
+// ─── CA: StatCan NHPI — New Housing Price Index (table 18-10-0205-01, 344 KB ZIP) ─
+
+async function fetchCANHPI() {
+  // 344 KB ZIP → 9.3 MB CSV. Downloaded in full and inflated in memory.
   const resp = await axios.get(
-    'https://api.worldbank.org/v2/country/CA/indicator/SL.UEM.TOTL.ZS?format=json&mrv=3',
-    { timeout: TIMEOUT_MS }
+    'https://www150.statcan.gc.ca/n1/tbl/csv/18100205-eng.zip',
+    { responseType: 'arraybuffer', timeout: 30000, headers: { 'User-Agent': BROWSER_UA } }
   );
-  const rows = (resp.data[1] ?? []).filter(d => d.value != null);
-  if (rows.length === 0) throw new Error('World Bank: no unemployment data for CA');
-  const latest = rows[0]; // already sorted most-recent first
-  const val    = safeNum(latest.value);
-  console.log(`  [CA] unemploymentRate: ${val}% (${latest.date} ILO modeled)`);
-  return [record('CA', 'unemploymentRate', val, '% of labour force (ILO modeled estimate)',
-    String(latest.date),
-    'World Bank — ILO modeled unemployment estimate for Canada (SL.UEM.TOTL.ZS)',
-    'https://api.worldbank.org/v2/country/CA/indicator/SL.UEM.TOTL.ZS')];
+  const buf = Buffer.from(resp.data);
+  if (buf.readUInt32LE(0) !== 0x04034b50) throw new Error('StatCan NHPI: not a ZIP file');
+  const fnLen      = buf.readUInt16LE(26);
+  const extLen     = buf.readUInt16LE(28);
+  const compSize   = buf.readUInt32LE(18);
+  const dataStart  = 30 + fnLen + extLen;
+  const compressed = buf.slice(dataStart, compSize > 0 ? dataStart + compSize : undefined);
+  const csv        = (await inflateRaw(compressed)).toString('utf-8');
+
+  const lines  = csv.replace(/^\uFEFF/, '').split('\n');
+  const header = parseCSVLine(lines[0]);
+  const colIdx = {
+    date:  header.findIndex(c => c === 'REF_DATE'),
+    geo:   header.findIndex(c => c === 'GEO'),
+    index: header.findIndex(c => c.includes('New housing price indexes')),
+    value: header.findIndex(c => c === 'VALUE'),
+  };
+
+  let bestDate = '', bestValue = null;
+  for (let i = 1; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (!line || !line.includes('Canada') || !line.includes('Total')) continue;
+    const cols = parseCSVLine(line);
+    if (cols[colIdx.geo] !== 'Canada') continue;
+    if (!cols[colIdx.index]?.includes('Total (house and land)')) continue;
+    const val  = cols[colIdx.value];
+    const date = cols[colIdx.date];
+    if (!val || val === '..' || !date) continue;
+    if (date > bestDate) { bestDate = date; bestValue = parseFloat(val); }
+  }
+
+  if (bestValue === null) throw new Error('StatCan NHPI: no Canada total value found');
+  console.log(`  [CA] medianHomeValue (StatCan NHPI): ${bestValue} (${bestDate})`);
+  return [record('CA', 'medianHomeValue', bestValue, 'New Housing Price Index (Canada, Dec 2016=100)',
+    bestDate,
+    'Statistics Canada — New Housing Price Index, table 18-10-0205-01',
+    'https://www150.statcan.gc.ca/t1/tbl1/en/tv.action?pid=1810020501')];
 }
 
 // ─── CA: Bank of Canada Valet — CPIX YoY inflation ───────────────────────────
@@ -582,8 +770,11 @@ async function main() {
   console.log('[CA] Bank of Canada Valet — exchange rates & interest rates');
   try { allRecords.push(...await fetchBoCRates()); } catch (e) { console.error(`  [CA] BoC fetch error: ${e.message}`); }
 
-  console.log('\n[CA] World Bank ILO — unemployment rate');
-  try { allRecords.push(...await fetchCAUnemployment()); } catch (e) { console.error(`  [CA] WB unemployment error: ${e.message}`); }
+  console.log('\n[CA] StatCan LFS — unemployment rate (table 14-10-0017-01, streaming ZIP)');
+  try { allRecords.push(...await fetchCALFS()); } catch (e) { console.error(`  [CA] StatCan LFS error: ${e.message}`); }
+
+  console.log('\n[CA] StatCan NHPI — new housing price index (table 18-10-0205-01)');
+  try { allRecords.push(...await fetchCANHPI()); } catch (e) { console.error(`  [CA] StatCan NHPI error: ${e.message}`); }
 
   console.log('\n[CA] Bank of Canada Valet — CPIX inflation (ATOM_V41693242)');
   try { allRecords.push(...await fetchCACpiInflation()); } catch (e) { console.error(`  [CA] BoC CPIX error: ${e.message}`); }

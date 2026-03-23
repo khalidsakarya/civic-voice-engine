@@ -980,8 +980,8 @@ const CANONICAL_COUNTRIES = ['CA', 'US', 'UK', 'AU'];
 const CANONICAL_STAT_DEFS = {
 
   unemploymentRate: {
-    CA: { source: 'World Bank — ILO modeled unemployment estimate for Canada (SL.UEM.TOTL.ZS)',
-          sourceUrl: 'https://api.worldbank.org/v2/country/CA/indicator/SL.UEM.TOTL.ZS',
+    CA: { source: 'Statistics Canada — Labour Force Survey, table 14-10-0017-01',
+          sourceUrl: 'https://www150.statcan.gc.ca/t1/tbl1/en/tv.action?pid=1410001701',
           liveKey: 'unemploymentRate' },
     US: { source: 'Bureau of Labor Statistics — CPS series LNS14000000',
           sourceUrl: 'https://api.bls.gov/publicAPI/v1/timeseries/data/LNS14000000',
@@ -1010,9 +1010,9 @@ const CANONICAL_STAT_DEFS = {
   },
 
   medianHomeValue: {
-    CA: { source: 'Canada Mortgage and Housing Corporation — Housing Market Statistics',
-          sourceUrl: 'https://www.cmhc-schl.gc.ca/professionals/housing-markets-data-and-research',
-          liveKey: null },
+    CA: { source: 'Statistics Canada — New Housing Price Index, table 18-10-0205-01',
+          sourceUrl: 'https://www150.statcan.gc.ca/t1/tbl1/en/tv.action?pid=1810020501',
+          liveKey: 'medianHomeValue' },
     US: { source: 'U.S. Census Bureau — ACS 1-Year Estimates',
           sourceUrl: 'https://api.census.gov/data/2024/acs/acs1/profile',
           liveKey: 'medianHomeValue' },
