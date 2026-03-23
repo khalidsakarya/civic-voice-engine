@@ -285,6 +285,99 @@ async function fetchCAPovertyRate() {
     'https://stats.oecd.org/Index.aspx?DataSetCode=IDD')];
 }
 
+// ─── UK: HM Land Registry — average house price (UK HPI linked data) ─────────
+
+async function fetchUKHousePrices() {
+  // Linked Data API: sort by refMonth desc, take first item (latest month)
+  const resp = await axios.get(
+    'https://landregistry.data.gov.uk/data/ukhpi/region/united-kingdom/month.json?_pageSize=1&_sort=-refMonth',
+    { timeout: TIMEOUT_MS, headers: { 'User-Agent': BROWSER_UA, Accept: 'application/json' } }
+  );
+  const item = (resp.data?.result?.items ?? [])[0];
+  if (!item) throw new Error('LR HPI: no items returned');
+  const price = item.averagePrice ?? item.averagePriceSA;
+  if (price == null) throw new Error('LR HPI: no averagePrice in response');
+  // refMonth is a URI like "http://…/month/2025-12" — extract the date part
+  const about = item['_about'] ?? '';
+  const monthMatch = about.match(/(\d{4}-\d{2})$/);
+  const period = monthMatch ? monthMatch[1] : null;
+  console.log(`  [UK] medianHomeValue (avg): £${Number(price).toLocaleString()} (${period})`);
+  return [record('UK', 'medianHomeValue', safeNum(price), 'GBP (UK average house price, LR HPI)',
+    period,
+    'HM Land Registry — UK House Price Index, average price (England & Wales)',
+    'https://landregistry.data.gov.uk/data/ukhpi/region/united-kingdom/month.json?_sort=-refMonth')];
+}
+
+// ─── UK: Bank of England — Official Bank Rate ─────────────────────────────────
+
+async function fetchUKBankRate() {
+  // BoE IADB statistical API returns CSV: "DATE,IUDBEDR\n02 Jan 2026,3.75\n..."
+  const resp = await axios.get(
+    'https://www.bankofengland.co.uk/boeapps/database/_iadb-FromShowColumns.asp?csv.x=yes&Datefrom=01/Jan/2025&Dateto=now&SeriesCodes=IUDBEDR&CSVF=TT&UsingCodes=Y',
+    { timeout: TIMEOUT_MS, headers: { 'User-Agent': BROWSER_UA } }
+  );
+  const lines = String(resp.data).trim().split('\n')
+    .map(l => l.trim())
+    .filter(l => l && !l.startsWith('SERIES') && !l.startsWith('DATE') && !l.startsWith('DESCR') && l.includes(','));
+  if (lines.length === 0) throw new Error('BoE: no data rows in CSV');
+  const lastLine = lines[lines.length - 1];
+  const [dateStr, rateStr] = lastLine.split(',');
+  const val = safeNum(rateStr);
+  if (val == null) throw new Error('BoE: could not parse rate from: ' + lastLine);
+  console.log(`  [UK] bankRate: ${val}% (${dateStr?.trim()})`);
+  return [record('UK', 'bankRate', val, '% per annum (Official Bank Rate)',
+    dateStr?.trim() ?? null,
+    'Bank of England — Official Bank Rate, series IUDBEDR',
+    'https://www.bankofengland.co.uk/boeapps/database/_iadb-FromShowColumns.asp?SeriesCodes=IUDBEDR')];
+}
+
+// ─── UK: ONS IPHRP — private rental price index ───────────────────────────────
+
+async function fetchUKPrivateRentalIndex() {
+  // L522 = Index of Private Housing Rental Prices (UK, 2015=100)
+  // Note: this is an index, not a GBP value — no GBP-denominated median is
+  // available via open API (ONS publishes median rents in Excel bulletins only)
+  const resp = await axios.get(
+    'https://www.ons.gov.uk/economy/inflationandpriceindices/timeseries/l522/data',
+    { timeout: TIMEOUT_MS, headers: { 'User-Agent': BROWSER_UA, Accept: 'application/json' } }
+  );
+  const months = (resp.data?.months ?? []).sort((a, b) => b.date.localeCompare(a.date));
+  const latest = months[0];
+  if (!latest) throw new Error('ONS IPHRP: no monthly data in L522');
+  const val = safeNum(latest.value);
+  console.log(`  [UK] medianGrossRent (IPHRP index): ${val} (${latest.date})`);
+  return [record('UK', 'medianGrossRent', val, 'Private Rental Price Index (UK, 2015=100)',
+    latest.date,
+    'Office for National Statistics — Index of Private Housing Rental Prices (IPHRP), series L522',
+    'https://www.ons.gov.uk/economy/inflationandpriceindices/timeseries/l522/data')];
+}
+
+// ─── UK: OECD IDD — relative poverty rate ─────────────────────────────────────
+
+async function fetchUKPovertyRate() {
+  const resp = await axios.get(
+    'https://stats.oecd.org/sdmx-json/data/IDD/GBR.POVERTY_RATE50_WG.TOTAL.AGEHD.D_CUR/all?lastNObservations=5',
+    { timeout: TIMEOUT_MS }
+  );
+  const ds     = resp.data.data?.dataSets?.[0];
+  const struct = resp.data.data?.structures?.[0];
+  const tDim   = struct?.dimensions?.observation?.[0];
+  if (!ds) throw new Error('OECD IDD GBR: no dataSets');
+  const firstSeries = Object.values(ds.series ?? {})[0];
+  if (!firstSeries) throw new Error('OECD IDD GBR: no series');
+  const obs       = firstSeries.observations ?? {};
+  const sortedIdx = Object.keys(obs).map(Number).sort((a, b) => b - a);
+  const latestIdx = sortedIdx.find(i => obs[i]?.[0] != null);
+  if (latestIdx === undefined) throw new Error('OECD IDD GBR: all observations null');
+  const val    = safeNum(obs[latestIdx][0]);
+  const period = tDim?.values?.[latestIdx]?.id ?? String(latestIdx);
+  console.log(`  [UK] povertyRate (OECD relative): ${val}% (${period})`);
+  return [record('UK', 'povertyRate', val, '% below 50% of median income (OECD relative poverty)',
+    period,
+    'OECD — Relative poverty rate, Income Distribution Database (IDD)',
+    'https://stats.oecd.org/Index.aspx?DataSetCode=IDD')];
+}
+
 // ─── UK: ONS timeseries — CPI and unemployment ────────────────────────────────
 
 async function fetchONSTimeseries() {
@@ -410,6 +503,18 @@ async function main() {
 
   console.log('\n[US] USAspending — federal agency spending FY2025');
   try { allRecords.push(...await fetchUSASpending()); } catch (e) { console.error(`  [US] USAspending error: ${e.message}`); }
+
+  console.log('\n[UK] HM Land Registry — average house price');
+  try { allRecords.push(...await fetchUKHousePrices()); } catch (e) { console.error(`  [UK] LR HPI error: ${e.message}`); }
+
+  console.log('\n[UK] Bank of England — Official Bank Rate');
+  try { allRecords.push(...await fetchUKBankRate()); } catch (e) { console.error(`  [UK] BoE rate error: ${e.message}`); }
+
+  console.log('\n[UK] ONS IPHRP — private rental price index (L522)');
+  try { allRecords.push(...await fetchUKPrivateRentalIndex()); } catch (e) { console.error(`  [UK] ONS rental error: ${e.message}`); }
+
+  console.log('\n[UK] OECD IDD — relative poverty rate');
+  try { allRecords.push(...await fetchUKPovertyRate()); } catch (e) { console.error(`  [UK] OECD poverty error: ${e.message}`); }
 
   console.log('\n[UK] ONS — CPI inflation + unemployment');
   try { allRecords.push(...await fetchONSTimeseries()); } catch (e) { console.error(`  [UK] ONS error: ${e.message}`); }
