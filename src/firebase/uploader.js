@@ -980,9 +980,9 @@ const CANONICAL_COUNTRIES = ['CA', 'US', 'UK', 'AU'];
 const CANONICAL_STAT_DEFS = {
 
   unemploymentRate: {
-    CA: { source: 'Statistics Canada — Labour Force Survey',
-          sourceUrl: 'https://www150.statcan.gc.ca/t1/tbl1/en/tv.action?pid=1410028703',
-          liveKey: null },  // not in live_fetch — null
+    CA: { source: 'World Bank — ILO modeled unemployment estimate for Canada (SL.UEM.TOTL.ZS)',
+          sourceUrl: 'https://api.worldbank.org/v2/country/CA/indicator/SL.UEM.TOTL.ZS',
+          liveKey: 'unemploymentRate' },
     US: { source: 'Bureau of Labor Statistics — CPS series LNS14000000',
           sourceUrl: 'https://api.bls.gov/publicAPI/v1/timeseries/data/LNS14000000',
           liveKey: 'unemploymentRate' },
@@ -995,9 +995,9 @@ const CANONICAL_STAT_DEFS = {
   },
 
   cpiInflation: {
-    CA: { source: 'Statistics Canada — Consumer Price Index',
-          sourceUrl: 'https://www150.statcan.gc.ca/t1/tbl1/en/tv.action?pid=1810000401',
-          liveKey: null },
+    CA: { source: 'Bank of Canada — CPIX YoY (excludes 8 volatile components), series ATOM_V41693242',
+          sourceUrl: 'https://www.bankofcanada.ca/valet/observations/ATOM_V41693242/json',
+          liveKey: 'cpiInflation' },
     US: { source: 'Bureau of Labor Statistics — CPI All Items seasonally adjusted (index 1982-84=100)',
           sourceUrl: 'https://api.bls.gov/publicAPI/v1/timeseries/data/CUSR0000SA0',
           liveKey: 'cpiAllItems' },
@@ -1070,9 +1070,9 @@ const CANONICAL_STAT_DEFS = {
   },
 
   povertyRate: {
-    CA: { source: 'Statistics Canada — Canadian Income Survey',
-          sourceUrl: 'https://www150.statcan.gc.ca/t1/tbl1/en/tv.action?pid=1110013501',
-          liveKey: null },
+    CA: { source: 'OECD — Relative poverty rate, Income Distribution Database (IDD)',
+          sourceUrl: 'https://stats.oecd.org/Index.aspx?DataSetCode=IDD',
+          liveKey: 'povertyRate' },
     US: { source: 'U.S. Census Bureau — ACS 1-Year Estimates',
           sourceUrl: 'https://api.census.gov/data/2024/acs/acs1/profile',
           liveKey: 'povertyRate' },

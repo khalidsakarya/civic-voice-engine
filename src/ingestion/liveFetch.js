@@ -216,6 +216,75 @@ async function fetchUSASpending() {
   return [];
 }
 
+// ─── CA: World Bank — unemployment rate (ILO modeled) ────────────────────────
+
+async function fetchCAUnemployment() {
+  const resp = await axios.get(
+    'https://api.worldbank.org/v2/country/CA/indicator/SL.UEM.TOTL.ZS?format=json&mrv=3',
+    { timeout: TIMEOUT_MS }
+  );
+  const rows = (resp.data[1] ?? []).filter(d => d.value != null);
+  if (rows.length === 0) throw new Error('World Bank: no unemployment data for CA');
+  const latest = rows[0]; // already sorted most-recent first
+  const val    = safeNum(latest.value);
+  console.log(`  [CA] unemploymentRate: ${val}% (${latest.date} ILO modeled)`);
+  return [record('CA', 'unemploymentRate', val, '% of labour force (ILO modeled estimate)',
+    String(latest.date),
+    'World Bank — ILO modeled unemployment estimate for Canada (SL.UEM.TOTL.ZS)',
+    'https://api.worldbank.org/v2/country/CA/indicator/SL.UEM.TOTL.ZS')];
+}
+
+// ─── CA: Bank of Canada Valet — CPIX YoY inflation ───────────────────────────
+
+async function fetchCACpiInflation() {
+  // ATOM_V41693242 = CPI excluding 8 most volatile components, % change YoY (unadjusted)
+  const resp = await axios.get(
+    'https://www.bankofcanada.ca/valet/observations/ATOM_V41693242/json?recent=3',
+    { timeout: TIMEOUT_MS }
+  );
+  const obs    = resp.data?.observations ?? [];
+  const sorted = [...obs].sort((a, b) => b.d.localeCompare(a.d));
+  const latest = sorted[0];
+  const val    = safeNum(latest?.['ATOM_V41693242']?.v);
+  if (val == null) throw new Error('BoC CPIX: no value in response');
+  console.log(`  [CA] cpiInflation (CPIX): ${val}% (${latest.d})`);
+  return [record('CA', 'cpiInflation', val, '% YoY (CPI excluding volatile components)',
+    latest.d,
+    'Bank of Canada — CPIX YoY (excludes 8 volatile components), series ATOM_V41693242',
+    'https://www.bankofcanada.ca/valet/observations/ATOM_V41693242/json')];
+}
+
+// ─── CA: OECD IDD — relative poverty rate ─────────────────────────────────────
+
+async function fetchCAPovertyRate() {
+  // IDD = Income Distribution Database
+  // POVERTY_RATE50_WG = poverty at 50% median income threshold, working-age groups
+  const resp = await axios.get(
+    'https://stats.oecd.org/sdmx-json/data/IDD/CAN.POVERTY_RATE50_WG.TOTAL.AGEHD.D_CUR/all?lastNObservations=3',
+    { timeout: TIMEOUT_MS }
+  );
+  const ds     = resp.data.data?.dataSets?.[0];
+  const struct = resp.data.data?.structures?.[0];
+  const tDim   = struct?.dimensions?.observation?.[0];
+  if (!ds) throw new Error('OECD IDD: no dataSets in response');
+
+  // Find obs with a non-null value, prefer latest by key index (highest = most recent)
+  const firstSeries = Object.values(ds.series ?? {})[0];
+  if (!firstSeries) throw new Error('OECD IDD: no series found');
+  const obs        = firstSeries.observations ?? {};
+  const sortedIdx  = Object.keys(obs).map(Number).sort((a, b) => b - a);
+  const latestIdx  = sortedIdx.find(i => obs[i]?.[0] != null);
+  if (latestIdx === undefined) throw new Error('OECD IDD: all observations are null');
+
+  const val    = safeNum(obs[latestIdx][0]);
+  const period = tDim?.values?.[latestIdx]?.id ?? String(latestIdx);
+  console.log(`  [CA] povertyRate (OECD relative): ${val}% (${period})`);
+  return [record('CA', 'povertyRate', val, '% below 50% of median income (OECD relative poverty)',
+    period,
+    'OECD — Relative poverty rate, Income Distribution Database (IDD)',
+    'https://stats.oecd.org/Index.aspx?DataSetCode=IDD')];
+}
+
 // ─── UK: ONS timeseries — CPI and unemployment ────────────────────────────────
 
 async function fetchONSTimeseries() {
@@ -317,6 +386,15 @@ async function main() {
 
   console.log('[CA] Bank of Canada Valet — exchange rates & interest rates');
   try { allRecords.push(...await fetchBoCRates()); } catch (e) { console.error(`  [CA] BoC fetch error: ${e.message}`); }
+
+  console.log('\n[CA] World Bank ILO — unemployment rate');
+  try { allRecords.push(...await fetchCAUnemployment()); } catch (e) { console.error(`  [CA] WB unemployment error: ${e.message}`); }
+
+  console.log('\n[CA] Bank of Canada Valet — CPIX inflation (ATOM_V41693242)');
+  try { allRecords.push(...await fetchCACpiInflation()); } catch (e) { console.error(`  [CA] BoC CPIX error: ${e.message}`); }
+
+  console.log('\n[CA] OECD IDD — relative poverty rate');
+  try { allRecords.push(...await fetchCAPovertyRate()); } catch (e) { console.error(`  [CA] OECD poverty error: ${e.message}`); }
 
   console.log('\n[US] BLS — unemployment rate');
   try { allRecords.push(...await fetchBLSUnemployment()); } catch (e) { console.error(`  [US] BLS unemployment error: ${e.message}`); }
