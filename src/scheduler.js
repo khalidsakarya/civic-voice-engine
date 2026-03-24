@@ -10,6 +10,7 @@ const { processLeaderExpenses }     = require('./processing/leaderExpenseProcess
 const { buildLeaderboard }          = require('./processing/leaderLeaderboard');
 const { detectLeaderAnomalies }     = require('./processing/leaderAnomalyDetector');
 const { fetchAllBudgetAnalytics }   = require('./ingestion/budgetAnalyticsFetcher');
+const { main: runTargetedFetch }    = require('./ingestion/targetedFetch');
 const { fetchAllGovStats }          = require('./ingestion/govStatsFetcher');
 const { processGovStats }           = require('./processing/govStatsProcessor');
 const {
@@ -18,6 +19,7 @@ const {
   uploadFinancialDisclosures, uploadLobbyingActivity, uploadContracts, uploadCorporateAffiliations,
   uploadFlaggedExpenses, uploadWasteReports, uploadLeaderExpenses, uploadLeaderboard,
   uploadExpenseAnomalies, uploadBudgetData, uploadAnalyticsData, uploadGovStats,
+  uploadTargetedStats,
 } = require('./firebase/uploader');
 const { writeSchedulerStatus } = require('./firebase/statusWriter');
 const fs = require('fs');
@@ -207,30 +209,37 @@ async function runMonthlyCycle() {
   console.log(`[scheduler:monthly] Sources: ${monthlySources.map(s => s.name).join(', ')}`);
   console.log('='.repeat(60));
 
-  let efficiencyCount = 0, budgetCount = 0, auditCount = 0, performanceCount = 0;
+  let efficiencyCount = 0, budgetCount = 0, auditCount = 0, performanceCount = 0, targetedCount = 0;
 
   try {
-    console.log('\n[scheduler:monthly] Step 1/3 — Ingesting budget, audit & performance data...');
+    console.log('\n[scheduler:monthly] Step 1/5 — Ingesting budget, audit & performance data...');
     await runPipeline(monthlySources);
 
-    console.log('\n[scheduler:monthly] Step 2/3 — Recalculating efficiency scores...');
+    console.log('\n[scheduler:monthly] Step 2/5 — Recalculating efficiency scores...');
     delete require.cache[require.resolve('./scoreEfficiency')];
     require('./scoreEfficiency');
 
-    console.log('\n[scheduler:monthly] Step 3/3 — Uploading to Firebase...');
+    console.log('\n[scheduler:monthly] Step 3/5 — Uploading efficiency/budget/audit to Firebase...');
     efficiencyCount  = await uploadMonthlyEfficiencyScores();
     budgetCount      = await uploadBudgetSpending();
     auditCount       = await uploadAuditFindings();
     performanceCount = await uploadDepartmentPerformance();
 
+    console.log('\n[scheduler:monthly] Step 4/5 — Fetching live targeted stats (CA / US / UK / AU)...');
+    await runTargetedFetch();
+
+    console.log('\n[scheduler:monthly] Step 5/5 — Uploading targeted stats to social_stats...');
+    targetedCount = await uploadTargetedStats();
+
+    const total = efficiencyCount + budgetCount + auditCount + performanceCount + targetedCount;
     console.log(`\n[scheduler:monthly] ✓ Done at ${new Date().toISOString()}`);
-    console.log(`[scheduler:monthly]   efficiency_scores_monthly: ${efficiencyCount}  budget_spending: ${budgetCount}  audit_findings: ${auditCount}  department_performance: ${performanceCount}`);
+    console.log(`[scheduler:monthly]   efficiency_scores_monthly: ${efficiencyCount}  budget_spending: ${budgetCount}  audit_findings: ${auditCount}  department_performance: ${performanceCount}  social_stats (targeted): ${targetedCount}`);
 
     await writeSchedulerStatus('monthly', {
       startedAt,
       status:         'success',
-      collections:    ['efficiency_scores_monthly', 'budget_spending', 'audit_findings', 'department_performance'],
-      recordsUpdated: efficiencyCount + budgetCount + auditCount + performanceCount,
+      collections:    ['efficiency_scores_monthly', 'budget_spending', 'audit_findings', 'department_performance', 'social_stats'],
+      recordsUpdated: total,
       recordsSkipped: 0,
       aiCallsMade:    0,
       cronSchedule:   MONTHLY_SCHEDULE,
@@ -241,8 +250,8 @@ async function runMonthlyCycle() {
     await writeSchedulerStatus('monthly', {
       startedAt,
       status:         'error',
-      collections:    ['efficiency_scores_monthly', 'budget_spending', 'audit_findings', 'department_performance'],
-      recordsUpdated: efficiencyCount + budgetCount + auditCount + performanceCount,
+      collections:    ['efficiency_scores_monthly', 'budget_spending', 'audit_findings', 'department_performance', 'social_stats'],
+      recordsUpdated: efficiencyCount + budgetCount + auditCount + performanceCount + targetedCount,
       recordsSkipped: 0,
       aiCallsMade:    0,
       cronSchedule:   MONTHLY_SCHEDULE,
@@ -593,6 +602,7 @@ const RUN_EXPENSE_NOW           = process.argv.includes('--expenses');
 const RUN_LEADER_EXPENSE_NOW    = process.argv.includes('--leader-expenses');
 const RUN_BUDGET_ANALYTICS_NOW  = process.argv.includes('--budget-analytics');
 const RUN_GOV_STATS_NOW         = process.argv.includes('--gov-stats');
+const RUN_TARGETED_STATS_NOW    = process.argv.includes('--targeted-stats');
 
 if (RUN_NOW) {
   runDailyCycle()
@@ -621,19 +631,25 @@ if (RUN_NOW) {
   runBudgetAnalyticsCycle().then(() => process.exit(0)).catch(() => process.exit(1));
 } else if (RUN_GOV_STATS_NOW) {
   runGovStatsCycle().then(() => process.exit(0)).catch(() => process.exit(1));
+} else if (RUN_TARGETED_STATS_NOW) {
+  runTargetedFetch()
+    .then(() => uploadTargetedStats())
+    .then(n => { console.log(`[scheduler:targeted-stats] ✓ ${n} docs written to social_stats`); process.exit(0); })
+    .catch(err => { console.error('[scheduler:targeted-stats] ✗', err.message); process.exit(1); });
 } else {
   console.log('\n╔══════════════════════════════════════════════════════╗');
   console.log('║         CIVIC VOICE ENGINE — SCHEDULER STARTED       ║');
   console.log('╚══════════════════════════════════════════════════════╝');
   console.log(`  Daily            (bills + votes)                            → ${DAILY_SCHEDULE}`);
   console.log(`  Weekly           (member profiles)                          → ${WEEKLY_SCHEDULE}`);
-  console.log(`  Monthly          (efficiency, budget, audits, performance)   → ${MONTHLY_SCHEDULE}`);
+  console.log(`  Monthly          (efficiency, budget, audits, performance,   → ${MONTHLY_SCHEDULE}`);
+  console.log(`                    + targeted live stats → social_stats)`);
   console.log(`  Bimonthly        (disclosures, lobbying, contracts)          → ${BIMONTHLY_SCHEDULE}`);
   console.log(`  Expense/Waste    (dept expenses + waste analysis)            → ${EXPENSE_SCHEDULE}`);
   console.log(`  Leader Expenses  (minister/secretary expenses + leaderboard) → ${LEADER_EXPENSE_SCHEDULE}`);
   console.log(`  Budget/Analytics (federal budgets, GDP, unemployment, crime) → ${BUDGET_ANALYTICS_SCHEDULE}`);
   console.log(`  Gov Stats        (revenue, debt, deficit, ODA, grants)        → ${GOV_STATS_SCHEDULE}`);
-  console.log('\n  Flags: --now (all), --daily, --weekly, --monthly, --bimonthly, --expenses, --leader-expenses, --budget-analytics, --gov-stats\n');
+  console.log('\n  Flags: --now (all), --daily, --weekly, --monthly, --bimonthly, --expenses, --leader-expenses, --budget-analytics, --gov-stats, --targeted-stats\n');
 
   cron.schedule(DAILY_SCHEDULE,            () => runDailyCycle());
   cron.schedule(WEEKLY_SCHEDULE,           () => runWeeklyCycle());

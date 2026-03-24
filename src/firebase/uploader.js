@@ -1286,6 +1286,68 @@ async function uploadLiveStats() {
 }
 
 /**
+ * Upload the 15 targeted-fetch results to the `social_stats` collection.
+ *
+ * Reads the most recent output/targeted/targeted_*.json file.
+ * Writes one document per successful result, doc ID = {COUNTRY}_{stat}.
+ * Uses set() (not merge) so stale values are fully overwritten.
+ *
+ * Schema: country, statName, value, unit, date, source, sourceUrl, notes,
+ *         fetchedAt, last_updated.
+ */
+async function uploadTargetedStats() {
+  const dir = path.join(OUTPUT_ROOT, 'targeted');
+  if (!fs.existsSync(dir)) {
+    console.log('[firebase] ⚠ social_stats (targeted): output/targeted/ not found, skipping');
+    return 0;
+  }
+
+  const files = fs.readdirSync(dir)
+    .filter(f => f.startsWith('targeted_') && f.endsWith('.json'))
+    .sort();
+
+  if (files.length === 0) {
+    console.log('[firebase] ⚠ social_stats (targeted): no targeted files found. Run npm run fetch:targeted first.');
+    return 0;
+  }
+
+  const { results, fetchedAt } = JSON.parse(fs.readFileSync(path.join(dir, files[files.length - 1])));
+
+  if (!results || results.length === 0) {
+    console.log('[firebase] ⚠ social_stats (targeted): file has no results');
+    return 0;
+  }
+
+  const now   = new Date().toISOString();
+  const db    = getDb();
+  const batch = db.batch();
+  let count   = 0;
+
+  for (const r of results) {
+    if (!r.ok) continue; // skip failed fetches
+    const docId = sanitizeId(`${r.country}_${r.stat}`);
+    const ref   = db.collection('social_stats').doc(docId);
+    batch.set(ref, stripUndefined({
+      country:      r.country,
+      statName:     r.stat,
+      value:        r.value     ?? null,
+      unit:         r.unit      ?? null,
+      date:         r.date  != null ? String(r.date) : null,
+      source:       r.source    ?? null,
+      sourceUrl:    r.sourceUrl ?? null,
+      notes:        r.notes     ?? null,
+      fetchedAt:    fetchedAt ?? r.fetchedAt ?? null,
+      last_updated: now,
+    }));
+    count++;
+  }
+
+  await batch.commit();
+  console.log(`[firebase] ✓ social_stats (targeted): ${count} documents written`);
+  return count;
+}
+
+/**
  * Run all uploads (used for manual one-shot runs).
  */
 async function uploadAll() {
@@ -1351,4 +1413,5 @@ module.exports = {
   uploadSocialStats,
   uploadLiveStats,
   uploadSocialStatsCanonical,
+  uploadTargetedStats,
 };

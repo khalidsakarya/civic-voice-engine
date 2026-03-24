@@ -44,6 +44,9 @@
     "upload:social-stats": "node src/firebase/uploadSocialStatsCanonical.js",
     "pipeline:live-stats": "npm run live:fetch && npm run upload:social-stats",
     "fetch:targeted": "node src/ingestion/targetedFetch.js",
+    "upload:targeted": "node src/firebase/uploadTargetedStats.js",
+    "pipeline:targeted": "npm run fetch:targeted && npm run upload:targeted",
+    "scheduler:targeted-stats": "node src/scheduler.js --targeted-stats",
     "pipeline:full": "npm run start && npm run process:bills && npm run score:efficiency && npm run upload:firebase",
     "test": "node --experimental-vm-modules node_modules/.bin/jest"
   },
