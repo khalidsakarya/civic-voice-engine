@@ -17,6 +17,17 @@
  *   - fedSpending   USAspending.gov /api/v2/spending/
  *   - medianRent    Census Bureau ACS 1-Year DP04_0134E
  *
+ * United Kingdom (JSON/CSV APIs, no key required):
+ *   - unemployment  ONS timeseries MGSX (ILO measure, seasonally adjusted)
+ *   - CPI           ONS timeseries D7G7 (12-month rate)
+ *   - homePrice     HM Land Registry HPI Linked Data API (average UK price)
+ *   - bankRate      Bank of England IADB CSV API (series IUDBEDR) — returns CSV
+ *
+ * Australia (JSON/CSV APIs, no key required):
+ *   - unemployment  ABS SDMX-JSON LF dataflow (M13.3.1599.20.AUS.M)
+ *   - CPI           ABS SDMX-JSON CPI dataflow (3.10001.10.50.M)
+ *   - bankRate      RBA F1 CSV (Cash Rate Target) — returns CSV
+ *
  * Output:  output/targeted/targeted_{timestamp}.json
  * Run:     node src/ingestion/targetedFetch.js
  */
@@ -377,6 +388,195 @@ async function fetchUS_MedianRent() {
   throw new Error('Census ACS: no median rent data found');
 }
 
+// ─── UNITED KINGDOM ───────────────────────────────────────────────────────────
+
+/**
+ * UK Unemployment — Office for National Statistics Timeseries API
+ * Series MGSX: ILO unemployment rate, seasonally adjusted (Labour Market Survey)
+ * No API key required.
+ */
+async function fetchUK_Unemployment() {
+  const URL = 'https://www.ons.gov.uk/employmentandlabourmarket/peoplenotinwork/unemployment/timeseries/mgsx/lms/data';
+  const resp = await axios.get(URL, {
+    timeout: TIMEOUT_MS,
+    headers: { 'User-Agent': BROWSER_UA, Accept: 'application/json' },
+  });
+  const months = resp.data?.months ?? [];
+  if (months.length === 0) throw new Error('ONS MGSX: no monthly data in response');
+  const sorted = [...months].sort((a, b) => b.date.localeCompare(a.date));
+  const latest = sorted[0];
+  const val = safeNum(latest?.value);
+  if (val == null) throw new Error('ONS MGSX: could not parse value from latest month');
+  return result('UK', 'unemployment', val, '% (ILO measure, seasonally adjusted)',
+    latest.date,
+    'Office for National Statistics — ILO unemployment rate, series MGSX',
+    URL);
+}
+
+/**
+ * UK CPI Inflation — Office for National Statistics Timeseries API
+ * Series D7G7: CPI 12-month rate (% change)
+ * No API key required.
+ */
+async function fetchUK_CPI() {
+  const URL = 'https://www.ons.gov.uk/economy/inflationandpriceindices/timeseries/d7g7/data';
+  const resp = await axios.get(URL, {
+    timeout: TIMEOUT_MS,
+    headers: { 'User-Agent': BROWSER_UA, Accept: 'application/json' },
+  });
+  const months = resp.data?.months ?? [];
+  if (months.length === 0) throw new Error('ONS D7G7: no monthly data in response');
+  const sorted = [...months].sort((a, b) => b.date.localeCompare(a.date));
+  const latest = sorted[0];
+  const val = safeNum(latest?.value);
+  if (val == null) throw new Error('ONS D7G7: could not parse value from latest month');
+  return result('UK', 'cpi', val, '% (CPI 12-month rate)',
+    latest.date,
+    'Office for National Statistics — CPI 12-month rate, series D7G7',
+    URL);
+}
+
+/**
+ * UK Home Prices — HM Land Registry UK HPI Linked Data API
+ * Returns average UK house price for the latest available month.
+ * No API key required.
+ */
+async function fetchUK_HomePrices() {
+  const URL = 'https://landregistry.data.gov.uk/data/ukhpi/region/united-kingdom/month.json?_pageSize=1&_sort=-refMonth';
+  const resp = await axios.get(URL, {
+    timeout: TIMEOUT_MS,
+    headers: { 'User-Agent': BROWSER_UA, Accept: 'application/json' },
+  });
+  const item = (resp.data?.result?.items ?? [])[0];
+  if (!item) throw new Error('LR HPI: no items returned');
+  const price = item.averagePrice ?? item.averagePriceSA;
+  if (price == null) throw new Error('LR HPI: no averagePrice in response');
+  const about = item['_about'] ?? '';
+  const monthMatch = about.match(/(\d{4}-\d{2})$/);
+  const period = monthMatch ? monthMatch[1] : null;
+  return result('UK', 'homePrice', safeNum(price), 'GBP (UK average house price)',
+    period,
+    'HM Land Registry — UK House Price Index, average price (England & Wales)',
+    'https://landregistry.data.gov.uk/data/ukhpi/region/united-kingdom/month.json?_sort=-refMonth');
+}
+
+/**
+ * UK Bank Rate — Bank of England IADB Statistical API
+ * Series IUDBEDR: Official Bank Rate
+ * NOTE: Returns CSV, not JSON. Parsed as last data row.
+ */
+async function fetchUK_BankRate() {
+  const URL = 'https://www.bankofengland.co.uk/boeapps/database/_iadb-FromShowColumns.asp?csv.x=yes&Datefrom=01/Jan/2025&Dateto=now&SeriesCodes=IUDBEDR&CSVF=TT&UsingCodes=Y';
+  const resp = await axios.get(URL, {
+    timeout: TIMEOUT_MS,
+    headers: { 'User-Agent': BROWSER_UA },
+  });
+  const lines = String(resp.data).trim().split('\n')
+    .map(l => l.trim())
+    .filter(l => l && !l.startsWith('SERIES') && !l.startsWith('DATE') && !l.startsWith('DESCR') && l.includes(','));
+  if (lines.length === 0) throw new Error('BoE: no data rows in CSV response');
+  const lastLine = lines[lines.length - 1];
+  const [dateStr, rateStr] = lastLine.split(',');
+  const val = safeNum(rateStr);
+  if (val == null) throw new Error('BoE: could not parse rate from: ' + lastLine);
+  return result('UK', 'bankRate', val, '% per annum (Official Bank Rate)',
+    dateStr?.trim() ?? null,
+    'Bank of England — Official Bank Rate, series IUDBEDR',
+    'https://www.bankofengland.co.uk/boeapps/database/_iadb-FromShowColumns.asp?SeriesCodes=IUDBEDR');
+}
+
+// ─── AUSTRALIA ────────────────────────────────────────────────────────────────
+
+/**
+ * AU Unemployment — Australian Bureau of Statistics SDMX-JSON API
+ * Dataflow LF, key M13.3.1599.20.AUS.M:
+ *   M13=Unemployment rate, 3=Persons, 1599=All ages, 20=Seasonally adjusted, AUS, M=Monthly
+ * No API key required. Requires Accept: application/vnd.sdmx.data+json header.
+ */
+async function fetchAU_Unemployment() {
+  const CURRENT_YEAR = new Date().getFullYear();
+  const URL = `https://api.data.abs.gov.au/data/LF/M13.3.1599.20.AUS.M?format=jsondata&startPeriod=${CURRENT_YEAR - 1}-01`;
+  const resp = await axios.get(URL, {
+    timeout: TIMEOUT_MS,
+    headers: { Accept: 'application/vnd.sdmx.data+json' },
+  });
+  const ds         = resp.data?.data?.dataSets?.[0] ?? resp.data?.dataSets?.[0];
+  const structures = resp.data?.data?.structures   ?? resp.data?.structures ?? [];
+  const obsDim     = structures[0]?.dimensions?.observation?.[0];
+  const sKeys      = Object.keys(ds?.series ?? {});
+  if (sKeys.length === 0) throw new Error('ABS LF: no series in response');
+  const obs  = ds.series[sKeys[0]].observations ?? {};
+  const idxs = Object.keys(obs).map(Number).sort((a, b) => b - a);
+  if (idxs.length === 0) throw new Error('ABS LF: no observations in series');
+  const val    = safeNum(obs[idxs[0]]?.[0]);
+  const period = obsDim?.values?.[idxs[0]]?.id ?? null;
+  if (val == null) throw new Error('ABS LF: could not parse unemployment value');
+  return result('AU', 'unemployment', val, '% (seasonally adjusted)',
+    period,
+    'Australian Bureau of Statistics — Labour Force Survey, series M13 (SDMX)',
+    'https://api.data.abs.gov.au/data/LF/M13.3.1599.20.AUS.M');
+}
+
+/**
+ * AU CPI — Australian Bureau of Statistics SDMX-JSON API
+ * Dataflow CPI, key 3.10001.10.50.M:
+ *   3=YoY%, 10001=All groups, 10=Original, 50=Australia, M=Monthly
+ * No API key required.
+ */
+async function fetchAU_CPI() {
+  const CURRENT_YEAR = new Date().getFullYear();
+  const URL = `https://api.data.abs.gov.au/data/CPI/3.10001.10.50.M?format=jsondata&startPeriod=${CURRENT_YEAR - 1}-01`;
+  const resp = await axios.get(URL, {
+    timeout: TIMEOUT_MS,
+    headers: { Accept: 'application/vnd.sdmx.data+json' },
+  });
+  const ds         = resp.data?.data?.dataSets?.[0] ?? resp.data?.dataSets?.[0];
+  const structures = resp.data?.data?.structures   ?? resp.data?.structures ?? [];
+  const obsDim     = structures[0]?.dimensions?.observation?.[0];
+  const sKeys      = Object.keys(ds?.series ?? {});
+  if (sKeys.length === 0) throw new Error('ABS CPI: no series in response');
+  const obs  = ds.series[sKeys[0]].observations ?? {};
+  const idxs = Object.keys(obs).map(Number).sort((a, b) => b - a);
+  if (idxs.length === 0) throw new Error('ABS CPI: no observations in series');
+  const val    = safeNum(obs[idxs[0]]?.[0]);
+  const period = obsDim?.values?.[idxs[0]]?.id ?? null;
+  if (val == null) throw new Error('ABS CPI: could not parse CPI value');
+  return result('AU', 'cpi', val, '% change from corresponding month of previous year',
+    period,
+    'Australian Bureau of Statistics — CPI All Groups YoY%, CPI dataflow (SDMX)',
+    'https://api.data.abs.gov.au/data/CPI/3.10001.10.50.M');
+}
+
+/**
+ * AU Cash Rate Target — Reserve Bank of Australia F1 Statistical Table
+ * URL: https://www.rba.gov.au/statistics/tables/csv/f1-data.csv
+ * NOTE: Returns CSV, not JSON. Filters rows matching DD-Mon-YYYY date format.
+ *       Column index 1 = Cash Rate Target.
+ */
+async function fetchAU_BankRate() {
+  const MONTH_MAP = { Jan:'01',Feb:'02',Mar:'03',Apr:'04',May:'05',Jun:'06',
+                      Jul:'07',Aug:'08',Sep:'09',Oct:'10',Nov:'11',Dec:'12' };
+  const resp = await axios.get(
+    'https://www.rba.gov.au/statistics/tables/csv/f1-data.csv',
+    { timeout: TIMEOUT_MS, headers: { 'User-Agent': BROWSER_UA } }
+  );
+  const lines = String(resp.data).split('\n')
+    .map(l => l.trim())
+    .filter(l => /^\d{2}-[A-Za-z]{3}-\d{4}/.test(l));
+  if (lines.length === 0) throw new Error('RBA F1: no data rows found');
+  const lastLine = lines[lines.length - 1];
+  const parts = lastLine.split(',');
+  const dateStr = parts[0].trim();
+  const val = safeNum(parts[1]);
+  if (val == null) throw new Error('RBA F1: could not parse rate from: ' + lastLine);
+  const [dd, mon, yyyy] = dateStr.split('-');
+  const isoDate = `${yyyy}-${MONTH_MAP[mon] ?? '??'}-${dd}`;
+  return result('AU', 'bankRate', val, '% per annum (Cash Rate Target)',
+    isoDate,
+    'Reserve Bank of Australia — Cash Rate Target, F1 Statistical Table (daily)',
+    'https://www.rba.gov.au/statistics/tables/csv/f1-data.csv');
+}
+
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
 const FETCHERS = [
@@ -388,6 +588,13 @@ const FETCHERS = [
   { label: 'US  Drug Overdoses (CDC Socrata xkb8-kh2a)',                 fn: fetchUS_DrugOverdoses },
   { label: 'US  Fed Spending   (USAspending.gov /api/v2/spending/)',     fn: fetchUS_FedSpending },
   { label: 'US  Median Rent    (Census ACS DP04_0134E)',                 fn: fetchUS_MedianRent },
+  { label: 'UK  Unemployment   (ONS timeseries MGSX)',                   fn: fetchUK_Unemployment },
+  { label: 'UK  CPI            (ONS timeseries D7G7)',                   fn: fetchUK_CPI },
+  { label: 'UK  Home Prices    (LR HPI Linked Data API)',                fn: fetchUK_HomePrices },
+  { label: 'UK  Bank Rate      (BoE IADB CSV series IUDBEDR)',           fn: fetchUK_BankRate },
+  { label: 'AU  Unemployment   (ABS SDMX-JSON LF/M13.3.1599.20.AUS.M)', fn: fetchAU_Unemployment },
+  { label: 'AU  CPI            (ABS SDMX-JSON CPI/3.10001.10.50.M)',    fn: fetchAU_CPI },
+  { label: 'AU  Bank Rate      (RBA F1 CSV — Cash Rate Target)',         fn: fetchAU_BankRate },
 ];
 
 async function main() {
