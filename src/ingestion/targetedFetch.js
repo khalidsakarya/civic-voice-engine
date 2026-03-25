@@ -560,6 +560,283 @@ async function fetchCA_ObesityRate() {
     'https://www150.statcan.gc.ca/t1/tbl1/en/tv.action?pid=1310037301');
 }
 
+// ─── CANADA — Housing & Social ────────────────────────────────────────────────
+
+/**
+ * CA Homelessness — Statistics Canada Shelter Capacity Survey (table 14-10-0353-01)
+ * Number of beds in emergency shelters nationally; used as a proxy for shelter demand.
+ * Filter: Emergency shelter, Total target population, Number of beds, Canada.
+ * Columns (DGUID present): VALUE at index 12.
+ */
+async function fetchCA_Homelessness() {
+  const csv = await fetchStatCanCSV('14100353', 'CA Homelessness');
+  const lines = csv.split('\n');
+  const header = parseCSVLine(lines[0]);
+  const geoIdx   = header.findIndex(c => c === 'GEO');
+  const dateIdx  = header.findIndex(c => c === 'REF_DATE');
+  const valueIdx = header.findIndex(c => c === 'VALUE');
+  const typeIdx  = header.findIndex(c => /type of shelter/i.test(c));
+  const popIdx   = header.findIndex(c => /target population/i.test(c));
+  const statIdx  = header.findIndex(c => /^statistics$/i.test(c));
+
+  let bestDate = '', bestValue = null;
+  for (let i = 1; i < lines.length; i++) {
+    const cols = parseCSVLine(lines[i].trim());
+    if (!cols[geoIdx]?.startsWith('Canada')) continue;
+    if (cols[typeIdx] !== 'Emergency shelter') continue;
+    if (cols[popIdx]  !== 'Total, target population') continue;
+    if (cols[statIdx] !== 'Number of beds') continue;
+    const val = cols[valueIdx], date = cols[dateIdx];
+    if (!val || val === '..' || val === '' || !date) continue;
+    if (date > bestDate) { bestDate = date; bestValue = parseFloat(val); }
+  }
+  if (bestValue === null) throw new Error('CA Homelessness: no emergency shelter bed count found');
+  return result('CA', 'homelessness', bestValue, 'emergency shelter beds (capacity)',
+    bestDate,
+    'Statistics Canada — Shelter Capacity Survey, table 14-10-0353-01',
+    'https://www150.statcan.gc.ca/t1/tbl1/en/tv.action?pid=1410035301',
+    'Total number of beds in emergency shelters nationally (shelter capacity proxy)');
+}
+
+/**
+ * CA New Builds — Statistics Canada / CMHC housing starts (table 34-10-0135-01)
+ * Monthly total housing starts (all units), unadjusted, Canada.
+ * Columns (DGUID present): Housing estimates(3) | Type of unit(4) | Seasonal adjustment(5) | VALUE(12)
+ */
+async function fetchCA_NewBuilds() {
+  const csv = await fetchStatCanCSV('34100135', 'CA Housing Starts');
+  const lines = csv.split('\n');
+  const header = parseCSVLine(lines[0]);
+  const geoIdx   = header.findIndex(c => c === 'GEO');
+  const dateIdx  = header.findIndex(c => c === 'REF_DATE');
+  const valueIdx = header.findIndex(c => c === 'VALUE');
+  const estIdx   = header.findIndex(c => /housing estimates/i.test(c));
+  const typeIdx  = header.findIndex(c => /type of unit/i.test(c));
+  const seasIdx  = header.findIndex(c => /seasonal adjustment/i.test(c));
+
+  let bestDate = '', bestValue = null;
+  for (let i = 1; i < lines.length; i++) {
+    const cols = parseCSVLine(lines[i].trim());
+    if (!cols[geoIdx]?.startsWith('Canada')) continue;
+    if (cols[estIdx]  !== 'Housing starts') continue;
+    if (cols[typeIdx] !== 'Total units')    continue;
+    if (cols[seasIdx] !== 'Unadjusted')     continue;
+    const val = cols[valueIdx], date = cols[dateIdx];
+    if (!val || val === '..' || val === '' || !date) continue;
+    if (date > bestDate) { bestDate = date; bestValue = parseFloat(val); }
+  }
+  if (bestValue === null) throw new Error('CA New Builds: no housing starts found');
+  return result('CA', 'newBuilds', bestValue, 'new housing starts (total units, monthly)',
+    bestDate,
+    'Statistics Canada / CMHC — Housing starts, under construction and completions, table 34-10-0135-01',
+    'https://www150.statcan.gc.ca/t1/tbl1/en/tv.action?pid=3410013501');
+}
+
+/**
+ * CA Graduation Rate — Statistics Canada education attainment by age group (table 37-10-0130-01)
+ * Percentage of population aged 25–64 with at least upper secondary education (high school or above).
+ * Columns (DGUID present): Education attainment level(3) | Age group(4) | Gender(5) | VALUE(12)
+ */
+async function fetchCA_GraduationRate() {
+  const csv = await fetchStatCanCSV('37100130', 'CA Grad Rate');
+  const lines = csv.split('\n');
+  const header = parseCSVLine(lines[0]);
+  const geoIdx   = header.findIndex(c => c === 'GEO');
+  const dateIdx  = header.findIndex(c => c === 'REF_DATE');
+  const valueIdx = header.findIndex(c => c === 'VALUE');
+  const eduIdx   = header.findIndex(c => /education attainment/i.test(c));
+  const ageIdx   = header.findIndex(c => /age group/i.test(c));
+  const genIdx   = header.findIndex(c => /gender/i.test(c));
+
+  let bestDate = '', bestValue = null;
+  for (let i = 1; i < lines.length; i++) {
+    const cols = parseCSVLine(lines[i].trim());
+    if (!cols[geoIdx]?.startsWith('Canada')) continue;
+    if (cols[eduIdx] !== 'Upper secondary or above') continue;
+    if (cols[ageIdx] !== 'Total, 25 to 64 years')   continue;
+    if (cols[genIdx] !== 'Total - Gender')           continue;
+    const val = cols[valueIdx], date = cols[dateIdx];
+    if (!val || val === '..' || val === '' || !date) continue;
+    if (date > bestDate) { bestDate = date; bestValue = parseFloat(val); }
+  }
+  if (bestValue === null) throw new Error('CA Grad Rate: no upper secondary attainment found');
+  return result('CA', 'graduationRate', bestValue, '% adults (25–64) with upper secondary or above',
+    bestDate,
+    'Statistics Canada — Educational attainment of the population, table 37-10-0130-01',
+    'https://www150.statcan.gc.ca/t1/tbl1/en/tv.action?pid=3710013001',
+    '% of 25–64 year olds with at least a high school diploma (upper secondary) per OECD definitions');
+}
+
+/**
+ * CA Student Debt — Statistics Canada average government student loans (table 37-10-0046-01)
+ * Average federal/provincial government student loan per Canadian undergraduate borrower (current dollars).
+ * Columns (DGUID present): Level of study(3) | VALUE(10)
+ */
+async function fetchCA_StudentDebt() {
+  const csv = await fetchStatCanCSV('37100046', 'CA Student Debt');
+  const lines = csv.split('\n');
+  const header = parseCSVLine(lines[0]);
+  const geoIdx   = header.findIndex(c => c === 'GEO');
+  const dateIdx  = header.findIndex(c => c === 'REF_DATE');
+  const valueIdx = header.findIndex(c => c === 'VALUE');
+  const lvlIdx   = header.findIndex(c => /level of study/i.test(c));
+
+  let bestDate = '', bestValue = null;
+  for (let i = 1; i < lines.length; i++) {
+    const cols = parseCSVLine(lines[i].trim());
+    if (!cols[geoIdx]?.startsWith('Canada')) continue;
+    if (cols[lvlIdx] !== 'Canadian undergraduate') continue;
+    const val = cols[valueIdx], date = cols[dateIdx];
+    if (!val || val === '..' || val === '' || !date) continue;
+    if (date > bestDate) { bestDate = date; bestValue = parseFloat(val); }
+  }
+  if (bestValue === null) throw new Error('CA Student Debt: no undergraduate loan amount found');
+  return result('CA', 'studentDebt', bestValue, 'average government student loan per borrower (CAD)',
+    bestDate,
+    'Statistics Canada — Average government student loans, table 37-10-0046-01',
+    'https://www150.statcan.gc.ca/t1/tbl1/en/tv.action?pid=3710004601',
+    'Average annual government (federal + provincial) student loan per Canadian undergraduate borrower');
+}
+
+/**
+ * CA Child Poverty — Statistics Canada low income statistics by age (table 11-10-0135-01)
+ * Percentage of persons under 18 years in low income using Low Income Measure after-tax (LIM-AT).
+ * Columns (DGUID present): Persons in low income(3) | Low income lines(4) | Statistics(5) | VALUE(12)
+ */
+async function fetchCA_ChildPoverty() {
+  const csv = await fetchStatCanCSV('11100135', 'CA Child Poverty');
+  const lines = csv.split('\n');
+  const header = parseCSVLine(lines[0]);
+  const geoIdx   = header.findIndex(c => c === 'GEO');
+  const dateIdx  = header.findIndex(c => c === 'REF_DATE');
+  const valueIdx = header.findIndex(c => c === 'VALUE');
+  const persIdx  = header.findIndex(c => /persons in low income/i.test(c));
+  const lineIdx  = header.findIndex(c => /low income lines/i.test(c));
+  const statIdx  = header.findIndex(c => /^statistics$/i.test(c));
+
+  let bestDate = '', bestValue = null;
+  for (let i = 1; i < lines.length; i++) {
+    const cols = parseCSVLine(lines[i].trim());
+    if (!cols[geoIdx]?.startsWith('Canada')) continue;
+    if (cols[persIdx] !== 'Persons under 18 years') continue;
+    if (cols[lineIdx] !== 'Low income measure after tax') continue;
+    if (cols[statIdx] !== 'Percentage of persons in low income') continue;
+    const val = cols[valueIdx], date = cols[dateIdx];
+    if (!val || val === '..' || val === '' || !date) continue;
+    if (date > bestDate) { bestDate = date; bestValue = parseFloat(val); }
+  }
+  if (bestValue === null) throw new Error('CA Child Poverty: no LIM-AT % found for under-18');
+  return result('CA', 'childPoverty', bestValue, '% children under 18 in low income (LIM-AT)',
+    bestDate,
+    'Statistics Canada — Low income statistics by age, sex and economic family type, table 11-10-0135-01',
+    'https://www150.statcan.gc.ca/t1/tbl1/en/tv.action?pid=1110013501',
+    'Percentage of persons under 18 years in low income using Low Income Measure after tax (LIM-AT)');
+}
+
+/**
+ * CA Immigration — Statistics Canada components of population change (table 17-10-0008-01)
+ * Annual count of immigrants (permanent residents) admitted to Canada, latest fiscal year.
+ * Columns (DGUID present): Components of population growth(3) | VALUE(10)
+ */
+async function fetchCA_Immigration() {
+  const csv = await fetchStatCanCSV('17100008', 'CA Immigration');
+  const lines = csv.split('\n');
+  const header = parseCSVLine(lines[0]);
+  const geoIdx   = header.findIndex(c => c === 'GEO');
+  const dateIdx  = header.findIndex(c => c === 'REF_DATE');
+  const valueIdx = header.findIndex(c => c === 'VALUE');
+  const compIdx  = header.findIndex(c => /components of population/i.test(c));
+
+  let bestDate = '', bestValue = null;
+  for (let i = 1; i < lines.length; i++) {
+    const cols = parseCSVLine(lines[i].trim());
+    if (!cols[geoIdx]?.startsWith('Canada')) continue;
+    if (cols[compIdx] !== 'Immigrants') continue;
+    const val = cols[valueIdx], date = cols[dateIdx];
+    if (!val || val === '..' || val === '' || !date) continue;
+    if (date > bestDate) { bestDate = date; bestValue = parseFloat(val); }
+  }
+  if (bestValue === null) throw new Error('CA Immigration: no immigrant count found');
+  return result('CA', 'immigration', bestValue, 'immigrants admitted (persons)',
+    bestDate,
+    'Statistics Canada — Components of population change, table 17-10-0008-01',
+    'https://www150.statcan.gc.ca/t1/tbl1/en/tv.action?pid=1710000801');
+}
+
+/**
+ * CA Gini Coefficient — Statistics Canada income distribution (table 11-10-0134-01)
+ * Gini coefficient of adjusted after-tax income, Canada, latest year.
+ * Columns (DGUID present): Income concept(3) | VALUE(10)
+ */
+async function fetchCA_GiniCoefficient() {
+  const csv = await fetchStatCanCSV('11100134', 'CA Gini');
+  const lines = csv.split('\n');
+  const header = parseCSVLine(lines[0]);
+  const geoIdx   = header.findIndex(c => c === 'GEO');
+  const dateIdx  = header.findIndex(c => c === 'REF_DATE');
+  const valueIdx = header.findIndex(c => c === 'VALUE');
+  const incIdx   = header.findIndex(c => /income concept/i.test(c));
+
+  let bestDate = '', bestValue = null;
+  for (let i = 1; i < lines.length; i++) {
+    const cols = parseCSVLine(lines[i].trim());
+    if (!cols[geoIdx]?.startsWith('Canada')) continue;
+    if (cols[incIdx] !== 'Adjusted after-tax income') continue;
+    const val = cols[valueIdx], date = cols[dateIdx];
+    if (!val || val === '..' || val === '' || !date) continue;
+    if (date > bestDate) { bestDate = date; bestValue = parseFloat(val); }
+  }
+  if (bestValue === null) throw new Error('CA Gini: no after-tax Gini found');
+  return result('CA', 'giniCoefficient', bestValue, 'Gini coefficient (adjusted after-tax income)',
+    bestDate,
+    'Statistics Canada — Gini coefficients of adjusted market, total and after-tax income, table 11-10-0134-01',
+    'https://www150.statcan.gc.ca/t1/tbl1/en/tv.action?pid=1110013401');
+}
+
+/**
+ * CA Minimum Wage — Employment & Social Development Canada federal minimum wage
+ * Current federal minimum wage (CAD/hr), via open.canada.ca CKAN datastore.
+ * Resource: 2ddfbfd4-8347-467d-b6d5-797c5421f4fb  Jurisdiction code: FJ
+ * Date format: "DD-Mon-YY"  (2-digit year: <50 → 2000+, ≥50 → 1900+)
+ */
+async function fetchCA_MinWageGap() {
+  const resp = await axios.get(
+    'https://open.canada.ca/data/en/api/3/action/datastore_search',
+    {
+      params: {
+        resource_id: '2ddfbfd4-8347-467d-b6d5-797c5421f4fb',
+        filters: JSON.stringify({ Jurisdiction: 'FJ' }),
+        limit: 200,
+      },
+      timeout: TIMEOUT_MS,
+    }
+  );
+  const records = resp.data?.result?.records ?? [];
+  if (records.length === 0) throw new Error('CA MinWage: no federal jurisdiction records found');
+
+  const MONTHS = { Jan:0, Feb:1, Mar:2, Apr:3, May:4, Jun:5, Jul:6, Aug:7, Sep:8, Oct:9, Nov:10, Dec:11 };
+  function parseWageDate(ds) {
+    const [d, m, y] = (ds ?? '').split('-');
+    if (!d || !m || !y) return new Date(0);
+    const yr = parseInt(y);
+    return new Date(yr < 50 ? 2000 + yr : 1900 + yr, MONTHS[m] ?? 0, parseInt(d));
+  }
+
+  // Sort by actual date descending; skip rows with 'NA' wages
+  records.sort((a, b) => parseWageDate(b['Effective Date']) - parseWageDate(a['Effective Date']));
+  const latest = records.find(r => r['Minimum Wage'] && r['Minimum Wage'] !== 'NA');
+  if (!latest) throw new Error('CA MinWage: no valid federal minimum wage found');
+
+  const rateNum = safeNum(latest['Minimum Wage']);
+  if (rateNum === null) throw new Error(`CA MinWage: cannot parse rate "${latest['Minimum Wage']}"`);
+  const iso = parseWageDate(latest['Effective Date']).toISOString().slice(0, 10);
+
+  return result('CA', 'minWageGap', rateNum, 'federal minimum wage (CAD/hr)',
+    iso,
+    'Employment and Social Development Canada — General Historical Minimum Wage (Federal Jurisdiction)',
+    'https://open.canada.ca/data/en/dataset/390ee890-59bb-4f34-a37c-9732781ef8a0');
+}
+
 // ─── UNITED STATES ────────────────────────────────────────────────────────────
 
 /**
@@ -906,6 +1183,14 @@ const FETCHERS = [
   { label: 'CA  Homicide Rate   (StatCan Homicide Survey 35-10-0068-01)', fn: fetchCA_HomicideRate },
   { label: 'CA  Life Expectancy (StatCan life tables 13-10-0114-01)',      fn: fetchCA_LifeExpectancy },
   { label: 'CA  Obesity Rate    (StatCan CCHS BMI 13-10-0373-01)',         fn: fetchCA_ObesityRate },
+  { label: 'CA  Homelessness   (StatCan Shelter Capacity 14-10-0353-01)',  fn: fetchCA_Homelessness },
+  { label: 'CA  New Builds     (StatCan/CMHC Housing Starts 34-10-0135)', fn: fetchCA_NewBuilds },
+  { label: 'CA  Grad Rate      (StatCan Educ Attainment 37-10-0130-01)',  fn: fetchCA_GraduationRate },
+  { label: 'CA  Student Debt   (StatCan Avg Student Loans 37-10-0046-01)',fn: fetchCA_StudentDebt },
+  { label: 'CA  Child Poverty  (StatCan LIM-AT under-18 11-10-0135-01)', fn: fetchCA_ChildPoverty },
+  { label: 'CA  Immigration    (StatCan Pop Components 17-10-0008-01)',   fn: fetchCA_Immigration },
+  { label: 'CA  Gini Coeff     (StatCan After-tax Gini 11-10-0134-01)',  fn: fetchCA_GiniCoefficient },
+  { label: 'CA  Min Wage       (ESDC Federal Min Wage CKAN)',             fn: fetchCA_MinWageGap },
   { label: 'US  Unemployment   (BLS API LNS14000000)',                   fn: fetchUS_Unemployment },
   { label: 'US  CPI            (BLS API CUUR0000SA0)',                   fn: fetchUS_CPI },
   { label: 'US  Drug Overdoses (CDC Socrata xkb8-kh2a)',                 fn: fetchUS_DrugOverdoses },
