@@ -3,12 +3,20 @@
  *
  * Dedicated fetchers using confirmed working government JSON APIs only.
  *
- * Canada (via bankofcanada.ca/valet + open.canada.ca CKAN):
+ * Canada (via bankofcanada.ca/valet + open.canada.ca CKAN + StatCan ZIP CSV):
  *   - CPI           Bank of Canada Valet series V41690973
  *   - unemployment  Statistics Canada LFS table 14-10-0017-01 (streaming ZIP/CSV)
  *                   NOTE: Bank of Canada Valet does not publish an unemployment series;
  *                   StatCan LFS is the primary and only programmatic source.
  *   - govtSpending  open.canada.ca CKAN datastore — Public Accounts of Canada
+ *
+ * Canada — Safety & Health (StatCan in-memory ZIP CSV + PHAC Health Infobase):
+ *   - crimeRate     StatCan Crime Severity Index, table 35-10-0026-01
+ *   - drugOverdoses PHAC Health Infobase SubstanceHarmsData.csv (opioid deaths)
+ *   - roadFatalities StatCan road collisions by severity, table 23-10-0006-01
+ *   - homicideRate  StatCan Homicide Survey, table 35-10-0068-01
+ *   - lifeExpectancy StatCan complete life tables, table 13-10-0114-01
+ *   - obesityRate   StatCan measured BMI (CCHS), table 13-10-0373-01
  *
  * United States (JSON APIs, no key required):
  *   - unemployment  BLS API v2  series LNS14000000
@@ -38,6 +46,7 @@ const fs         = require('fs');
 const path       = require('path');
 const zlib       = require('zlib');
 const { promisify } = require('util');
+const inflateRaw = promisify(zlib.inflateRaw);
 
 const OUTPUT_DIR  = path.resolve(__dirname, '../../output/targeted');
 const TIMEOUT_MS  = 25000;
@@ -241,6 +250,314 @@ async function fetchCA_GovtSpending() {
     'https://open.canada.ca/data/en/dataset/a35cf382-690c-4221-a971-cf0fd189a46f',
     `Sum of ${records.length} vote-level expenditure rows for FY ${latestFY}`
   );
+}
+
+// ─── CANADA — SAFETY & HEALTH ─────────────────────────────────────────────────
+
+/**
+ * Shared in-memory ZIP/CSV fetcher for smaller StatCan tables (< ~50 MB compressed).
+ * Uses inflateRaw; handles compressedSize=0 streaming ZIPs (inflateRaw ignores
+ * trailing ZIP central-directory bytes after the DEFLATE end marker).
+ */
+async function fetchStatCanCSV(tableCode, label) {
+  const url  = `https://www150.statcan.gc.ca/n1/tbl/csv/${tableCode}-eng.zip`;
+  const resp = await axios.get(url, {
+    responseType: 'arraybuffer',
+    timeout: 90000,
+    headers: { 'User-Agent': BROWSER_UA },
+  });
+  const buf = Buffer.from(resp.data);
+  if (buf.readUInt32LE(0) !== 0x04034b50) throw new Error(`${label}: not a ZIP file`);
+  const fnLen     = buf.readUInt16LE(26);
+  const extLen    = buf.readUInt16LE(28);
+  const compSize  = buf.readUInt32LE(18);
+  const dataStart = 30 + fnLen + extLen;
+  const compressed = buf.slice(dataStart, compSize > 0 ? dataStart + compSize : undefined);
+  return (await inflateRaw(compressed)).toString('utf-8').replace(/^\uFEFF/, '');
+}
+
+/**
+ * CA Crime Rate — Statistics Canada Police-reported crime, selected police services (table 35-10-0026-01)
+ * Total Crime Severity Index for Canada, latest year. Index base year 2006=100.
+ * Table 35-10-0026-01 contains a national Canada-level aggregate row with
+ * Statistics = "Crime severity index". Only 320 KB compressed.
+ * VALUE is at column index 10 (DGUID is present, shifting cols vs other StatCan tables).
+ */
+async function fetchCA_CrimeRate() {
+  const csv = await fetchStatCanCSV('35100026', 'CA CSI');
+  const lines  = csv.split('\n');
+  const header = parseCSVLine(lines[0]);
+  const geoIdx   = header.findIndex(c => c === 'GEO');
+  const dateIdx  = header.findIndex(c => c === 'REF_DATE');
+  const valueIdx = header.findIndex(c => c === 'VALUE');
+  const statsIdx = header.findIndex(c => c === 'Statistics');
+
+  let bestDate = '', bestValue = null;
+  for (let i = 1; i < lines.length; i++) {
+    const cols = parseCSVLine(lines[i].trim());
+    if (!cols[geoIdx]?.startsWith('Canada')) continue;
+    if (cols[statsIdx] !== 'Crime severity index') continue;
+    const val = cols[valueIdx], date = cols[dateIdx];
+    if (!val || val === '..' || val === '' || !date) continue;
+    if (date > bestDate) { bestDate = date; bestValue = parseFloat(val); }
+  }
+
+  if (bestValue === null) throw new Error('CA CSI: no Crime Severity Index found for Canada');
+  return result('CA', 'crimeRate', bestValue, 'Crime Severity Index (2006=100)',
+    bestDate,
+    'Statistics Canada — Police-reported crime for selected police services, table 35-10-0026-01',
+    'https://www150.statcan.gc.ca/t1/tbl1/en/tv.action?pid=3510002601');
+}
+
+/**
+ * CA Drug Overdoses — PHAC Health Infobase Substance Harms Data
+ * Total apparent opioid toxicity deaths, Canada, latest annual data.
+ * Direct CSV download; no ZIP, no API key required.
+ * URL: https://health-infobase.canada.ca/src/doc/SRHD/SubstanceHarmsData.csv
+ */
+async function fetchCA_DrugOverdoses() {
+  const URL = 'https://health-infobase.canada.ca/src/doc/SRHD/SubstanceHarmsData.csv';
+  const resp = await axios.get(URL, {
+    timeout: 30000,
+    responseType: 'text',
+    headers: { 'User-Agent': BROWSER_UA },
+  });
+  const lines  = String(resp.data).replace(/^\uFEFF/, '').trim().split('\n');
+  const header = parseCSVLine(lines[0]);
+
+  // Column indices — structure: Substance,Source,Specific_Measure,Region,PRUID,
+  //   Time_Period,Year_Quarter,Aggregator,Disaggregator,Unit,Value
+  const subIdx  = header.findIndex(c => /substance/i.test(c));     // 0
+  const srcIdx  = header.findIndex(c => /^source$/i.test(c));      // 1
+  const smIdx   = header.findIndex(c => /specific_measure/i.test(c)); // 2
+  const regIdx  = header.findIndex(c => /region/i.test(c));        // 3
+  const tpIdx   = header.findIndex(c => /time_period/i.test(c));   // 5
+  const yqIdx   = header.findIndex(c => /year_quarter/i.test(c));  // 6
+  const aggIdx  = header.findIndex(c => /^aggregator$/i.test(c));  // 7
+  const disIdx  = header.findIndex(c => /^disaggregator$/i.test(c)); // 8
+  const unitIdx = header.findIndex(c => /^unit$/i.test(c));        // 9
+  const valIdx  = header.findIndex(c => /^value$/i.test(c));       // 10
+
+  let bestPeriod = '', bestValue = null;
+  for (let i = 1; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (!line) continue;
+    const cols = parseCSVLine(line);
+    if (cols[subIdx]  !== 'Opioids')          continue;
+    if (cols[srcIdx]  !== 'Deaths')            continue;
+    if (cols[smIdx]   !== 'Overall numbers')   continue; // total, not breakdown
+    if (!/canada/i.test(cols[regIdx] ?? ''))   continue;
+    if (cols[tpIdx]   !== 'By year')           continue;
+    if ((cols[aggIdx]  ?? '') !== '')           continue; // empty = no sub-aggregation
+    if ((cols[disIdx]  ?? '') !== '')           continue; // empty = no disaggregation
+    if (cols[unitIdx] !== 'Number')            continue; // count, not crude rate
+    const yq  = cols[yqIdx] ?? '';
+    const val = cols[valIdx];
+    if (!val || val === '' || isNaN(parseFloat(val))) continue;
+    if (yq > bestPeriod) { bestPeriod = yq; bestValue = parseFloat(val); }
+  }
+
+  if (bestValue === null) throw new Error('PHAC: no total opioid death count found for Canada (Overall numbers / By year / Number)');
+  return result('CA', 'drugOverdoses', bestValue, 'apparent opioid toxicity deaths (annual total)',
+    bestPeriod,
+    'Public Health Agency of Canada — Substance-related Harms in Canada (Health Infobase)',
+    'https://health-infobase.canada.ca/substance-related-harms/opioids-stimulants/',
+    'Apparent accidental and undetermined opioid toxicity deaths; updated quarterly');
+}
+
+/**
+ * CA Road Fatalities — Transport Canada National Collision Database (open.canada.ca)
+ * Dynamically finds the latest English CSV year from the CKAN package, then streams
+ * the file and counts rows where C_SEV = '1' (fatal collision severity).
+ * Package: 1eb9eba7-71d1-4b30-9fb1-30cbdab7e63a
+ */
+async function fetchCA_RoadFatalities() {
+  // Step 1: discover resources and find the latest English CSV year
+  const pkgResp = await axios.get(
+    'https://open.canada.ca/data/en/api/3/action/package_show',
+    { params: { id: '1eb9eba7-71d1-4b30-9fb1-30cbdab7e63a' }, timeout: TIMEOUT_MS }
+  );
+  const resources = pkgResp.data?.result?.resources ?? [];
+  const csvCandidates = resources
+    .map(r => {
+      const url = r.url ?? '';
+      // Accept .csv files with English indicators (_en, dataset_en, or no language suffix)
+      if (!url.toLowerCase().endsWith('.csv')) return null;
+      if (url.includes('_fr') || url.includes('-fr') || url.includes('dataset_fr')) return null;
+      // Extract 4-digit year from resource name or URL
+      const m = (r.name ?? url).match(/\b(20\d{2}|19\d{2})\b/);
+      return m ? { year: parseInt(m[1]), url } : null;
+    })
+    .filter(Boolean)
+    .sort((a, b) => b.year - a.year);
+
+  if (csvCandidates.length === 0) throw new Error('CA Road Fatalities: no English CSV found in TC CKAN package');
+  const { year, url: csvUrl } = csvCandidates[0];
+
+  // Step 2: stream CSV and count C_SEV = '1' (fatal collision) rows
+  const resp = await axios.get(csvUrl, {
+    responseType: 'stream',
+    timeout: 120000,
+    headers: { 'User-Agent': BROWSER_UA },
+  });
+
+  return new Promise((resolve, reject) => {
+    let lineBuffer = '', header = null, sevIdx = -1, fatalCount = 0;
+
+    function processText(text) {
+      lineBuffer += text;
+      const lines = lineBuffer.split('\n');
+      lineBuffer  = lines.pop();
+      for (const rawLine of lines) {
+        const line = rawLine.trim();
+        if (!line) continue;
+        if (!header) {
+          header = parseCSVLine(line);
+          sevIdx = header.findIndex(c => c === 'C_SEV');
+          continue;
+        }
+        // Fast split — TC collision CSVs use simple comma separation, no quoted fields
+        const sev = line.split(',')[sevIdx] ?? '';
+        if (sev === '1') fatalCount++;
+      }
+    }
+
+    resp.data.on('data', chunk => processText(chunk.toString()));
+    resp.data.on('end',  () => {
+      processText('');
+      if (fatalCount === 0) return reject(new Error(`CA Road Fatalities: C_SEV=1 count was 0 (year ${year})`));
+      resolve(result(
+        'CA', 'roadFatalities', fatalCount, `fatal road collisions (C_SEV=1, Transport Canada NCDB)`,
+        String(year),
+        `Transport Canada — National Collision Database ${year} (open.canada.ca)`,
+        'https://open.canada.ca/data/dataset/1eb9eba7-71d1-4b30-9fb1-30cbdab7e63a',
+        'Count of collisions where at least one fatality occurred (C_SEV=1); updated annually'
+      ));
+    });
+    resp.data.on('error', reject);
+  });
+}
+
+/**
+ * CA Homicide Rate — Statistics Canada Homicide Survey (table 35-10-0068-01)
+ * Homicide rate per 100,000 population, Canada, latest year.
+ */
+async function fetchCA_HomicideRate() {
+  const csv    = await fetchStatCanCSV('35100068', 'CA Homicide');
+  const lines  = csv.split('\n');
+  const header = parseCSVLine(lines[0]);
+  const geoIdx   = header.findIndex(c => c === 'GEO');
+  const dateIdx  = header.findIndex(c => c === 'REF_DATE');
+  const valueIdx = header.findIndex(c => c === 'VALUE');
+  // Dimension column is named "Homicides" in this table (not "Statistics")
+  const statsIdx = header.findIndex(c => c === 'Homicides');
+
+  let bestDate = '', bestValue = null;
+  for (let i = 1; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (!line || !line.includes('Canada') || !line.toLowerCase().includes('rate')) continue;
+    const cols = parseCSVLine(line);
+    if (cols[geoIdx] !== 'Canada') continue;
+    const statsVal = statsIdx >= 0 ? (cols[statsIdx] ?? '') : '';
+    // Exact value: "Homicide rates per 100,000 population"
+    if (!statsVal.toLowerCase().includes('homicide rates per')) continue;
+    const val = cols[valueIdx], date = cols[dateIdx];
+    if (!val || val === '..' || val === '' || !date) continue;
+    if (date > bestDate) { bestDate = date; bestValue = parseFloat(val); }
+  }
+
+  if (bestValue === null) throw new Error('CA Homicide Rate: no "Homicide rates per 100,000 population" found for Canada');
+  return result('CA', 'homicideRate', bestValue, 'per 100,000 population',
+    bestDate,
+    'Statistics Canada — Homicide Survey, table 35-10-0068-01',
+    'https://www150.statcan.gc.ca/t1/tbl1/en/tv.action?pid=3510006801');
+}
+
+/**
+ * CA Life Expectancy — Statistics Canada complete life tables (table 13-10-0114-01)
+ * Life expectancy at birth, both sexes, Canada, latest three-year period.
+ */
+async function fetchCA_LifeExpectancy() {
+  const csv    = await fetchStatCanCSV('13100114', 'CA Life Expectancy');
+  const lines  = csv.split('\n');
+  const header = parseCSVLine(lines[0]);
+  const geoIdx   = header.findIndex(c => c === 'GEO');
+  const dateIdx  = header.findIndex(c => c === 'REF_DATE');
+  const valueIdx = header.findIndex(c => c === 'VALUE');
+  const sexIdx   = header.findIndex(c => /^sex$/i.test(c));
+  // Age column: "Age (x)" in StatCan life tables; value "0" = at birth
+  const ageIdx   = header.findIndex(c => /^age/i.test(c) && c !== 'GEO');
+  // Life table element column: "Life table functions" or "Statistics"
+  const elemIdx  = header.findIndex(c =>
+    /element|statistic|function|characteristic/i.test(c) && c !== 'GEO' && c !== 'VALUE'
+  );
+
+  let bestDate = '', bestValue = null;
+  for (let i = 1; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (!line || !line.includes('Canada') || !line.toLowerCase().includes('expectanc')) continue;
+    const cols = parseCSVLine(line);
+    if (cols[geoIdx] !== 'Canada') continue;
+    if (sexIdx  >= 0 && !/both/i.test(cols[sexIdx]  ?? '')) continue;
+    if (ageIdx  >= 0) {
+      const age = (cols[ageIdx] ?? '').trim();
+      // Accept "0", "0 years", "At birth" — reject any other age
+      if (!/^0$/.test(age) && !/^0 /.test(age) && !/birth/i.test(age)) continue;
+    }
+    if (elemIdx >= 0 && !cols[elemIdx]?.toLowerCase().includes('expectanc')) continue;
+    const val = cols[valueIdx], date = cols[dateIdx];
+    if (!val || val === '..' || val === '' || !date) continue;
+    if (date > bestDate) { bestDate = date; bestValue = parseFloat(val); }
+  }
+
+  if (bestValue === null) throw new Error('CA Life Expectancy: no at-birth value found for Canada (both sexes)');
+  return result('CA', 'lifeExpectancy', bestValue, 'years (life expectancy at birth, both sexes)',
+    bestDate,
+    'Statistics Canada — Complete life tables, Canada, provinces and territories, table 13-10-0114-01',
+    'https://www150.statcan.gc.ca/t1/tbl1/en/tv.action?pid=1310011401');
+}
+
+/**
+ * CA Obesity Rate — Statistics Canada measured BMI, CCHS (table 13-10-0373-01)
+ * Obesity rate (BMI ≥ 30) for adults 18–79, both sexes, Canada, latest survey cycle.
+ */
+async function fetchCA_ObesityRate() {
+  const csv    = await fetchStatCanCSV('13100373', 'CA Obesity');
+  const lines  = csv.split('\n');
+  const header = parseCSVLine(lines[0]);
+  const geoIdx   = header.findIndex(c => c === 'GEO');
+  const dateIdx  = header.findIndex(c => c === 'REF_DATE');
+  const valueIdx = header.findIndex(c => c === 'VALUE');
+  const sexIdx   = header.findIndex(c => /^sex$/i.test(c));
+  const ageIdx   = header.findIndex(c => /^age/i.test(c) && c !== 'GEO');
+  // "Measured characteristics" or similar — contains BMI category names
+  const charIdx  = header.findIndex(c =>
+    /characteristic|measure|bmi|weight/i.test(c) && c !== 'GEO' && c !== 'VALUE'
+  );
+
+  let bestDate = '', bestValue = null;
+  for (let i = 1; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (!line || !line.includes('Canada') || !line.toLowerCase().includes('obe')) continue;
+    const cols = parseCSVLine(line);
+    if (cols[geoIdx] !== 'Canada') continue;
+    if (sexIdx  >= 0 && !/both/i.test(cols[sexIdx]  ?? '')) continue;
+    if (ageIdx  >= 0 && !cols[ageIdx]?.includes('18'))       continue; // adults 18–79
+    if (charIdx >= 0) {
+      const ch = (cols[charIdx] ?? '').toLowerCase();
+      if (!ch.includes('obe')) continue;
+      if (ch.includes('overweight')) continue; // skip combined "overweight and obese"
+    }
+    const val = cols[valueIdx], date = cols[dateIdx];
+    if (!val || val === '..' || val === '' || !date) continue;
+    if (date > bestDate) { bestDate = date; bestValue = parseFloat(val); }
+  }
+
+  if (bestValue === null) throw new Error('CA Obesity Rate: no adult obesity rate found for Canada (both sexes, 18–79)');
+  return result('CA', 'obesityRate', bestValue, '% obese (BMI ≥ 30, adults 18–79, both sexes)',
+    bestDate,
+    'Statistics Canada — Direct measures of body weight and height (CCHS), table 13-10-0373-01',
+    'https://www150.statcan.gc.ca/t1/tbl1/en/tv.action?pid=1310037301');
 }
 
 // ─── UNITED STATES ────────────────────────────────────────────────────────────
@@ -580,9 +897,15 @@ async function fetchAU_BankRate() {
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
 const FETCHERS = [
-  { label: 'CA  CPI           (Bank of Canada Valet V41690973)',         fn: fetchCA_CPI },
-  { label: 'CA  Unemployment   (StatCan LFS 14-10-0017-01, stream ZIP)', fn: fetchCA_Unemployment },
-  { label: 'CA  Govt Spending  (open.canada.ca CKAN Public Accounts)',   fn: fetchCA_GovtSpending },
+  { label: 'CA  CPI            (Bank of Canada Valet V41690973)',          fn: fetchCA_CPI },
+  { label: 'CA  Unemployment    (StatCan LFS 14-10-0017-01, stream ZIP)',  fn: fetchCA_Unemployment },
+  { label: 'CA  Govt Spending   (open.canada.ca CKAN Public Accounts)',    fn: fetchCA_GovtSpending },
+  { label: 'CA  Crime Rate      (StatCan CSI 35-10-0026-01)',              fn: fetchCA_CrimeRate },
+  { label: 'CA  Drug Overdoses  (PHAC Health Infobase SubstanceHarms)',    fn: fetchCA_DrugOverdoses },
+  { label: 'CA  Road Fatalities (StatCan 23-10-0006-01)',                  fn: fetchCA_RoadFatalities },
+  { label: 'CA  Homicide Rate   (StatCan Homicide Survey 35-10-0068-01)', fn: fetchCA_HomicideRate },
+  { label: 'CA  Life Expectancy (StatCan life tables 13-10-0114-01)',      fn: fetchCA_LifeExpectancy },
+  { label: 'CA  Obesity Rate    (StatCan CCHS BMI 13-10-0373-01)',         fn: fetchCA_ObesityRate },
   { label: 'US  Unemployment   (BLS API LNS14000000)',                   fn: fetchUS_Unemployment },
   { label: 'US  CPI            (BLS API CUUR0000SA0)',                   fn: fetchUS_CPI },
   { label: 'US  Drug Overdoses (CDC Socrata xkb8-kh2a)',                 fn: fetchUS_DrugOverdoses },
