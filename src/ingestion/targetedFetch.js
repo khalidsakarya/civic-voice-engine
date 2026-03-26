@@ -31,6 +31,14 @@
  *   - homePrice     HM Land Registry HPI Linked Data API (average UK price)
  *   - bankRate      Bank of England IADB CSV API (series IUDBEDR) — returns CSV
  *
+ * United Kingdom — Safety & Health (OHID Fingertips CSV + WHO GHO + DfT stream CSV):
+ *   - crimeRate     OHID Fingertips indicator 11202 (violent crime/1k, police-recorded)
+ *   - drugOverdoses OHID Fingertips indicator 92432 (drug deaths/100k, age-standardised)
+ *   - homicideRate  WHO GHO VIOLENCE_HOMICIDERATE (UNODC intentional homicide/100k, GBR)
+ *   - roadFatalities DfT dft-road-casualty-statistics-casualty-2023.csv (stream, sev=1)
+ *   - lifeExpectancy WHO GHO WHOSIS_000001 (life expectancy at birth, both sexes, GBR)
+ *   - obesityRate   OHID Fingertips indicator 93088 (overweight/obese adults 18+, HSE)
+ *
  * Australia (JSON/CSV APIs, no key required):
  *   - unemployment  ABS SDMX-JSON LF dataflow (M13.3.1599.20.AUS.M)
  *   - CPI           ABS SDMX-JSON CPI dataflow (3.10001.10.50.M)
@@ -1079,6 +1087,213 @@ async function fetchUK_BankRate() {
     'https://www.bankofengland.co.uk/boeapps/database/_iadb-FromShowColumns.asp?SeriesCodes=IUDBEDR');
 }
 
+// ─── UNITED KINGDOM — Safety & Health ─────────────────────────────────────────
+
+/**
+ * UK Crime Rate — OHID Fingertips API
+ * Indicator 11202: Violent crime offences per 1,000 population (police-recorded)
+ * England (E92000001), Persons, latest annual period
+ * No API key required; requires browser-like User-Agent.
+ */
+async function fetchUK_CrimeRate() {
+  const INDICATOR = 11202;
+  const URL = `https://fingertips.phe.org.uk/api/all_data/csv/by_indicator_id?indicator_ids=${INDICATOR}&child_area_type_id=15&parent_area_code=E92000001`;
+  const resp = await axios.get(URL, {
+    timeout: TIMEOUT_MS,
+    headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36', Accept: 'text/csv,*/*' },
+  });
+  const lines = String(resp.data).split('\n').filter(l => l.trim());
+  if (lines.length < 2) throw new Error('Fingertips 11202: no data rows');
+  const header    = parseCSVLine(lines[0]);
+  const areaIdx   = header.findIndex(h => h === 'Area Code');
+  const sexIdx    = header.findIndex(h => h === 'Sex');
+  const periodIdx = header.findIndex(h => h === 'Time period');
+  const valueIdx  = header.findIndex(h => h === 'Value');
+  if (areaIdx < 0 || periodIdx < 0 || valueIdx < 0)
+    throw new Error(`Fingertips 11202: missing columns. Header: ${lines[0].slice(0, 100)}`);
+  const rows = lines.slice(1).map(l => parseCSVLine(l))
+    .filter(r => r[areaIdx] === 'E92000001' && (sexIdx < 0 || r[sexIdx] === 'Persons') && r[valueIdx] && r[valueIdx] !== '');
+  if (rows.length === 0) throw new Error('Fingertips 11202: no England/Persons rows found');
+  rows.sort((a, b) => b[periodIdx].localeCompare(a[periodIdx]));
+  const latest = rows[0];
+  const val    = safeNum(latest[valueIdx]);
+  if (val === null) throw new Error(`Fingertips 11202: cannot parse value "${latest[valueIdx]}"`);
+  return result('UK', 'crimeRate', val, 'violent crime offences per 1,000 population (police-recorded, England)',
+    latest[periodIdx],
+    'OHID Fingertips — Violent crime offences per 1,000 population (indicator 11202)',
+    URL);
+}
+
+/**
+ * UK Drug Overdoses — OHID Fingertips API
+ * Indicator 92432: Deaths from drug misuse, age-standardised rate per 100,000 (England)
+ * England (E92000001), Persons, latest 3-year rolling period
+ * No API key required; requires browser-like User-Agent.
+ */
+async function fetchUK_DrugOverdoses() {
+  const INDICATOR = 92432;
+  const URL = `https://fingertips.phe.org.uk/api/all_data/csv/by_indicator_id?indicator_ids=${INDICATOR}&child_area_type_id=15&parent_area_code=E92000001`;
+  const resp = await axios.get(URL, {
+    timeout: TIMEOUT_MS,
+    headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36', Accept: 'text/csv,*/*' },
+  });
+  const lines = String(resp.data).split('\n').filter(l => l.trim());
+  if (lines.length < 2) throw new Error('Fingertips 92432: no data rows');
+  const header    = parseCSVLine(lines[0]);
+  const areaIdx   = header.findIndex(h => h === 'Area Code');
+  const sexIdx    = header.findIndex(h => h === 'Sex');
+  const periodIdx = header.findIndex(h => h === 'Time period');
+  const valueIdx  = header.findIndex(h => h === 'Value');
+  if (areaIdx < 0 || periodIdx < 0 || valueIdx < 0)
+    throw new Error(`Fingertips 92432: missing columns. Header: ${lines[0].slice(0, 100)}`);
+  const rows = lines.slice(1).map(l => parseCSVLine(l))
+    .filter(r => r[areaIdx] === 'E92000001' && (sexIdx < 0 || r[sexIdx] === 'Persons') && r[valueIdx] && r[valueIdx] !== '');
+  if (rows.length === 0) throw new Error('Fingertips 92432: no England/Persons rows found');
+  rows.sort((a, b) => b[periodIdx].localeCompare(a[periodIdx]));
+  const latest = rows[0];
+  const val    = safeNum(latest[valueIdx]);
+  if (val === null) throw new Error(`Fingertips 92432: cannot parse value "${latest[valueIdx]}"`);
+  return result('UK', 'drugOverdoses', val, 'deaths from drug misuse per 100,000 (age-standardised, England)',
+    latest[periodIdx],
+    'OHID Fingertips — Deaths from drug misuse, age-standardised rate (indicator 92432)',
+    URL);
+}
+
+/**
+ * UK Homicide Rate — WHO Global Health Observatory API (UNODC data)
+ * Indicator VIOLENCE_HOMICIDERATE: Intentional homicides per 100,000 population (UK)
+ * Both sexes, latest available year. WHO publishes UNODC data with ~2-year lag.
+ */
+async function fetchUK_HomicideRate() {
+  const URL = "https://ghoapi.azureedge.net/api/VIOLENCE_HOMICIDERATE?$filter=SpatialDim eq 'GBR'";
+  const resp = await axios.get(URL, {
+    timeout: TIMEOUT_MS,
+    headers: { 'User-Agent': BROWSER_UA, Accept: 'application/json' },
+  });
+  const records = resp.data?.value ?? [];
+  if (records.length === 0) throw new Error('WHO GHO VIOLENCE_HOMICIDERATE: no data for GBR');
+  // Prefer both-sexes dimension; fall back to all records
+  const both = records.filter(r => !r.Dim1 || r.Dim1 === 'BTSX' || r.Dim1 === 'SEX_BTSX');
+  const src  = both.length > 0 ? both : records;
+  src.sort((a, b) => (b.TimeDim ?? 0) - (a.TimeDim ?? 0));
+  const latest = src[0];
+  const val    = safeNum(latest.NumericValue ?? latest.Value);
+  if (val === null) throw new Error('WHO GHO VIOLENCE_HOMICIDERATE: cannot parse value');
+  return result('UK', 'homicideRate', val, 'intentional homicides per 100,000 population (UNODC/WHO)',
+    String(latest.TimeDim),
+    'WHO Global Health Observatory — Intentional homicide rate VIOLENCE_HOMICIDERATE (UNODC data), GBR',
+    'https://ghoapi.azureedge.net/api/VIOLENCE_HOMICIDERATE');
+}
+
+/**
+ * UK Road Fatalities — Department for Transport Road Casualty Statistics 2023
+ * File: dft-road-casualty-statistics-casualty-2023.csv (~10 MB)
+ * Streams CSV and counts rows where casualty_severity == 1 (fatal).
+ * No API key required.
+ */
+async function fetchUK_RoadFatalities() {
+  const CSV_URL = 'https://data.dft.gov.uk/road-accidents-safety-data/dft-road-casualty-statistics-casualty-2023.csv';
+  const resp = await axios.get(CSV_URL, {
+    responseType: 'stream',
+    timeout: 120000,
+    headers: { 'User-Agent': BROWSER_UA },
+  });
+  return new Promise((resolve, reject) => {
+    let lineBuffer = '', header = null, sevIdx = -1, fatalCount = 0;
+    function processText(text) {
+      lineBuffer += text;
+      const lines = lineBuffer.split('\n');
+      lineBuffer = lines.pop();
+      for (const rawLine of lines) {
+        const line = rawLine.trim();
+        if (!line) continue;
+        if (!header) {
+          header = parseCSVLine(line);
+          sevIdx = header.findIndex(c => c === 'casualty_severity');
+          continue;
+        }
+        // DfT CSVs use simple comma separation with no quoted commas in severity column
+        const sev = line.split(',')[sevIdx] ?? '';
+        if (sev === '1') fatalCount++;
+      }
+    }
+    resp.data.on('data',  chunk => processText(chunk.toString()));
+    resp.data.on('end',   () => {
+      processText('');
+      if (fatalCount === 0) return reject(new Error('UK Road Fatalities: casualty_severity=1 count was 0 — check CSV column name'));
+      resolve(result(
+        'UK', 'roadFatalities', fatalCount, 'road deaths (casualty_severity=1, DfT 2023)',
+        '2023',
+        'Department for Transport — Road Casualty Statistics 2023 (dft-road-casualty-statistics-casualty-2023.csv)',
+        CSV_URL,
+        'Count of casualties with severity=1 (fatal); updated annually'
+      ));
+    });
+    resp.data.on('error', reject);
+  });
+}
+
+/**
+ * UK Life Expectancy — WHO Global Health Observatory API
+ * Indicator WHOSIS_000001: Life expectancy at birth (years), United Kingdom
+ * Both sexes, latest available year. WHO estimate, typically 2-year lag.
+ */
+async function fetchUK_LifeExpectancy() {
+  const URL = "https://ghoapi.azureedge.net/api/WHOSIS_000001?$filter=SpatialDim eq 'GBR'";
+  const resp = await axios.get(URL, {
+    timeout: TIMEOUT_MS,
+    headers: { 'User-Agent': BROWSER_UA, Accept: 'application/json' },
+  });
+  const records = resp.data?.value ?? [];
+  if (records.length === 0) throw new Error('WHO GHO WHOSIS_000001: no data for GBR');
+  // Prefer both-sexes dimension
+  const both = records.filter(r => !r.Dim1 || r.Dim1 === 'BTSX' || r.Dim1 === 'SEX_BTSX');
+  const src  = both.length > 0 ? both : records;
+  src.sort((a, b) => (b.TimeDim ?? 0) - (a.TimeDim ?? 0));
+  const latest = src[0];
+  const val    = safeNum(latest.NumericValue ?? latest.Value);
+  if (val === null) throw new Error('WHO GHO WHOSIS_000001: cannot parse value');
+  return result('UK', 'lifeExpectancy', val, 'years at birth, both sexes (WHO estimate, GBR)',
+    String(latest.TimeDim),
+    'WHO Global Health Observatory — Life expectancy at birth WHOSIS_000001, GBR',
+    'https://ghoapi.azureedge.net/api/WHOSIS_000001');
+}
+
+/**
+ * UK Obesity Rate — OHID Fingertips API
+ * Indicator 93088: Adults classified as overweight or obese (%), Health Survey for England
+ * England (E92000001), Persons (18+), latest annual period
+ * No API key required; requires browser-like User-Agent.
+ */
+async function fetchUK_ObesityRate() {
+  const INDICATOR = 93088;
+  const URL = `https://fingertips.phe.org.uk/api/all_data/csv/by_indicator_id?indicator_ids=${INDICATOR}&child_area_type_id=15&parent_area_code=E92000001`;
+  const resp = await axios.get(URL, {
+    timeout: TIMEOUT_MS,
+    headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36', Accept: 'text/csv,*/*' },
+  });
+  const lines = String(resp.data).split('\n').filter(l => l.trim());
+  if (lines.length < 2) throw new Error('Fingertips 93088: no data rows');
+  const header    = parseCSVLine(lines[0]);
+  const areaIdx   = header.findIndex(h => h === 'Area Code');
+  const sexIdx    = header.findIndex(h => h === 'Sex');
+  const periodIdx = header.findIndex(h => h === 'Time period');
+  const valueIdx  = header.findIndex(h => h === 'Value');
+  if (areaIdx < 0 || periodIdx < 0 || valueIdx < 0)
+    throw new Error(`Fingertips 93088: missing columns. Header: ${lines[0].slice(0, 100)}`);
+  const rows = lines.slice(1).map(l => parseCSVLine(l))
+    .filter(r => r[areaIdx] === 'E92000001' && (sexIdx < 0 || r[sexIdx] === 'Persons') && r[valueIdx] && r[valueIdx] !== '');
+  if (rows.length === 0) throw new Error('Fingertips 93088: no England/Persons rows found');
+  rows.sort((a, b) => b[periodIdx].localeCompare(a[periodIdx]));
+  const latest = rows[0];
+  const val    = safeNum(latest[valueIdx]);
+  if (val === null) throw new Error(`Fingertips 93088: cannot parse value "${latest[valueIdx]}"`);
+  return result('UK', 'obesityRate', val, '% adults 18+ overweight or obese (Health Survey for England)',
+    latest[periodIdx],
+    'OHID Fingertips — Overweight or obese adults 18+, % (indicator 93088)',
+    URL);
+}
+
 // ─── AUSTRALIA ────────────────────────────────────────────────────────────────
 
 /**
@@ -1200,6 +1415,12 @@ const FETCHERS = [
   { label: 'UK  CPI            (ONS timeseries D7G7)',                   fn: fetchUK_CPI },
   { label: 'UK  Home Prices    (LR HPI Linked Data API)',                fn: fetchUK_HomePrices },
   { label: 'UK  Bank Rate      (BoE IADB CSV series IUDBEDR)',           fn: fetchUK_BankRate },
+  { label: 'UK  Crime Rate     (Fingertips indicator 11202)',            fn: fetchUK_CrimeRate },
+  { label: 'UK  Drug Overdoses (Fingertips indicator 92432)',            fn: fetchUK_DrugOverdoses },
+  { label: 'UK  Homicide Rate  (WHO GHO VIOLENCE_HOMICIDERATE GBR)',    fn: fetchUK_HomicideRate },
+  { label: 'UK  Road Fatalities(DfT casualty-2023.csv severity=1)',     fn: fetchUK_RoadFatalities },
+  { label: 'UK  Life Expectancy(WHO GHO WHOSIS_000001 GBR)',            fn: fetchUK_LifeExpectancy },
+  { label: 'UK  Obesity Rate   (Fingertips indicator 93088)',            fn: fetchUK_ObesityRate },
   { label: 'AU  Unemployment   (ABS SDMX-JSON LF/M13.3.1599.20.AUS.M)', fn: fetchAU_Unemployment },
   { label: 'AU  CPI            (ABS SDMX-JSON CPI/3.10001.10.50.M)',    fn: fetchAU_CPI },
   { label: 'AU  Bank Rate      (RBA F1 CSV — Cash Rate Target)',         fn: fetchAU_BankRate },
