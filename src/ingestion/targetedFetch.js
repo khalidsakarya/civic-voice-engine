@@ -39,6 +39,15 @@
  *   - lifeExpectancy WHO GHO WHOSIS_000001 (life expectancy at birth, both sexes, GBR)
  *   - obesityRate   OHID Fingertips indicator 93088 (overweight/obese adults 18+, HSE)
  *
+ * United Kingdom — Housing & Social:
+ *   - homelessness  MHCLG rough sleeping snapshot (gov.uk search → HTML report)
+ *   - newBuilds     MHCLG housing supply indicators (gov.uk collection → HTML report)
+ *   - graduationRate World Bank SE.TER.CUAT.BA.ZS (% adults 25+ with bachelor's+, GBR)
+ *   - studentDebt   SLC student-loans-for-higher-and-further-education (gov.uk → HTML report)
+ *   - childPoverty  OHID Fingertips indicator 93701 (children in poverty AHC %, DWP HBAI)
+ *   - immigration   ONS LTIM provisional bulletin HTML (headline figure)
+ *   - giniCoefficient ONS household income inequality bulletin → generator CSV
+ *
  * Australia (JSON/CSV APIs, no key required):
  *   - unemployment  ABS SDMX-JSON LF dataflow (M13.3.1599.20.AUS.M)
  *   - CPI           ABS SDMX-JSON CPI dataflow (3.10001.10.50.M)
@@ -1294,6 +1303,302 @@ async function fetchUK_ObesityRate() {
     URL);
 }
 
+// ─── UNITED KINGDOM — Housing & Social ────────────────────────────────────────
+
+/**
+ * UK Homelessness — MHCLG Rough Sleeping Snapshot
+ * Annual single-night autumn count of people sleeping rough in England.
+ * Source: gov.uk search API → latest HTML report → headline figure.
+ * No API key required.
+ */
+async function fetchUK_Homelessness() {
+  // Step 1: Find latest rough sleeping snapshot publication via gov.uk search
+  const SEARCH_URL = 'https://www.gov.uk/api/search.json?q=rough+sleeping+snapshot+england&count=1';
+  const searchResp = await axios.get(SEARCH_URL, {
+    timeout: TIMEOUT_MS,
+    headers: { 'User-Agent': BROWSER_UA },
+  });
+  const link = searchResp.data?.results?.[0]?.link;
+  if (!link) throw new Error('UK homelessness: no rough sleeping publication found via gov.uk search');
+
+  // Step 2: Fetch HTML report (URL pattern: /statistics/{slug}/{slug})
+  const slug = link.split('/').pop();
+  const reportUrl = 'https://www.gov.uk' + link + '/' + slug;
+  const htmlResp = await axios.get(reportUrl, {
+    timeout: TIMEOUT_MS,
+    headers: { 'User-Agent': BROWSER_UA, Accept: 'text/html' },
+  });
+  const text = String(htmlResp.data).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
+
+  // Step 3: Parse headline count
+  const m = text.match(/estimated to be sleeping rough on a single night[^.]*?is\s+([\d,]+)/i)
+         ?? text.match(/sleeping rough[^.]*?(?:is|are)\s+([\d,]+)/i);
+  if (!m) throw new Error('UK homelessness: rough sleeping count not found in HTML report');
+  const val = parseInt(m[1].replace(/,/g, ''), 10);
+  if (isNaN(val)) throw new Error('UK homelessness: invalid rough sleeping count: ' + m[1]);
+
+  // Step 4: Extract period from "autumn YYYY"
+  const periodM = text.match(/autumn\s+(\d{4})/i) ?? slug.match(/autumn-(\d{4})/);
+  const period  = periodM ? 'Autumn ' + periodM[1] : null;
+
+  return result('UK', 'homelessness', val,
+    'people estimated to be sleeping rough on a single night in England (autumn snapshot)',
+    period,
+    'MHCLG — Rough Sleeping Snapshot in England (annual)',
+    reportUrl,
+    'Annual single-night count, autumn, across all English local authorities; not a continuous count');
+}
+
+/**
+ * UK New Builds — MHCLG Housing Supply: Indicators of New Supply
+ * Quarterly new build dwelling completions (not seasonally adjusted) for England.
+ * Source: gov.uk house-building-statistics collection → latest HTML report.
+ * No API key required.
+ */
+async function fetchUK_NewBuilds() {
+  // Step 1: Get latest publication from gov.uk collection
+  const COLL_URL = 'https://www.gov.uk/api/content/government/collections/house-building-statistics';
+  const collResp = await axios.get(COLL_URL, {
+    timeout: TIMEOUT_MS,
+    headers: { 'User-Agent': BROWSER_UA },
+  });
+  const docs = collResp.data?.links?.documents ?? [];
+  if (docs.length === 0) throw new Error('UK newBuilds: no documents in house-building-statistics collection');
+  const firstApiUrl = docs[0]?.api_url;
+  if (!firstApiUrl) throw new Error('UK newBuilds: no api_url on first document');
+  const slug = firstApiUrl.split('/').pop();
+
+  // Step 2: Fetch HTML report (URL pattern: /statistics/{slug}/{slug})
+  const reportUrl = 'https://www.gov.uk/government/statistics/' + slug + '/' + slug;
+  const htmlResp = await axios.get(reportUrl, {
+    timeout: TIMEOUT_MS,
+    headers: { 'User-Agent': BROWSER_UA, Accept: 'text/html' },
+  });
+  const text = String(htmlResp.data).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
+
+  // Step 3: Parse new build dwelling completions
+  const m = text.match(/([\d,]+)\s+new\s+build\s+dwelling\s+completions[^.]*?in\s+(\d{4}\s+Q\d)/i);
+  if (!m) throw new Error('UK newBuilds: new build dwelling completions figure not found in HTML report');
+  const val = parseInt(m[1].replace(/,/g, ''), 10);
+  if (isNaN(val)) throw new Error('UK newBuilds: invalid completions count: ' + m[1]);
+
+  return result('UK', 'newBuilds', val,
+    'new build dwelling completions in England (not seasonally adjusted)',
+    m[2],
+    'MHCLG — Housing supply: indicators of new supply, England (quarterly, building control)',
+    reportUrl,
+    'Building control reported completions; not seasonally adjusted');
+}
+
+/**
+ * UK Graduation Rate — World Bank Education Statistics (SE.TER.CUAT.BA.ZS)
+ * % of adults aged 25+ who have attained at least a bachelor's degree or equivalent (UK).
+ * Source: World Bank Open Data API, indicator SE.TER.CUAT.BA.ZS (GBR).
+ * No API key required.
+ */
+async function fetchUK_GraduationRate() {
+  const URL = 'https://api.worldbank.org/v2/country/GBR/indicator/SE.TER.CUAT.BA.ZS?format=json&mrv=5';
+  const resp = await axios.get(URL, {
+    timeout: TIMEOUT_MS,
+    headers: { 'User-Agent': BROWSER_UA, Accept: 'application/json' },
+  });
+  const items = (resp.data?.[1] ?? []).filter(x => x.value !== null);
+  if (items.length === 0) throw new Error('World Bank GBR SE.TER.CUAT.BA.ZS: no data returned');
+  items.sort((a, b) => b.date.localeCompare(a.date));
+  const latest = items[0];
+  const val    = Math.round(latest.value * 10) / 10;
+  return result('UK', 'graduationRate', val,
+    '% adults 25+ with at least bachelor\'s degree or equivalent (UK)',
+    String(latest.date),
+    'World Bank / UNESCO UIS — Educational attainment, bachelor\'s or above, SE.TER.CUAT.BA.ZS',
+    URL,
+    'Population aged 25+, not 16-64; sourced from World Bank Education Statistics (UNESCO Institute for Statistics)');
+}
+
+/**
+ * UK Student Debt — Student Loans Company (SLC) via gov.uk statistics HTML report
+ * Publication: "Student loans in England" (SLC collection on gov.uk)
+ * Retrieves HE ICR + FE outstanding loan balance from latest HTML report.
+ * No API key required.
+ */
+async function fetchUK_StudentDebt() {
+  // Step 1: Get latest publication from SLC collection
+  const COLL_URL = 'https://www.gov.uk/api/content/government/collections/student-loans-for-higher-and-further-education';
+  const collResp = await axios.get(COLL_URL, {
+    timeout: TIMEOUT_MS,
+    headers: { 'User-Agent': BROWSER_UA },
+  });
+  const docs = collResp.data?.links?.documents ?? [];
+  // Skip "uk-comparisons" docs; find latest "student-loans-in-england-..." publication
+  const latestDoc = docs.find(d => /\/statistics\/student-loans-in-england-\d/.test(d.api_url ?? ''));
+  if (!latestDoc) throw new Error('UK studentDebt: no student-loans-in-england doc in SLC collection');
+  const slug = latestDoc.api_url.split('/').pop();
+
+  // Step 2: Get attachment list for the publication
+  const pubResp = await axios.get(latestDoc.api_url, {
+    timeout: TIMEOUT_MS,
+    headers: { 'User-Agent': BROWSER_UA },
+  });
+  const atts = pubResp.data?.details?.attachments ?? [];
+
+  // Find the main HTML report (relative URL, contains "financial-year", no binary content_type)
+  const reportAtt = atts.find(a =>
+    !a.content_type &&
+    typeof a.url === 'string' &&
+    a.url.startsWith('/') &&
+    /financial.year/i.test(a.url) &&
+    !/correction|tables|definitions|pre.release|income.contingent/i.test(a.url)
+  );
+  if (!reportAtt) throw new Error('UK studentDebt: HTML report attachment not found in publication');
+
+  // Step 3: Fetch HTML report and parse outstanding balances
+  const reportUrl = 'https://www.gov.uk' + reportAtt.url;
+  const htmlResp = await axios.get(reportUrl, {
+    timeout: TIMEOUT_MS,
+    headers: { 'User-Agent': BROWSER_UA, Accept: 'text/html' },
+  });
+  const text = String(htmlResp.data).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
+
+  const heM = text.match(/Higher\s+education\s+ICR\s+student\s+loan\s+balance\s+totals\s+\u00a3([\d,.]+)\s*billion/i);
+  if (!heM) throw new Error('UK studentDebt: HE ICR balance not found in HTML report');
+  const feM = text.match(/Further\s+education\s+student\s+loan\s+balance\s+totals\s+\u00a3([\d,.]+)\s*billion/i);
+
+  const heBn  = parseFloat(heM[1].replace(/,/g, ''));
+  const feBn  = feM ? parseFloat(feM[1].replace(/,/g, '')) : 0;
+  const total = Math.round((heBn + feBn) * 1e9);
+
+  // Extract period from slug, e.g. "student-loans-in-england-2024-to-2025" → "2024/2025"
+  const periodM = slug.match(/(\d{4})-to-(\d{4})/);
+  const period  = periodM ? periodM[1] + '/' + periodM[2] : null;
+
+  return result('UK', 'studentDebt', total,
+    'total outstanding student loan balance, HE ICR + FE (GBP)',
+    period,
+    'Student Loans Company (SLC) — Student Loans in England (annual statistics)',
+    reportUrl,
+    'HE Income-Contingent Repayment loans + Further Education loans; published annually by SLC via gov.uk');
+}
+
+/**
+ * UK Child Poverty — OHID Fingertips API
+ * Indicator 93701: Children in poverty (after housing costs), % of children under 16.
+ * England (E92000001), latest annual period (DWP HBAI, via Fingertips).
+ * No API key required; requires browser-like User-Agent.
+ */
+async function fetchUK_ChildPoverty() {
+  const INDICATOR = 93701;
+  const URL = `https://fingertips.phe.org.uk/api/all_data/csv/by_indicator_id?indicator_ids=${INDICATOR}&child_area_type_id=15&parent_area_code=E92000001`;
+  const resp = await axios.get(URL, {
+    timeout: TIMEOUT_MS,
+    headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36', Accept: 'text/csv,*/*' },
+  });
+  const lines = String(resp.data).split('\n').filter(l => l.trim());
+  if (lines.length < 2) throw new Error('Fingertips 93701: no data rows');
+  const header    = parseCSVLine(lines[0]);
+  const areaIdx   = header.findIndex(h => h === 'Area Code');
+  const sexIdx    = header.findIndex(h => h === 'Sex');
+  const periodIdx = header.findIndex(h => h === 'Time period');
+  const valueIdx  = header.findIndex(h => h === 'Value');
+  if (areaIdx < 0 || periodIdx < 0 || valueIdx < 0)
+    throw new Error(`Fingertips 93701: missing columns. Header: ${lines[0].slice(0, 100)}`);
+  const rows = lines.slice(1).map(l => parseCSVLine(l))
+    .filter(r => r[areaIdx] === 'E92000001' && (sexIdx < 0 || r[sexIdx] === 'Persons') && r[valueIdx] && r[valueIdx] !== '');
+  if (rows.length === 0) throw new Error('Fingertips 93701: no England/Persons rows found');
+  rows.sort((a, b) => b[periodIdx].localeCompare(a[periodIdx]));
+  const latest = rows[0];
+  const val    = safeNum(latest[valueIdx]);
+  if (val === null) throw new Error(`Fingertips 93701: cannot parse value "${latest[valueIdx]}"`);
+  return result('UK', 'childPoverty', val,
+    '% children under 16 in poverty after housing costs (England)',
+    latest[periodIdx],
+    'OHID Fingertips / DWP HBAI — Children in poverty after housing costs (indicator 93701)',
+    URL,
+    'DWP Households Below Average Income (HBAI) measure; % of children in families below 60% median income AHC');
+}
+
+/**
+ * UK Immigration — ONS Long-Term International Migration Provisional Bulletin
+ * Headline total long-term immigration figure from the latest LTIM provisional release HTML.
+ * Source: ONS bulletin HTML (no JSON API available for this series).
+ * No API key required.
+ */
+async function fetchUK_Immigration() {
+  const URL = 'https://www.ons.gov.uk/peoplepopulationandcommunity/populationandmigration/internationalmigration/bulletins/longterminternationalmigrationprovisional/latest';
+  const resp = await axios.get(URL, {
+    timeout: TIMEOUT_MS,
+    headers: { 'User-Agent': BROWSER_UA, Accept: 'text/html' },
+  });
+  const text = String(resp.data).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
+
+  // Parse headline total immigration figure
+  const m = text.match(/total\s+long.term\s+immigration\s+for\s+the\s+most\s+recent\s+period\s+is\s+([\d,]+)/i);
+  if (!m) throw new Error('UK immigration: headline figure not found in ONS LTIM bulletin');
+  const val = parseInt(m[1].replace(/,/g, ''), 10);
+  if (isNaN(val)) throw new Error('UK immigration: invalid immigration count: ' + m[1]);
+
+  // Extract period — find latest "year ending Month YYYY" mention in the text
+  const yeMatches = text.match(/year\s+ending\s+(?:June|March|September|December)\s+\d{4}/gi) ?? [];
+  yeMatches.sort().reverse();
+  const period = yeMatches[0] ?? null;
+
+  return result('UK', 'immigration', val,
+    'total long-term immigrants arriving in UK (provisional estimate, rolling year)',
+    period,
+    'Office for National Statistics — Long-Term International Migration (LTIM), provisional estimates',
+    URL,
+    'Rolling year-ending estimate; provisional figures subject to revision; ONS LTIM methodology');
+}
+
+/**
+ * UK Gini Coefficient — ONS Household Income Inequality Bulletin (generator CSV)
+ * Fetches the latest bulletin HTML, extracts the dynamic generator CSV link for Figure 1,
+ * downloads the CSV, and parses the "Year","Gini, Disposable income" data table.
+ * Source: ONS Household Income Inequality Financial Year bulletin.
+ * No API key required.
+ */
+async function fetchUK_GiniCoefficient() {
+  // Step 1: Fetch ONS household income inequality bulletin (latest)
+  const BULLETIN_URL = 'https://www.ons.gov.uk/peoplepopulationandcommunity/personalandhouseholdfinances/incomeandwealth/bulletins/householdincomeinequalityfinancial/latest';
+  const bulletinResp = await axios.get(BULLETIN_URL, {
+    timeout: TIMEOUT_MS,
+    headers: { 'User-Agent': BROWSER_UA, Accept: 'text/html' },
+  });
+  const html = String(bulletinResp.data);
+
+  // Step 2: Extract first generator CSV link (e.g. /generator?uri=...&format=csv&...)
+  const genMatch = html.match(/href="(\/generator\?[^"]*format=csv[^"]*)"/);
+  if (!genMatch) throw new Error('UK giniCoefficient: no generator CSV link found in ONS bulletin');
+  const csvUrl = 'https://www.ons.gov.uk' + genMatch[1];
+
+  // Step 3: Download CSV and parse the Gini data table
+  const csvResp = await axios.get(csvUrl, {
+    timeout: TIMEOUT_MS,
+    headers: { 'User-Agent': BROWSER_UA },
+  });
+  const lines = String(csvResp.data).split('\n').filter(l => l.trim());
+
+  // Find header row: "Year","Gini, Disposable income",...
+  const headerIdx = lines.findIndex(l => l.includes('"Year"') && l.includes('"Gini'));
+  if (headerIdx < 0) throw new Error('UK giniCoefficient: Gini data table header not found in CSV');
+
+  // Data rows look like: "FYE 2024","32.9","34.4","31.4"
+  const dataRows = lines.slice(headerIdx + 1).filter(l => /^\s*"?FYE\s+\d{4}/.test(l));
+  if (dataRows.length === 0) throw new Error('UK giniCoefficient: no FYE data rows in generator CSV');
+
+  const lastRow = dataRows[dataRows.length - 1];
+  const parts   = lastRow.split(',').map(p => p.replace(/"/g, '').trim());
+  const year    = parts[0]; // e.g. "FYE 2024"
+  const val     = safeNum(parts[1]);
+  if (val === null) throw new Error('UK giniCoefficient: cannot parse Gini value from row: ' + lastRow);
+
+  return result('UK', 'giniCoefficient', val,
+    'Gini coefficient of equivalised disposable income (0–100 scale, UK)',
+    year,
+    'Office for National Statistics — Household Income Inequality, Financial Year (generator CSV)',
+    BULLETIN_URL,
+    'Financial year ending (April–March); 0–100 scale (multiply by 0.01 for 0–1 scale); from annual ETB bulletin');
+}
+
 // ─── AUSTRALIA ────────────────────────────────────────────────────────────────
 
 /**
@@ -1421,6 +1726,13 @@ const FETCHERS = [
   { label: 'UK  Road Fatalities(DfT casualty-2023.csv severity=1)',     fn: fetchUK_RoadFatalities },
   { label: 'UK  Life Expectancy(WHO GHO WHOSIS_000001 GBR)',            fn: fetchUK_LifeExpectancy },
   { label: 'UK  Obesity Rate   (Fingertips indicator 93088)',            fn: fetchUK_ObesityRate },
+  { label: 'UK  Homelessness  (MHCLG rough sleeping snapshot, HTML)',   fn: fetchUK_Homelessness },
+  { label: 'UK  New Builds    (MHCLG housing supply indicators, HTML)', fn: fetchUK_NewBuilds },
+  { label: 'UK  Grad Rate     (World Bank SE.TER.CUAT.BA.ZS, GBR)',    fn: fetchUK_GraduationRate },
+  { label: 'UK  Student Debt  (SLC student-loans-for-HE-FE, HTML)',    fn: fetchUK_StudentDebt },
+  { label: 'UK  Child Poverty (Fingertips indicator 93701)',            fn: fetchUK_ChildPoverty },
+  { label: 'UK  Immigration   (ONS LTIM provisional bulletin, HTML)',   fn: fetchUK_Immigration },
+  { label: 'UK  Gini Coeff    (ONS ETB bulletin generator CSV)',        fn: fetchUK_GiniCoefficient },
   { label: 'AU  Unemployment   (ABS SDMX-JSON LF/M13.3.1599.20.AUS.M)', fn: fetchAU_Unemployment },
   { label: 'AU  CPI            (ABS SDMX-JSON CPI/3.10001.10.50.M)',    fn: fetchAU_CPI },
   { label: 'AU  Bank Rate      (RBA F1 CSV — Cash Rate Target)',         fn: fetchAU_BankRate },
