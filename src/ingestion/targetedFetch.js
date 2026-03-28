@@ -18,6 +18,14 @@
  *   - lifeExpectancy StatCan complete life tables, table 13-10-0114-01
  *   - obesityRate   StatCan measured BMI (CCHS), table 13-10-0373-01
  *
+ * Canada — Housing & Social (additional):
+ *   - hospitalWaitTimes OECD.Stat HEALTH_PROC hip replacement median wait (days)
+ *   - mentalHealthAccess OECD HEALTH_REAC psychiatrists per 100,000 population (CAN)
+ *   - drugAddiction PHAC SubstanceHarmsData.csv opioid hospitalizations crude rate
+ *   - medianGrossRent StatCan CMHC Rental Market Survey 34-10-0133-01 (avg 2BR, all CMAs)
+ *   - schoolFunding StatCan education expenditures 37-10-0066-01 (CAD billions)
+ *   - literacy      StatCan educational attainment 37-10-0130-01 (% ≥ upper secondary)
+ *
  * United States (JSON APIs, no key required):
  *   - unemployment  BLS API v2  series LNS14000000
  *   - CPI           BLS API v2  series CUUR0000SA0 (CPI-U All Items, not seasonally adjusted)
@@ -852,6 +860,348 @@ async function fetchCA_MinWageGap() {
     iso,
     'Employment and Social Development Canada — General Historical Minimum Wage (Federal Jurisdiction)',
     'https://open.canada.ca/data/en/dataset/390ee890-59bb-4f34-a37c-9732781ef8a0');
+}
+
+// ─── CANADA — Housing & Social (additional) ───────────────────────────────────
+
+/**
+ * CA Hospital Wait Times — OECD.Stat HEALTH_PROC (hip replacement median wait, days)
+ * Median wait time for total hip replacement in Canada (days from referral to procedure).
+ * OECD SDMX-JSON: REF_AREA=CAN, MEASURE=WAIT_MEDIAN, MEDICAL_PROCEDURE=CM8151_8153
+ */
+async function fetchCA_HospitalWaitTimes() {
+  const URL = 'https://stats.oecd.org/sdmx-json/data/HEALTH_PROC/CAN.WAIT_MEDIAN.../all?startTime=2022&endTime=2024&dimensionAtObservation=allDimensions';
+  const resp = await axios.get(URL, { timeout: TIMEOUT_MS, headers: { 'User-Agent': BROWSER_UA, Accept: 'application/json' } });
+  const d       = resp.data?.data ?? resp.data;
+  const structs = d.structures ?? [];
+  const ds      = (d.dataSets ?? [])[0];
+  if (!ds) throw new Error('CA HospitalWaitTimes: no dataSets in OECD HEALTH_PROC response');
+
+  const seriesDims = structs[0]?.dimensions?.series ?? [];
+  const obsDims    = structs[0]?.dimensions?.observation ?? [];
+  const timeDim    = obsDims.find(dd => dd.id === 'TIME_PERIOD');
+  const timeVals   = (timeDim?.values ?? []).map(v => v.id);
+
+  const refAreaDim = seriesDims.find(dd => dd.id === 'REF_AREA');
+  const measureDim = seriesDims.find(dd => dd.id === 'MEASURE');
+  const procDim    = seriesDims.find(dd => dd.id === 'MEDICAL_PROCEDURE');
+  const canIdx     = (refAreaDim?.values ?? []).findIndex(v => v.id === 'CAN');
+  const medianIdx  = (measureDim?.values ?? []).findIndex(v => v.id === 'WAIT_MEDIAN');
+  const hipIdx     = (procDim?.values ?? []).findIndex(v => v.id === 'CM8151_8153');
+  const refPos  = seriesDims.findIndex(dd => dd.id === 'REF_AREA');
+  const measPos = seriesDims.findIndex(dd => dd.id === 'MEASURE');
+  const procPos = seriesDims.findIndex(dd => dd.id === 'MEDICAL_PROCEDURE');
+
+  if (canIdx < 0 || medianIdx < 0 || hipIdx < 0) throw new Error('CA HospitalWaitTimes: CAN/WAIT_MEDIAN/CM8151_8153 not found in OECD HEALTH_PROC dimensions');
+
+  let bestTime = '', bestVal = null;
+  for (const [key, val] of Object.entries(ds.series ?? {})) {
+    const parts = key.split(':').map(Number);
+    if (parts[refPos] !== canIdx)   continue;
+    if (parts[measPos] !== medianIdx) continue;
+    if (parts[procPos] !== hipIdx)   continue;
+    for (const [obsKey, obsVal] of Object.entries(val.observations ?? {})) {
+      const t = timeVals[parseInt(obsKey)] ?? '';
+      if (t > bestTime) { bestTime = t; bestVal = obsVal[0]; }
+    }
+  }
+  if (bestVal === null) throw new Error('CA HospitalWaitTimes: no hip replacement median wait found');
+  return result('CA', 'hospitalWaitTimes', bestVal,
+    'median days from referral to total hip replacement procedure (Canada)',
+    bestTime,
+    'OECD Health Statistics — HEALTH_PROC WAIT_MEDIAN hip replacement (CM8151_8153)',
+    URL,
+    'Median days from specialist referral to procedure (total hip replacement); OECD Health Statistics');
+}
+
+/**
+ * CA Mental Health Access — OECD HEALTH_REAC: psychiatrists per 100,000 population (Canada)
+ * VAR=EMPLPSYS (practising psychiatrists), UNIT=DENSPPNB (density per 1,000 pop), COU=CAN
+ * Multiply by 100 to express as per 100,000.
+ */
+async function fetchCA_MentalHealthAccess() {
+  const URL = 'https://stats.oecd.org/sdmx-json/data/HEALTH_REAC/CAN.PSYADM.PT_POP/all?startTime=2018&endTime=2023&dimensionAtObservation=allDimensions';
+  const resp = await axios.get(URL, { timeout: TIMEOUT_MS, headers: { 'User-Agent': BROWSER_UA, Accept: 'application/json' } });
+  const d       = resp.data?.data ?? resp.data;
+  const structs = d.structures ?? [];
+  const ds      = (d.dataSets ?? [])[0];
+  if (!ds) throw new Error('CA MentalHealthAccess: no dataSets in OECD HEALTH_REAC response');
+
+  const seriesDims = structs[0]?.dimensions?.series ?? [];
+  const obsDims    = structs[0]?.dimensions?.observation ?? [];
+  const timeDim    = obsDims.find(dd => dd.id === 'TIME_PERIOD');
+  const timeVals   = (timeDim?.values ?? []).map(v => v.id);
+
+  const varDim  = seriesDims.find(dd => dd.id === 'VAR');
+  const unitDim = seriesDims.find(dd => dd.id === 'UNIT');
+  const couDim  = seriesDims.find(dd => dd.id === 'COU');
+  const psyIdx  = (varDim?.values ?? []).findIndex(v => v.id === 'EMPLPSYS');
+  const denIdx  = (unitDim?.values ?? []).findIndex(v => v.id === 'DENSPPNB');
+  const canIdx  = (couDim?.values ?? []).findIndex(v => v.id === 'CAN');
+  const varPos  = seriesDims.findIndex(dd => dd.id === 'VAR');
+  const unitPos = seriesDims.findIndex(dd => dd.id === 'UNIT');
+  const couPos  = seriesDims.findIndex(dd => dd.id === 'COU');
+
+  if (psyIdx < 0 || denIdx < 0 || canIdx < 0) throw new Error('CA MentalHealthAccess: EMPLPSYS/DENSPPNB/CAN not found in OECD HEALTH_REAC dimensions');
+
+  let bestTime = '', bestVal = null;
+  for (const [key, val] of Object.entries(ds.series ?? {})) {
+    const parts = key.split(':').map(Number);
+    if (parts[varPos]  !== psyIdx) continue;
+    if (parts[unitPos] !== denIdx) continue;
+    if (parts[couPos]  !== canIdx) continue;
+    for (const [obsKey, obsVal] of Object.entries(val.observations ?? {})) {
+      const t = timeVals[parseInt(obsKey)] ?? '';
+      if (t > bestTime) { bestTime = t; bestVal = obsVal[0]; }
+    }
+  }
+  if (bestVal === null) throw new Error('CA MentalHealthAccess: no psychiatrist density found for Canada');
+  const per100k = Math.round(bestVal * 100 * 10) / 10;
+  return result('CA', 'mentalHealthAccess', per100k,
+    'practising psychiatrists per 100,000 population (Canada)',
+    bestTime,
+    'OECD Health Statistics — HEALTH_REAC EMPLPSYS density per 1,000 population (CAN)',
+    URL,
+    'Practising psychiatrists per 100,000 population; density from OECD Health at a Glance (HEALTH_REAC EMPLPSYS DENSPPNB)');
+}
+
+/**
+ * CA Drug Addiction — PHAC Health Infobase Substance Harms Data
+ * Opioid-related hospitalizations (crude rate per 100,000), Canada, latest annual year.
+ * Same CSV as drugOverdoses; different Source filter (Hospitalizations vs Deaths).
+ */
+async function fetchCA_DrugAddiction() {
+  const URL  = 'https://health-infobase.canada.ca/src/doc/SRHD/SubstanceHarmsData.csv';
+  const resp = await axios.get(URL, { timeout: TIMEOUT_MS, headers: { 'User-Agent': BROWSER_UA } });
+  const lines = String(resp.data).split('\n').filter(l => l.trim());
+  if (lines.length < 2) throw new Error('CA DrugAddiction: empty PHAC SubstanceHarmsData.csv');
+
+  const header = parseCSVLine(lines[0]);
+  const substanceIdx = header.findIndex(c => c === 'Substance');
+  const sourceIdx    = header.findIndex(c => c === 'Source');
+  const measureIdx   = header.findIndex(c => c === 'Specific_Measure');
+  const regionIdx    = header.findIndex(c => c === 'Region');
+  const timePeriodIdx= header.findIndex(c => c === 'Time_Period');
+  const yearQtrIdx   = header.findIndex(c => c === 'Year_Quarter');
+  const aggIdx       = header.findIndex(c => c === 'Aggregator');
+  const disaggIdx    = header.findIndex(c => c === 'Disaggregator');
+  const unitIdx      = header.findIndex(c => c === 'Unit');
+  const valueIdx     = header.findIndex(c => c === 'Value');
+
+  let bestDate = '', bestValue = null;
+  for (let i = 1; i < lines.length; i++) {
+    const cols = parseCSVLine(lines[i]);
+    if (cols[substanceIdx] !== 'Opioids')          continue;
+    if (cols[sourceIdx]    !== 'Hospitalizations')  continue;
+    if (cols[measureIdx]   !== 'Overall numbers')   continue;
+    if (cols[regionIdx]    !== 'Canada')            continue;
+    if (cols[timePeriodIdx] !== 'By year')          continue;
+    if (cols[aggIdx] || cols[disaggIdx])            continue; // skip disaggregated
+    if (cols[unitIdx]      !== 'Crude rate')        continue;
+    const date = cols[yearQtrIdx], val = parseFloat(cols[valueIdx]);
+    if (!date || isNaN(val)) continue;
+    // year-only dates sort correctly as strings; skip "(Jan to Sep)" partial years
+    if (date.includes('(')) continue;
+    if (date > bestDate) { bestDate = date; bestValue = val; }
+  }
+  if (bestValue === null) throw new Error('CA DrugAddiction: no opioid hospitalization crude rate found');
+  return result('CA', 'drugAddiction', bestValue,
+    'opioid-related hospitalizations (crude rate per 100,000 population, Canada)',
+    bestDate,
+    'PHAC Health Infobase — Opioid- and Stimulant-related Harms in Canada (SubstanceHarmsData.csv)',
+    URL,
+    'Opioid-related hospitalizations, crude rate per 100,000 population; annual; distinct from opioid deaths (drugOverdoses)');
+}
+
+/**
+ * CA Median Gross Rent — Statistics Canada CMHC Rental Market Survey (table 34-10-0133-01)
+ * Simple average of two-bedroom private apartment rents across all CMAs/urban centres, latest year.
+ * Table is ~10 MB uncompressed; streamed via inflateRaw.
+ * Columns: REF_DATE(0) GEO(1) DGUID(2) Type of structure(3) Type of unit(4) ... VALUE(11)
+ */
+async function fetchCA_MedianGrossRent() {
+  const resp = await axios({
+    method: 'GET',
+    url: 'https://www150.statcan.gc.ca/n1/tbl/csv/34100133-eng.zip',
+    responseType: 'stream',
+    timeout: 120000,
+    headers: { 'User-Agent': BROWSER_UA },
+  });
+
+  return new Promise((resolve, reject) => {
+    const source   = resp.data;
+    const inflater = zlib.createInflateRaw();
+
+    let zipBuf = Buffer.alloc(0), zipHeaderDone = false;
+    let compressedSize = 0, bytesWritten = 0;
+    let lineBuffer = '', csvHeader = null, colIdx = {};
+    // date -> {sum, count} for average rent
+    const rentByDate = {};
+    let finished = false;
+
+    function finish(err) {
+      if (finished) return;
+      finished = true;
+      source.destroy();
+      if (err) return reject(err);
+      const dates = Object.keys(rentByDate).sort().reverse();
+      if (dates.length === 0) return reject(new Error('CA MedianGrossRent: no two-bedroom rent data found'));
+      const latest = dates[0];
+      const { sum, count } = rentByDate[latest];
+      const avg = Math.round(sum / count);
+      return resolve(result('CA', 'medianGrossRent', avg,
+        'average monthly rent, 2-bedroom private apartments, all CMAs (CAD)',
+        latest,
+        'Statistics Canada / CMHC — Rental Market Survey, table 34-10-0133-01',
+        'https://www150.statcan.gc.ca/t1/tbl1/en/tv.action?pid=3410013301',
+        'Simple average of 2-bedroom row/apt rents across all Canadian urban centres surveyed; no Canada-level aggregate in source table'));
+    }
+
+    function processChunk(chunk) {
+      lineBuffer += chunk.toString('utf-8');
+      const lines = lineBuffer.split('\n');
+      lineBuffer  = lines.pop();
+      for (const rawLine of lines) {
+        const line = rawLine.trim();
+        if (!line) continue;
+        if (!csvHeader) {
+          csvHeader = line;
+          const cols = parseCSVLine(line.replace(/^\uFEFF/, ''));
+          colIdx = {
+            date:      cols.findIndex(c => c === 'REF_DATE'),
+            structure: cols.findIndex(c => /type of structure/i.test(c)),
+            unit:      cols.findIndex(c => /type of unit/i.test(c)),
+            value:     cols.findIndex(c => c === 'VALUE'),
+          };
+          continue;
+        }
+        // Quick scan — skip rows that clearly don't match
+        if (!line.includes('Row and apartment') || !line.includes('Two bedroom')) continue;
+        const cols = parseCSVLine(line);
+        if (!cols[colIdx.structure]?.includes('Row and apartment')) continue;
+        if (cols[colIdx.unit] !== 'Two bedroom units') continue;
+        const val  = parseFloat(cols[colIdx.value]);
+        const date = cols[colIdx.date];
+        if (isNaN(val) || val === 0 || !date) continue;
+        if (!rentByDate[date]) rentByDate[date] = { sum: 0, count: 0 };
+        rentByDate[date].sum   += val;
+        rentByDate[date].count += 1;
+      }
+    }
+
+    inflater.on('data', chunk => processChunk(chunk));
+    inflater.on('end',  () => finish(null));
+    inflater.on('error', () => finish(null));
+
+    source.on('data', chunk => {
+      if (finished) return;
+      if (zipHeaderDone) {
+        if (compressedSize > 0) {
+          const remaining = compressedSize - bytesWritten;
+          if (remaining <= 0) return;
+          const toWrite = chunk.length <= remaining ? chunk : chunk.slice(0, remaining);
+          inflater.write(toWrite); bytesWritten += toWrite.length;
+          if (bytesWritten >= compressedSize) inflater.end();
+        } else {
+          inflater.write(chunk); bytesWritten += chunk.length;
+        }
+        return;
+      }
+      zipBuf = Buffer.concat([zipBuf, chunk]);
+      if (zipBuf.length < 30) return;
+      if (zipBuf.readUInt32LE(0) !== 0x04034b50) { finish(new Error('Not a ZIP')); return; }
+      const fnLen = zipBuf.readUInt16LE(26), extLen = zipBuf.readUInt16LE(28);
+      compressedSize = zipBuf.readUInt32LE(18);
+      const dataStart = 30 + fnLen + extLen;
+      if (zipBuf.length < dataStart) return;
+      zipHeaderDone = true;
+      const initial = zipBuf.slice(dataStart); zipBuf = null;
+      if (compressedSize > 0) {
+        const toWrite = initial.length <= compressedSize ? initial : initial.slice(0, compressedSize);
+        inflater.write(toWrite); bytesWritten += toWrite.length;
+        if (bytesWritten >= compressedSize) inflater.end();
+      } else {
+        inflater.write(initial); bytesWritten += initial.length;
+      }
+    });
+    source.on('end',   () => { if (!finished && zipHeaderDone) inflater.end(); else finish(new Error('Stream ended before ZIP header')); });
+    source.on('error', err => finish(err));
+  });
+}
+
+/**
+ * CA School Funding — Statistics Canada education expenditures (table 37-10-0066-01)
+ * Total public and private elementary and secondary education expenditures, Canada, latest year.
+ * Value in thousands of dollars; SCALAR_FACTOR=thousands means multiply VALUE×1000 for total dollars.
+ */
+async function fetchCA_SchoolFunding() {
+  const csv   = await fetchStatCanCSV('37100066', 'CA SchoolFunding');
+  const lines = csv.split('\n');
+  const header = parseCSVLine(lines[0]);
+  const geoIdx    = header.findIndex(c => c === 'GEO');
+  const dateIdx   = header.findIndex(c => c === 'REF_DATE');
+  const valueIdx  = header.findIndex(c => c === 'VALUE');
+  const typeIdx   = header.findIndex(c => /type of expenditures/i.test(c));
+  const scalarIdx = header.findIndex(c => /scalar_factor/i.test(c));
+
+  const TARGET = 'Public and private elementary and secondary education expenditures';
+  let bestDate = '', bestValue = null, bestScalar = 'thousands';
+  for (let i = 1; i < lines.length; i++) {
+    const cols = parseCSVLine(lines[i].trim());
+    if (cols[geoIdx]  !== 'Canada')  continue;
+    if (cols[typeIdx] !== TARGET)    continue;
+    const val = cols[valueIdx], date = cols[dateIdx];
+    if (!val || val === '..' || val === '' || !date) continue;
+    if (date > bestDate) { bestDate = date; bestValue = parseFloat(val); bestScalar = cols[scalarIdx] || 'thousands'; }
+  }
+  if (bestValue === null) throw new Error('CA SchoolFunding: no education expenditure found');
+  // Convert to billions: value is in thousands of dollars
+  const scaleFactor = bestScalar === 'thousands' ? 1000 : bestScalar === 'millions' ? 1e6 : 1;
+  const totalDollars = bestValue * scaleFactor;
+  const billions = parseFloat((totalDollars / 1e9).toFixed(2));
+  return result('CA', 'schoolFunding', billions,
+    'total public & private elementary/secondary education expenditures (CAD billions)',
+    bestDate,
+    'Statistics Canada — Elementary and secondary school expenditures, table 37-10-0066-01',
+    'https://www150.statcan.gc.ca/t1/tbl1/en/tv.action?pid=3710006601',
+    'Includes public and private elementary and secondary education expenditures; current dollars');
+}
+
+/**
+ * CA Literacy — Statistics Canada educational attainment (table 37-10-0130-01)
+ * Percentage of adults aged 25–64 with upper secondary or above (high school completion rate proxy).
+ * Same table as graduationRate; different education level filter.
+ * Source: OECD Education at a Glance (EAG), re-published by Statistics Canada.
+ */
+async function fetchCA_Literacy() {
+  const csv   = await fetchStatCanCSV('37100130', 'CA Literacy');
+  const lines = csv.split('\n');
+  const header = parseCSVLine(lines[0]);
+  const geoIdx  = header.findIndex(c => c === 'GEO');
+  const dateIdx = header.findIndex(c => c === 'REF_DATE');
+  const valueIdx= header.findIndex(c => c === 'VALUE');
+  const eduIdx  = header.findIndex(c => /education attainment/i.test(c));
+  const ageIdx  = header.findIndex(c => /age group/i.test(c));
+  const genIdx  = header.findIndex(c => /gender/i.test(c));
+
+  let bestDate = '', bestValue = null;
+  for (let i = 1; i < lines.length; i++) {
+    const cols = parseCSVLine(lines[i].trim());
+    if (!cols[geoIdx]?.startsWith('Canada'))                   continue;
+    if (cols[eduIdx] !== 'Upper secondary or above')           continue;
+    if (cols[ageIdx] !== 'Total, 25 to 64 years')             continue;
+    if (cols[genIdx] !== 'Total - Gender')                     continue;
+    const val = cols[valueIdx], date = cols[dateIdx];
+    if (!val || val === '..' || val === '' || !date) continue;
+    if (date > bestDate) { bestDate = date; bestValue = parseFloat(val); }
+  }
+  if (bestValue === null) throw new Error('CA Literacy: no upper-secondary attainment found');
+  return result('CA', 'literacy', bestValue,
+    '% adults (25–64) with upper secondary or above (high school completion proxy)',
+    bestDate,
+    'Statistics Canada — Educational attainment of the population, table 37-10-0130-01 (OECD EAG)',
+    'https://www150.statcan.gc.ca/t1/tbl1/en/tv.action?pid=3710013001',
+    '% of 25–64 year olds with at least upper secondary education; used as literacy proxy (PIAAC data not available via API)');
 }
 
 // ─── UNITED STATES ────────────────────────────────────────────────────────────
@@ -1711,6 +2061,12 @@ const FETCHERS = [
   { label: 'CA  Immigration    (StatCan Pop Components 17-10-0008-01)',   fn: fetchCA_Immigration },
   { label: 'CA  Gini Coeff     (StatCan After-tax Gini 11-10-0134-01)',  fn: fetchCA_GiniCoefficient },
   { label: 'CA  Min Wage       (ESDC Federal Min Wage CKAN)',             fn: fetchCA_MinWageGap },
+  { label: 'CA  Hospital Wait  (OECD HEALTH_PROC hip replacement median)', fn: fetchCA_HospitalWaitTimes },
+  { label: 'CA  Mental Health  (OECD HEALTH_REAC psychiatrists/100k)',     fn: fetchCA_MentalHealthAccess },
+  { label: 'CA  Drug Addiction (PHAC SubstanceHarms opioid hospitaliz.)',  fn: fetchCA_DrugAddiction },
+  { label: 'CA  Median Rent    (StatCan CMHC 34-10-0133-01 avg 2BR)',      fn: fetchCA_MedianGrossRent },
+  { label: 'CA  School Funding (StatCan ed spending 37-10-0066-01)',       fn: fetchCA_SchoolFunding },
+  { label: 'CA  Literacy       (StatCan educ attainment 37-10-0130-01)',   fn: fetchCA_Literacy },
   { label: 'US  Unemployment   (BLS API LNS14000000)',                   fn: fetchUS_Unemployment },
   { label: 'US  CPI            (BLS API CUUR0000SA0)',                   fn: fetchUS_CPI },
   { label: 'US  Drug Overdoses (CDC Socrata xkb8-kh2a)',                 fn: fetchUS_DrugOverdoses },
