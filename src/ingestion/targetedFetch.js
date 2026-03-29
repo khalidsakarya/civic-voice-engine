@@ -26,7 +26,7 @@
  *   - schoolFunding StatCan education expenditures 37-10-0066-01 (CAD billions)
  *   - literacy      StatCan educational attainment 37-10-0130-01 (% ≥ upper secondary)
  *
- * United States (JSON APIs, no key required):
+ * United States — Economic (JSON APIs, no key required):
  *   - unemploymentRate     BLS API v2 series LNS14000000
  *   - cpiInflation         BLS API v2 series CUUR0000SA0 (CPI-U All Items, not seasonally adjusted)
  *   - drugOverdoseDeaths   CDC Socrata xkb8-kh2a (VSRR provisional)
@@ -35,6 +35,16 @@
  *   - medianHomeValue      Census Bureau ACS 1-Year B25077_001E
  *   - bankRate             FRED FEDFUNDS (Effective Federal Funds Rate, monthly avg)
  *   - povertyRate          Census Bureau ACS 1-Year S1701_C03_001E
+ *
+ * United States — Safety & Health:
+ *   - crimeRate            FBI CDE API summarized/national/violent-crime (cde.fbi.gov)
+ *   - homicideRate         WHO GHO VIOLENCE_HOMICIDERATE (USA)
+ *   - roadFatalities       WHO GHO RS_196 estimated road traffic deaths (USA)
+ *   - lifeExpectancy       WHO GHO WHOSIS_000001 (USA, both sexes)
+ *   - obesityRate          CDC BRFSS hn4x-zwk7 Q036 (adults with obesity, national)
+ *   - hospitalWaitTimes    CMS Provider Data OP_18b median ED time (yv7e-xc69)
+ *   - mentalHealthAccess   OECD HEALTH_REAC psychiatrists per 100,000 (USA)
+ *   - drugAddiction        WHO GHO SA_0000001462 substance use disorder prevalence (USA)
  *
  * United Kingdom (JSON/CSV APIs, no key required):
  *   - unemployment  ONS timeseries MGSX (ILO measure, seasonally adjusted)
@@ -1447,6 +1457,252 @@ async function fetchUS_PovertyRate() {
   throw new Error('Census ACS: no poverty rate data found');
 }
 
+// ─── UNITED STATES — Safety & Health ─────────────────────────────────────────
+
+/**
+ * US Crime Rate — FBI Uniform Crime Reporting / Crime Data Explorer API
+ * National violent crime rate per 100,000 population.
+ * Source: https://cde.fbi.gov/api/summarized/national/violent-crime
+ */
+async function fetchUS_CrimeRate() {
+  const URL = 'https://cde.fbi.gov/api/summarized/national/violent-crime?from=2020&to=2023';
+  const resp = await axios.get(URL, {
+    timeout: 60000,
+    headers: { 'User-Agent': BROWSER_UA },
+  });
+  const data = Array.isArray(resp.data) ? resp.data : (resp.data?.data ?? []);
+  if (!data.length) throw new Error('FBI CDE: no violent crime data returned');
+  const sorted = [...data].sort((a, b) => b.data_year - a.data_year);
+  const latest = sorted[0];
+  const rate = safeNum(latest.rate);
+  if (rate == null) throw new Error('FBI CDE: could not parse violent crime rate');
+  return result(
+    'US', 'crimeRate', rate, 'violent crimes per 100,000 population',
+    String(latest.data_year),
+    'FBI Uniform Crime Reporting — National Violent Crime Rate (UCR/NIBRS)',
+    URL,
+    'Includes murder, non-negligent manslaughter, rape, robbery, aggravated assault'
+  );
+}
+
+/**
+ * US Homicide Rate — WHO Global Health Observatory
+ * VIOLENCE_HOMICIDERATE: Estimates of rates of homicides per 100,000 population (USA).
+ */
+async function fetchUS_HomicideRate() {
+  const URL = 'https://ghoapi.azureedge.net/api/VIOLENCE_HOMICIDERATE?$filter=SpatialDim eq \'USA\'&$orderby=TimeDim desc&$top=10';
+  const resp = await axios.get(URL, { timeout: TIMEOUT_MS, headers: { 'User-Agent': BROWSER_UA } });
+  const entries = resp.data?.value ?? [];
+  const best = entries.find(e => (!e.Dim1 || e.Dim1 === 'SEX_BTSX') && e.NumericValue != null);
+  if (!best) throw new Error('WHO GHO: no homicide rate found for USA');
+  return result(
+    'US', 'homicideRate', parseFloat(best.NumericValue.toFixed(2)),
+    'intentional homicides per 100,000 population',
+    String(best.TimeDim),
+    'WHO Global Health Observatory — Intentional homicide rate, VIOLENCE_HOMICIDERATE (USA)',
+    URL,
+    'UNODC/WHO estimates; may differ from FBI NIBRS count due to methodology differences'
+  );
+}
+
+/**
+ * US Road Fatalities — WHO Global Health Observatory
+ * RS_196: Estimated number of road traffic deaths (USA).
+ * NHTSA FARS API blocks programmatic access; WHO GHO provides comparable estimates.
+ */
+async function fetchUS_RoadFatalities() {
+  const URL = 'https://ghoapi.azureedge.net/api/RS_196?$filter=SpatialDim eq \'USA\'&$orderby=TimeDim desc&$top=3';
+  const resp = await axios.get(URL, { timeout: TIMEOUT_MS, headers: { 'User-Agent': BROWSER_UA } });
+  const best = (resp.data?.value ?? []).find(e => e.NumericValue != null);
+  if (!best) throw new Error('WHO GHO: no road fatality data found for USA');
+  return result(
+    'US', 'roadFatalities', best.NumericValue,
+    'estimated road traffic deaths',
+    String(best.TimeDim),
+    'WHO Global Health Observatory — Estimated road traffic deaths, RS_196 (USA)',
+    URL,
+    'WHO estimates; NHTSA FARS reports ~42,795 for 2022 via direct publication'
+  );
+}
+
+/**
+ * US Life Expectancy — WHO Global Health Observatory
+ * WHOSIS_000001: Life expectancy at birth (both sexes, USA).
+ */
+async function fetchUS_LifeExpectancy() {
+  const URL = 'https://ghoapi.azureedge.net/api/WHOSIS_000001?$filter=SpatialDim eq \'USA\'&$orderby=TimeDim desc&$top=10';
+  const resp = await axios.get(URL, { timeout: TIMEOUT_MS, headers: { 'User-Agent': BROWSER_UA } });
+  const entries = resp.data?.value ?? [];
+  const best = entries.find(e => e.Dim1 === 'SEX_BTSX' && e.NumericValue != null);
+  if (!best) throw new Error('WHO GHO: no life expectancy found for USA (both sexes)');
+  return result(
+    'US', 'lifeExpectancy', parseFloat(best.NumericValue.toFixed(1)),
+    'years (life expectancy at birth, both sexes)',
+    String(best.TimeDim),
+    'WHO Global Health Observatory — Life expectancy at birth, WHOSIS_000001 (USA)',
+    URL
+  );
+}
+
+/**
+ * US Obesity Rate — CDC Behavioral Risk Factor Surveillance System (BRFSS)
+ * Dataset hn4x-zwk7 (chronicdata.cdc.gov): Nutrition, Physical Activity, and Obesity.
+ * Question Q036: "Percent of adults aged 18 years and older who have obesity".
+ * Stratification: Total (all adults), US national.
+ */
+async function fetchUS_ObesityRate() {
+  const URL = 'https://chronicdata.cdc.gov/resource/hn4x-zwk7.json?' +
+    'LocationAbbr=US' +
+    '&questionid=Q036' +
+    '&StratificationCategory1=Total' +
+    '&$order=YearStart+DESC' +
+    '&$limit=1';
+  const resp = await axios.get(URL, { timeout: TIMEOUT_MS, headers: { 'User-Agent': BROWSER_UA } });
+  const row = resp.data?.[0];
+  if (!row) throw new Error('CDC BRFSS: no obesity data for US national (Q036)');
+  const val = safeNum(row.data_value);
+  if (val == null) throw new Error('CDC BRFSS: could not parse obesity rate');
+  return result(
+    'US', 'obesityRate', val,
+    '% adults 18+ with obesity (BRFSS age-adjusted)',
+    row.yearstart,
+    'CDC — Behavioral Risk Factor Surveillance System (BRFSS), hn4x-zwk7 Q036',
+    URL,
+    'BRFSS self-reported; "Have obesity" defined as BMI ≥ 30; national estimate'
+  );
+}
+
+/**
+ * US Hospital Wait Times — CMS Provider Data, Timely and Effective Care
+ * Measure OP_18b: Average (median) time patients spent in the ED before leaving
+ * (for visits resulting in discharge). Aggregates across all reporting hospitals
+ * to produce a national median-of-medians in minutes.
+ * Dataset: yv7e-xc69 (data.cms.gov provider-data API).
+ */
+async function fetchUS_HospitalWaitTimes() {
+  const BASE = 'https://data.cms.gov/provider-data/api/1/datastore/query/yv7e-xc69/0';
+  const PAGE = 500;
+  const scores = [];
+  let offset = 0, total = Infinity, period = '';
+
+  while (offset < total) {
+    const resp = await axios.get(BASE, {
+      timeout: TIMEOUT_MS,
+      params: {
+        'conditions[0][property]': 'measure_id',
+        'conditions[0][value]': 'OP_18b',
+        limit: PAGE,
+        offset,
+      },
+    });
+    const results = resp.data?.results ?? [];
+    if (offset === 0) {
+      total = resp.data?.count ?? results.length;
+      const r0 = results[0];
+      if (r0) period = `${r0.start_date} – ${r0.end_date}`;
+    }
+    for (const r of results) {
+      const v = parseFloat(r.score);
+      if (!isNaN(v) && v > 0) scores.push(v);
+    }
+    if (results.length < PAGE) break;
+    offset += PAGE;
+  }
+
+  if (scores.length === 0) throw new Error('CMS OP_18b: no hospital scores found');
+  scores.sort((a, b) => a - b);
+  const median = scores[Math.floor(scores.length / 2)];
+
+  return result(
+    'US', 'hospitalWaitTimes', median,
+    'minutes (national median ED time, arrival to discharge — OP_18b)',
+    period,
+    'CMS Provider Data — Timely and Effective Care, measure OP_18b',
+    'https://data.cms.gov/provider-data/dataset/yv7e-xc69',
+    `Median of ${scores.length} hospital-reported medians for OP_18b; lower is better`
+  );
+}
+
+/**
+ * US Mental Health Access — OECD Health Statistics (HEALTH_REAC)
+ * Practising psychiatrists per 1,000 population × 100 = per 100,000 population.
+ * Uses the same SDMX-JSON endpoint as fetchCA_MentalHealthAccess.
+ */
+async function fetchUS_MentalHealthAccess() {
+  const URL = 'https://stats.oecd.org/sdmx-json/data/HEALTH_REAC/USA.PSYADM.PT_POP/all?startTime=2018&endTime=2023&dimensionAtObservation=allDimensions';
+  const resp = await axios.get(URL, { timeout: TIMEOUT_MS, headers: { 'User-Agent': BROWSER_UA, Accept: 'application/json' } });
+  const d        = resp.data?.data ?? resp.data;
+  const structs  = d.structures ?? [];
+  const ds       = (d.dataSets ?? [])[0];
+  if (!ds) throw new Error('US MentalHealthAccess: no dataSets in OECD HEALTH_REAC response');
+  const seriesDims = structs[0]?.dimensions?.series ?? [];
+  const obsDims    = structs[0]?.dimensions?.observation ?? [];
+  const timeDim    = obsDims.find(dd => dd.id === 'TIME_PERIOD');
+  const timeVals   = (timeDim?.values ?? []).map(v => v.id);
+  const varDim  = seriesDims.find(dd => dd.id === 'VAR');
+  const unitDim = seriesDims.find(dd => dd.id === 'UNIT');
+  const couDim  = seriesDims.find(dd => dd.id === 'COU');
+  const psyIdx  = (varDim?.values  ?? []).findIndex(v => v.id === 'EMPLPSYS');
+  const denIdx  = (unitDim?.values ?? []).findIndex(v => v.id === 'DENSPPNB');
+  const usaIdx  = (couDim?.values  ?? []).findIndex(v => v.id === 'USA');
+  const varPos  = seriesDims.findIndex(dd => dd.id === 'VAR');
+  const unitPos = seriesDims.findIndex(dd => dd.id === 'UNIT');
+  const couPos  = seriesDims.findIndex(dd => dd.id === 'COU');
+  if (psyIdx < 0 || denIdx < 0 || usaIdx < 0) throw new Error('US MentalHealthAccess: EMPLPSYS/DENSPPNB/USA not found in OECD HEALTH_REAC dimensions');
+  let bestTime = '', bestVal = null;
+  for (const [key, val] of Object.entries(ds.series ?? {})) {
+    const parts = key.split(':').map(Number);
+    if (couPos >= 0 && parts[couPos] !== usaIdx) continue;
+    if (varPos >= 0 && parts[varPos]  !== psyIdx) continue;
+    if (unitPos >= 0 && parts[unitPos] !== denIdx) continue;
+    for (const [obsKey, obsVal] of Object.entries(val.observations ?? {})) {
+      const t = timeVals[parseInt(obsKey)] ?? '';
+      if (t > bestTime) { bestTime = t; bestVal = obsVal[0]; }
+    }
+  }
+  if (bestVal === null) throw new Error('US MentalHealthAccess: no psychiatrist density found for USA');
+  const per100k = Math.round(bestVal * 100 * 10) / 10;
+  return result(
+    'US', 'mentalHealthAccess', per100k,
+    'practising psychiatrists per 100,000 population',
+    bestTime,
+    'OECD Health Statistics — HEALTH_REAC EMPLPSYS density per 1,000 population (USA)',
+    URL,
+    'Practising psychiatrists per 100,000 population; from OECD Health at a Glance (HEALTH_REAC EMPLPSYS DENSPPNB)'
+  );
+}
+
+/**
+ * US Drug Addiction — WHO Global Health Observatory
+ * SA_0000001462: Prevalence of substance use disorders (all substances incl. alcohol, both sexes, %).
+ * SAMHSA NSDUH API (api.samhsa.gov) returns 403; WHO/IHME GBD estimate used as official proxy.
+ * NSDUH 2022 reports ~17.3% of Americans 12+ with SUD; WHO 2016 estimate is comparable.
+ */
+async function fetchUS_DrugAddiction() {
+  const URL = 'https://ghoapi.azureedge.net/api/SA_0000001462?' +
+    encodeURI('$filter=SpatialDim eq \'USA\' and Dim1 eq \'SEX_BTSX\'') +
+    '&' + encodeURI('$orderby=TimeDim desc') +
+    '&' + encodeURI('$top=5');
+  const resp = await axios.get(
+    'https://ghoapi.azureedge.net/api/SA_0000001462?$filter=SpatialDim eq \'USA\' and Dim1 eq \'SEX_BTSX\'&$orderby=TimeDim desc&$top=5',
+    { timeout: TIMEOUT_MS, headers: { 'User-Agent': BROWSER_UA } }
+  );
+  const entries = resp.data?.value ?? [];
+  if (!entries.length) throw new Error('WHO GHO: no substance use disorder data for USA');
+  // NumericValue is null for this indicator; parse from Value string
+  const best = entries.find(e => e.Value && parseFloat(e.Value) > 0);
+  if (!best) throw new Error('WHO GHO: could not parse substance use disorder value');
+  const val = parseFloat(best.Value);
+  return result(
+    'US', 'drugAddiction', val,
+    '% prevalence of substance use disorders (all substances, both sexes)',
+    String(best.TimeDim),
+    'WHO Global Health Observatory — Substance use disorders SA_0000001462 (USA, IHME GBD)',
+    'https://ghoapi.azureedge.net/api/SA_0000001462',
+    'Includes alcohol and illicit drug use disorders; WHO/IHME Global Burden of Disease estimate'
+  );
+}
+
 // ─── UNITED KINGDOM ───────────────────────────────────────────────────────────
 
 /**
@@ -2173,6 +2429,14 @@ const FETCHERS = [
   { label: 'US  Median Home    (Census ACS B25077_001E → medianHomeValue)', fn: fetchUS_MedianHomeValue },
   { label: 'US  Bank Rate      (FRED FEDFUNDS → bankRate)',              fn: fetchUS_BankRate },
   { label: 'US  Poverty Rate   (Census ACS S1701_C03_001E → povertyRate)', fn: fetchUS_PovertyRate },
+  { label: 'US  Crime Rate     (FBI CDE violent-crime → crimeRate)',       fn: fetchUS_CrimeRate },
+  { label: 'US  Homicide Rate  (WHO GHO VIOLENCE_HOMICIDERATE → homicideRate)', fn: fetchUS_HomicideRate },
+  { label: 'US  Road Fatalities(WHO GHO RS_196 → roadFatalities)',         fn: fetchUS_RoadFatalities },
+  { label: 'US  Life Expectancy(WHO GHO WHOSIS_000001 → lifeExpectancy)',  fn: fetchUS_LifeExpectancy },
+  { label: 'US  Obesity Rate   (CDC BRFSS hn4x-zwk7 Q036 → obesityRate)', fn: fetchUS_ObesityRate },
+  { label: 'US  Hospital Waits (CMS OP_18b national median → hospitalWaitTimes)', fn: fetchUS_HospitalWaitTimes },
+  { label: 'US  Mental Health  (OECD HEALTH_REAC → mentalHealthAccess)',   fn: fetchUS_MentalHealthAccess },
+  { label: 'US  Drug Addiction (WHO GHO SA_0000001462 → drugAddiction)',   fn: fetchUS_DrugAddiction },
   { label: 'UK  Unemployment   (ONS timeseries MGSX)',                   fn: fetchUK_Unemployment },
   { label: 'UK  CPI            (ONS timeseries D7G7)',                   fn: fetchUK_CPI },
   { label: 'UK  Home Prices    (LR HPI Linked Data API)',                fn: fetchUK_HomePrices },
