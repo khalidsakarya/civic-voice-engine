@@ -27,11 +27,14 @@
  *   - literacy      StatCan educational attainment 37-10-0130-01 (% ≥ upper secondary)
  *
  * United States (JSON APIs, no key required):
- *   - unemployment  BLS API v2  series LNS14000000
- *   - CPI           BLS API v2  series CUUR0000SA0 (CPI-U All Items, not seasonally adjusted)
- *   - drugOverdoses CDC Socrata xkb8-kh2a (VSRR provisional)
- *   - fedSpending   USAspending.gov /api/v2/spending/
- *   - medianRent    Census Bureau ACS 1-Year DP04_0134E
+ *   - unemploymentRate     BLS API v2 series LNS14000000
+ *   - cpiInflation         BLS API v2 series CUUR0000SA0 (CPI-U All Items, not seasonally adjusted)
+ *   - drugOverdoseDeaths   CDC Socrata xkb8-kh2a (VSRR provisional)
+ *   - federalAgencySpending USAspending.gov /api/v2/spending/
+ *   - medianGrossRent      Census Bureau ACS 1-Year DP04_0134E
+ *   - medianHomeValue      Census Bureau ACS 1-Year B25077_001E
+ *   - bankRate             FRED FEDFUNDS (Effective Federal Funds Rate, monthly avg)
+ *   - povertyRate          Census Bureau ACS 1-Year S1701_C03_001E
  *
  * United Kingdom (JSON/CSV APIs, no key required):
  *   - unemployment  ONS timeseries MGSX (ILO measure, seasonally adjusted)
@@ -1215,14 +1218,14 @@ async function fetchUS_Unemployment() {
   const SERIES = 'LNS14000000';
   const resp   = await axios.get(
     `https://api.bls.gov/publicAPI/v1/timeseries/data/${SERIES}?latest=true`,
-    { timeout: TIMEOUT_MS }
+    { timeout: 60000 }   // BLS public API can be slow; use generous timeout
   );
   const latest = resp.data?.Results?.series?.[0]?.data?.[0];
   if (!latest) throw new Error('BLS: no data for LNS14000000');
   const val    = safeNum(latest.value);
   const period = `${latest.periodName} ${latest.year}`;
   return result(
-    'US', 'unemployment', val, '% (seasonally adjusted)',
+    'US', 'unemploymentRate', val, '% (seasonally adjusted)',
     period,
     'Bureau of Labor Statistics — CPS Unemployment Rate, series LNS14000000',
     'https://api.bls.gov/publicAPI/v1/timeseries/data/LNS14000000?latest=true'
@@ -1238,14 +1241,14 @@ async function fetchUS_CPI() {
   const SERIES = 'CUUR0000SA0';
   const resp   = await axios.get(
     `https://api.bls.gov/publicAPI/v1/timeseries/data/${SERIES}?latest=true`,
-    { timeout: TIMEOUT_MS }
+    { timeout: 60000 }   // BLS public API can be slow; use generous timeout
   );
   const latest = resp.data?.Results?.series?.[0]?.data?.[0];
   if (!latest) throw new Error('BLS: no data for CUUR0000SA0');
   const val    = safeNum(latest.value);
   const period = `${latest.periodName} ${latest.year}`;
   return result(
-    'US', 'cpi', val, 'index (1982-84=100, not seasonally adjusted)',
+    'US', 'cpiInflation', val, 'index (1982-84=100, not seasonally adjusted)',
     period,
     'Bureau of Labor Statistics — CPI-U All Items NSA, series CUUR0000SA0',
     'https://api.bls.gov/publicAPI/v1/timeseries/data/CUUR0000SA0?latest=true'
@@ -1267,7 +1270,7 @@ async function fetchUS_DrugOverdoses() {
   const val    = safeNum(row.data_value);
   const period = `${row.month}/${row.year} (provisional)`;
   return result(
-    'US', 'drugOverdoses', val, 'deaths (provisional monthly count)',
+    'US', 'drugOverdoseDeaths', val, 'deaths (provisional monthly count)',
     period,
     'CDC — VSRR Provisional Drug Overdose Death Counts (NCHS), Socrata xkb8-kh2a',
     'https://data.cdc.gov/resource/xkb8-kh2a.json',
@@ -1303,7 +1306,7 @@ async function fetchUS_FedSpending() {
       const label   = `FY${fy} Period ${period}`;
       const trillions = parseFloat((total / 1e12).toFixed(3));
       return result(
-        'US', 'fedSpending', trillions, `USD trillions (${results.length} agencies, ${label})`,
+        'US', 'federalAgencySpending', trillions, `USD trillions (${results.length} agencies, ${label})`,
         label,
         `USAspending.gov — Agency Budget Authority, ${label}`,
         'https://api.usaspending.gov/api/v2/spending/',
@@ -1337,7 +1340,7 @@ async function fetchUS_MedianRent() {
       const val     = safeNum(vals[rentIdx]);
       if (val == null || val < 0) continue;
       return result(
-        'US', 'medianRent', val, '$/month (median gross rent)',
+        'US', 'medianGrossRent', val, '$/month (median gross rent)',
         String(yr),
         `U.S. Census Bureau — ACS 1-Year ${yr}, variable DP04_0134E`,
         `https://api.census.gov/data/${yr}/acs/acs1/profile?get=DP04_0134E&for=us:1`
@@ -1347,6 +1350,101 @@ async function fetchUS_MedianRent() {
     }
   }
   throw new Error('Census ACS: no median rent data found');
+}
+
+/**
+ * US Median Home Value — Census Bureau ACS 1-Year API
+ * Variable B25077_001E: Median value (dollars) of owner-occupied housing units.
+ * Tries the two most recent available ACS 1-Year vintages.
+ */
+async function fetchUS_MedianHomeValue() {
+  const CURRENT_YEAR = new Date().getFullYear();
+  for (const yr of [CURRENT_YEAR - 2, CURRENT_YEAR - 3]) {
+    try {
+      const resp = await axios.get(
+        `https://api.census.gov/data/${yr}/acs/acs1?get=B25077_001E,NAME&for=us:1`,
+        { timeout: TIMEOUT_MS }
+      );
+      if (!Array.isArray(resp.data) || resp.data.length < 2) continue;
+      const headers = resp.data[0];
+      const vals    = resp.data[1];
+      const idx     = headers.indexOf('B25077_001E');
+      const val     = safeNum(vals[idx]);
+      if (val == null || val <= 0) continue;
+      return result(
+        'US', 'medianHomeValue', val, 'USD (median owner-occupied home value)',
+        String(yr),
+        `U.S. Census Bureau — ACS 1-Year ${yr}, variable B25077_001E`,
+        `https://api.census.gov/data/${yr}/acs/acs1?get=B25077_001E&for=us:1`
+      );
+    } catch (err) {
+      console.warn(`  Census ACS B25077 ${yr} failed: ${err.message?.slice(0, 60)}`);
+    }
+  }
+  throw new Error('Census ACS: no median home value data found');
+}
+
+/**
+ * US Bank Rate (Federal Funds Rate) — Federal Reserve / FRED public CSV
+ * Series FEDFUNDS: Effective Federal Funds Rate (monthly average, %).
+ * No API key required; FRED public CSV endpoint.
+ */
+async function fetchUS_BankRate() {
+  const URL = 'https://fred.stlouisfed.org/graph/fredgraph.csv?id=FEDFUNDS';
+  const resp = await axios.get(URL, {
+    timeout: TIMEOUT_MS,
+    headers: { 'User-Agent': BROWSER_UA },
+    responseType: 'text',
+  });
+  const lines = String(resp.data).trim().split('\n').filter(l => l.trim() && !l.startsWith('DATE'));
+  if (lines.length === 0) throw new Error('US BankRate: empty FRED FEDFUNDS response');
+  // Find the latest non-null value scanning from end
+  let bestDate = '', bestVal = null;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const [date, val] = lines[i].split(',');
+    const v = parseFloat(val);
+    if (!isNaN(v) && v >= 0) { bestDate = date?.trim(); bestVal = v; break; }
+  }
+  if (bestVal === null) throw new Error('US BankRate: no valid FEDFUNDS value found');
+  return result(
+    'US', 'bankRate', bestVal, '% (effective federal funds rate, monthly avg)',
+    bestDate,
+    'Federal Reserve — Effective Federal Funds Rate (FRED series FEDFUNDS)',
+    URL,
+    'Monthly average of daily effective federal funds rate; set by FOMC'
+  );
+}
+
+/**
+ * US Poverty Rate — Census Bureau ACS 1-Year Subject Tables API
+ * Variable S1701_C03_001E: Percent below poverty level, all persons.
+ * Tries the two most recent available ACS 1-Year vintages.
+ */
+async function fetchUS_PovertyRate() {
+  const CURRENT_YEAR = new Date().getFullYear();
+  for (const yr of [CURRENT_YEAR - 2, CURRENT_YEAR - 3]) {
+    try {
+      const resp = await axios.get(
+        `https://api.census.gov/data/${yr}/acs/acs1/subject?get=S1701_C03_001E,NAME&for=us:1`,
+        { timeout: TIMEOUT_MS }
+      );
+      if (!Array.isArray(resp.data) || resp.data.length < 2) continue;
+      const headers = resp.data[0];
+      const vals    = resp.data[1];
+      const idx     = headers.indexOf('S1701_C03_001E');
+      const val     = safeNum(vals[idx]);
+      if (val == null || val < 0) continue;
+      return result(
+        'US', 'povertyRate', val, '% of population below poverty level',
+        String(yr),
+        `U.S. Census Bureau — ACS 1-Year ${yr}, S1701 Poverty Status in the Past 12 Months`,
+        `https://api.census.gov/data/${yr}/acs/acs1/subject?get=S1701_C03_001E&for=us:1`
+      );
+    } catch (err) {
+      console.warn(`  Census ACS S1701 ${yr} failed: ${err.message?.slice(0, 60)}`);
+    }
+  }
+  throw new Error('Census ACS: no poverty rate data found');
 }
 
 // ─── UNITED KINGDOM ───────────────────────────────────────────────────────────
@@ -2067,11 +2165,14 @@ const FETCHERS = [
   { label: 'CA  Median Rent    (StatCan CMHC 34-10-0133-01 avg 2BR)',      fn: fetchCA_MedianGrossRent },
   { label: 'CA  School Funding (StatCan ed spending 37-10-0066-01)',       fn: fetchCA_SchoolFunding },
   { label: 'CA  Literacy       (StatCan educ attainment 37-10-0130-01)',   fn: fetchCA_Literacy },
-  { label: 'US  Unemployment   (BLS API LNS14000000)',                   fn: fetchUS_Unemployment },
-  { label: 'US  CPI            (BLS API CUUR0000SA0)',                   fn: fetchUS_CPI },
-  { label: 'US  Drug Overdoses (CDC Socrata xkb8-kh2a)',                 fn: fetchUS_DrugOverdoses },
-  { label: 'US  Fed Spending   (USAspending.gov /api/v2/spending/)',     fn: fetchUS_FedSpending },
-  { label: 'US  Median Rent    (Census ACS DP04_0134E)',                 fn: fetchUS_MedianRent },
+  { label: 'US  Unemployment   (BLS LNS14000000 → unemploymentRate)',    fn: fetchUS_Unemployment },
+  { label: 'US  CPI            (BLS CUUR0000SA0 → cpiInflation)',        fn: fetchUS_CPI },
+  { label: 'US  Drug Overdoses (CDC Socrata xkb8-kh2a → drugOverdoseDeaths)', fn: fetchUS_DrugOverdoses },
+  { label: 'US  Fed Spending   (USAspending.gov → federalAgencySpending)', fn: fetchUS_FedSpending },
+  { label: 'US  Median Rent    (Census ACS DP04_0134E → medianGrossRent)', fn: fetchUS_MedianRent },
+  { label: 'US  Median Home    (Census ACS B25077_001E → medianHomeValue)', fn: fetchUS_MedianHomeValue },
+  { label: 'US  Bank Rate      (FRED FEDFUNDS → bankRate)',              fn: fetchUS_BankRate },
+  { label: 'US  Poverty Rate   (Census ACS S1701_C03_001E → povertyRate)', fn: fetchUS_PovertyRate },
   { label: 'UK  Unemployment   (ONS timeseries MGSX)',                   fn: fetchUK_Unemployment },
   { label: 'UK  CPI            (ONS timeseries D7G7)',                   fn: fetchUK_CPI },
   { label: 'UK  Home Prices    (LR HPI Linked Data API)',                fn: fetchUK_HomePrices },
