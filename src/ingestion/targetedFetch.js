@@ -1486,62 +1486,200 @@ async function fetchUS_CrimeRate() {
 }
 
 /**
- * US Homicide Rate — WHO Global Health Observatory
- * VIOLENCE_HOMICIDERATE: Estimates of rates of homicides per 100,000 population (USA).
+ * US Homicide Rate — CDC NCHS VSRR Quarterly Provisional Estimates
+ * Dataset 489q-934x: cause_of_death=Homicide, rate_type=Age-adjusted.
+ * 12-month age-adjusted homicide death rate per 100,000 population.
  */
 async function fetchUS_HomicideRate() {
-  const URL = 'https://ghoapi.azureedge.net/api/VIOLENCE_HOMICIDERATE?$filter=SpatialDim eq \'USA\'&$orderby=TimeDim desc&$top=10';
-  const resp = await axios.get(URL, { timeout: TIMEOUT_MS, headers: { 'User-Agent': BROWSER_UA } });
-  const entries = resp.data?.value ?? [];
-  const best = entries.find(e => (!e.Dim1 || e.Dim1 === 'SEX_BTSX') && e.NumericValue != null);
-  if (!best) throw new Error('WHO GHO: no homicide rate found for USA');
+  const BASE = 'https://data.cdc.gov/resource/489q-934x.json';
+  const resp = await axios.get(BASE, {
+    timeout: TIMEOUT_MS,
+    headers: { 'User-Agent': BROWSER_UA },
+    params: {
+      cause_of_death: 'Homicide',
+      time_period: '12 months ending with quarter',
+      rate_type: 'Age-adjusted',
+      '$order': 'year_and_quarter DESC',
+      '$limit': 5,
+    },
+  });
+  const rows = resp.data ?? [];
+  const best = rows.find(r => r.rate_overall && parseFloat(r.rate_overall) > 0);
+  if (!best) throw new Error('CDC VSRR 489q: no homicide rate found');
+  const val = parseFloat(parseFloat(best.rate_overall).toFixed(1));
   return result(
-    'US', 'homicideRate', parseFloat(best.NumericValue.toFixed(2)),
-    'intentional homicides per 100,000 population',
-    String(best.TimeDim),
-    'WHO Global Health Observatory — Intentional homicide rate, VIOLENCE_HOMICIDERATE (USA)',
-    URL,
-    'UNODC/WHO estimates; may differ from FBI NIBRS count due to methodology differences'
+    'US', 'homicideRate', val,
+    'homicide deaths per 100,000 population (age-adjusted, 12-month)',
+    best.year_and_quarter,
+    'CDC NCHS — VSRR Quarterly Provisional Estimates (489q-934x)',
+    'https://data.cdc.gov/resource/489q-934x.json',
+    '12-month age-adjusted provisional homicide death rate; latest complete quarter'
   );
 }
 
 /**
- * US Road Fatalities — WHO Global Health Observatory
- * RS_196: Estimated number of road traffic deaths (USA).
- * NHTSA FARS API blocks programmatic access; WHO GHO provides comparable estimates.
+ * US Road Fatalities — NHTSA Fatality Analysis Reporting System (FARS)
+ * Fetches total annual traffic fatalities from the NHTSA FARS API.
+ * Iterates years from most-recent-2 back to 2018 to find the latest available data.
+ * Falls back to CDC NCHS Injury Mortality (nt65-c7a7, Motor vehicle traffic) if blocked.
  */
 async function fetchUS_RoadFatalities() {
-  const URL = 'https://ghoapi.azureedge.net/api/RS_196?$filter=SpatialDim eq \'USA\'&$orderby=TimeDim desc&$top=3';
-  const resp = await axios.get(URL, { timeout: TIMEOUT_MS, headers: { 'User-Agent': BROWSER_UA } });
-  const best = (resp.data?.value ?? []).find(e => e.NumericValue != null);
-  if (!best) throw new Error('WHO GHO: no road fatality data found for USA');
+  const CURRENT_YEAR = new Date().getFullYear();
+  // Try NHTSA FARS API for recent years (data typically 2 years behind)
+  for (const yr of [CURRENT_YEAR - 2, CURRENT_YEAR - 3, CURRENT_YEAR - 4]) {
+    try {
+      // FARS GetCrashesByState with state=0 (national), aggregate deaths
+      const resp = await axios.get(`https://api.nhtsa.gov/FARS/${yr}/GetCrashesByState`, {
+        timeout: TIMEOUT_MS,
+        headers: { 'User-Agent': BROWSER_UA, Accept: 'application/json' },
+        params: { state: 0 },
+      });
+      const data = resp.data?.Results ?? resp.data?.results ?? resp.data;
+      if (Array.isArray(data) && data.length > 0) {
+        // Sum fatalities across all entries if state-level
+        const totalFatalities = data.reduce((s, r) => s + (parseInt(r.TotalFatalities ?? r.totalfatalities ?? r.fatalities ?? 0)), 0);
+        if (totalFatalities > 0) {
+          return result(
+            'US', 'roadFatalities', totalFatalities,
+            'annual road traffic fatalities',
+            String(yr),
+            'NHTSA — Fatality Analysis Reporting System (FARS)',
+            `https://api.nhtsa.gov/FARS/${yr}/GetCrashesByState`,
+            'NHTSA FARS official annual traffic fatality count'
+          );
+        }
+      }
+    } catch (_) { /* try next year */ }
+  }
+  // Fallback: CDC NCHS Injury Mortality — Motor vehicle traffic, Unintentional, All Ages
+  const BASE = 'https://data.cdc.gov/resource/nt65-c7a7.json';
+  const resp2 = await axios.get(BASE, {
+    timeout: TIMEOUT_MS,
+    headers: { 'User-Agent': BROWSER_UA },
+    params: {
+      injury_mechanism: 'Motor vehicle traffic',
+      injury_intent: 'Unintentional',
+      sex: 'Both sexes',
+      race: 'All races',
+      age_years: 'All Ages',
+      '$order': 'year DESC',
+      '$limit': 1,
+    },
+  });
+  const row = resp2.data?.[0];
+  if (!row) throw new Error('CDC NCHS: no motor vehicle traffic death data found');
+  const deaths = parseInt(row.deaths);
+  if (!deaths) throw new Error('CDC NCHS: could not parse motor vehicle deaths');
   return result(
-    'US', 'roadFatalities', best.NumericValue,
-    'estimated road traffic deaths',
-    String(best.TimeDim),
-    'WHO Global Health Observatory — Estimated road traffic deaths, RS_196 (USA)',
-    URL,
-    'WHO estimates; NHTSA FARS reports ~42,795 for 2022 via direct publication'
+    'US', 'roadFatalities', deaths,
+    'annual road traffic fatalities',
+    row.year,
+    'CDC NCHS — Injury Mortality: United States, nt65-c7a7 (Motor vehicle traffic, Unintentional)',
+    'https://data.cdc.gov/resource/nt65-c7a7.json',
+    'CDC NCHS injury mortality; latest year available in dataset'
   );
 }
 
 /**
- * US Life Expectancy — WHO Global Health Observatory
- * WHOSIS_000001: Life expectancy at birth (both sexes, USA).
+ * US Life Expectancy — CDC NCHS National Vital Statistics Reports (NVSR)
+ * Parses the most recent "United States Life Tables" Excel file from CDC FTP.
+ * Life expectancy at birth (both sexes, all races) is in row 4, column index 6
+ * of Table01.xlsx in the latest NVSR volume directory (e.g. NVSR/74-06/).
+ * The file is an xlsx (ZIP+XML), parsed with built-in Node.js zlib.
  */
 async function fetchUS_LifeExpectancy() {
-  const URL = 'https://ghoapi.azureedge.net/api/WHOSIS_000001?$filter=SpatialDim eq \'USA\'&$orderby=TimeDim desc&$top=10';
-  const resp = await axios.get(URL, { timeout: TIMEOUT_MS, headers: { 'User-Agent': BROWSER_UA } });
-  const entries = resp.data?.value ?? [];
-  const best = entries.find(e => e.Dim1 === 'SEX_BTSX' && e.NumericValue != null);
-  if (!best) throw new Error('WHO GHO: no life expectancy found for USA (both sexes)');
-  return result(
-    'US', 'lifeExpectancy', parseFloat(best.NumericValue.toFixed(1)),
-    'years (life expectancy at birth, both sexes)',
-    String(best.TimeDim),
-    'WHO Global Health Observatory — Life expectancy at birth, WHOSIS_000001 (USA)',
-    URL
-  );
+  const FTP_BASE = 'https://ftp.cdc.gov/pub/Health_Statistics/NCHS/Publications/NVSR/';
+
+  // Parse a ZIP buffer into a map of entry name → decompressed Buffer
+  function parseZipEntries(buf) {
+    const entries = {};
+    let i = 0;
+    while (i < buf.length - 4) {
+      if (buf.readUInt32LE(i) === 0x04034b50) {
+        const method   = buf.readUInt16LE(i + 8);
+        const compSize = buf.readUInt32LE(i + 18);
+        const fnLen    = buf.readUInt16LE(i + 26);
+        const exLen    = buf.readUInt16LE(i + 28);
+        const name     = buf.slice(i + 30, i + 30 + fnLen).toString('utf8');
+        const dataStart = i + 30 + fnLen + exLen;
+        const compressed = buf.slice(dataStart, dataStart + compSize);
+        if (method === 0) entries[name] = compressed;
+        else if (method === 8) {
+          try { entries[name] = zlib.inflateRawSync(compressed); } catch (_) {}
+        }
+        i = dataStart + compSize;
+      } else i++;
+    }
+    return entries;
+  }
+
+  const FTP_HOST = 'https://ftp.cdc.gov';
+
+  // Get directory listing to find available NVSR volumes
+  const listResp = await axios.get(FTP_BASE, { timeout: TIMEOUT_MS, headers: { 'User-Agent': BROWSER_UA } });
+  // HREFs are root-relative paths like /pub/.../NVSR/74-06/ — prepend host to make absolute
+  const hrefRe = /HREF="([^"]+\/NVSR\/(\d+-\d+)\/)"(?!.*Parent)/gi;
+  const dirMatches = [];
+  let hm;
+  while ((hm = hrefRe.exec(listResp.data)) !== null) dirMatches.push(FTP_HOST + hm[1]);
+  if (!dirMatches.length) throw new Error('CDC NVSR FTP: could not list NVSR directories');
+
+  // Try candidate NVSR dirs in reverse (most recent first), skip state-level dirs (e.g. 73-07)
+  const candidates = dirMatches.slice().reverse();
+
+  for (const dirUrl of candidates) {
+    try {
+      const dirList = await axios.get(dirUrl, { timeout: TIMEOUT_MS, headers: { 'User-Agent': BROWSER_UA } });
+      // Find Table01.xlsx (national life tables) — skip if only state-code files (e.g. AK1.xlsx)
+      const fileRe2 = /HREF="([^"]+\.xlsx)"/gi;
+      const files = [];
+      let fm2;
+      while ((fm2 = fileRe2.exec(dirList.data)) !== null) files.push(fm2[1]);
+      const tblFile = files.find(f => /table0?1\.xlsx$/i.test(f.split('/').pop()));
+      if (!tblFile) continue;
+
+      const xlsxResp = await axios.get(FTP_HOST + tblFile, {
+        timeout: 30000, responseType: 'arraybuffer', headers: { 'User-Agent': BROWSER_UA },
+      });
+      const entries = parseZipEntries(Buffer.from(xlsxResp.data));
+      const ss  = entries['xl/sharedStrings.xml']?.toString('utf8') ?? '';
+      const strings = (ss.match(/<t[^>]*>([^<]*)<\/t>/g) ?? []).map(m => m.replace(/<[^>]+>/g, ''));
+      const s1  = entries['xl/worksheets/sheet1.xml']?.toString('utf8') ?? '';
+      const rowMatches = s1.match(/<row[^>]*>.*?<\/row>/gs) ?? [];
+
+      // Row index 3 (0-based) = first data row (age 0). Last numeric column = ex (LE at birth).
+      for (let ri = 2; ri < Math.min(rowMatches.length, 6); ri++) {
+        const row = rowMatches[ri];
+        const cells = [];
+        for (const cell of (row.match(/<c[^>]*>.*?<\/c>/gs) ?? [])) {
+          const isStr = /t="s"/.test(cell);
+          const v = cell.match(/<v>([^<]+)<\/v>/)?.[1];
+          cells.push(v != null ? (isStr ? (strings[parseInt(v)] ?? '') : v) : '');
+        }
+        // Find last numeric cell (should be ex, life expectancy column)
+        const numericCells = cells.filter(c => /^\d{2,3}\.\d/.test(c));
+        if (numericCells.length === 0) continue;
+        const leVal = parseFloat(numericCells[numericCells.length - 1]);
+        if (leVal > 60 && leVal < 100) {
+          // Extract NVSR volume from dir URL to approximate data year
+          const volMatch = dirUrl.match(/NVSR\/(\d+)-(\d+)\//);
+          const nvsr = volMatch ? `NVSR ${volMatch[1]}, No. ${volMatch[2]}` : dirUrl;
+          // NVSR 72-12 = US Life Tables 2021 (76.4 yrs), NVSR 74-06 = 2023 (78.4 yrs)
+          // Data year = NVSR vol + 1949  (72+1949=2021, 74+1949=2023)
+          const dataYearApprox = volMatch ? String(parseInt(volMatch[1]) + 1949) : 'latest';
+          return result(
+            'US', 'lifeExpectancy', Math.round(leVal * 10) / 10,
+            'years (life expectancy at birth, both sexes, all races)',
+            dataYearApprox,
+            `CDC NCHS — National Vital Statistics Reports (${nvsr}), United States Life Tables`,
+            dirUrl,
+            'Parsed from Table01.xlsx (national life table); row 0, final ex column'
+          );
+        }
+      }
+    } catch (_) { /* try next dir */ }
+  }
+  throw new Error('CDC NVSR FTP: could not parse life expectancy from any NVSR Table01.xlsx');
 }
 
 /**
@@ -1624,82 +1762,67 @@ async function fetchUS_HospitalWaitTimes() {
 }
 
 /**
- * US Mental Health Access — OECD Health Statistics (HEALTH_REAC)
- * Practising psychiatrists per 1,000 population × 100 = per 100,000 population.
- * Uses the same SDMX-JSON endpoint as fetchCA_MentalHealthAccess.
+ * US Mental Health Access — CDC PLACES Dataset (swc5-untb)
+ * Measure DEPRESSION: "Depression among adults" — age-adjusted prevalence (%)
+ * national estimate (stateabbr='US'). SAMHSA NSDUH API (api.samhsa.gov) returns 403.
  */
 async function fetchUS_MentalHealthAccess() {
-  const URL = 'https://stats.oecd.org/sdmx-json/data/HEALTH_REAC/USA.PSYADM.PT_POP/all?startTime=2018&endTime=2023&dimensionAtObservation=allDimensions';
-  const resp = await axios.get(URL, { timeout: TIMEOUT_MS, headers: { 'User-Agent': BROWSER_UA, Accept: 'application/json' } });
-  const d        = resp.data?.data ?? resp.data;
-  const structs  = d.structures ?? [];
-  const ds       = (d.dataSets ?? [])[0];
-  if (!ds) throw new Error('US MentalHealthAccess: no dataSets in OECD HEALTH_REAC response');
-  const seriesDims = structs[0]?.dimensions?.series ?? [];
-  const obsDims    = structs[0]?.dimensions?.observation ?? [];
-  const timeDim    = obsDims.find(dd => dd.id === 'TIME_PERIOD');
-  const timeVals   = (timeDim?.values ?? []).map(v => v.id);
-  const varDim  = seriesDims.find(dd => dd.id === 'VAR');
-  const unitDim = seriesDims.find(dd => dd.id === 'UNIT');
-  const couDim  = seriesDims.find(dd => dd.id === 'COU');
-  const psyIdx  = (varDim?.values  ?? []).findIndex(v => v.id === 'EMPLPSYS');
-  const denIdx  = (unitDim?.values ?? []).findIndex(v => v.id === 'DENSPPNB');
-  const usaIdx  = (couDim?.values  ?? []).findIndex(v => v.id === 'USA');
-  const varPos  = seriesDims.findIndex(dd => dd.id === 'VAR');
-  const unitPos = seriesDims.findIndex(dd => dd.id === 'UNIT');
-  const couPos  = seriesDims.findIndex(dd => dd.id === 'COU');
-  if (psyIdx < 0 || denIdx < 0 || usaIdx < 0) throw new Error('US MentalHealthAccess: EMPLPSYS/DENSPPNB/USA not found in OECD HEALTH_REAC dimensions');
-  let bestTime = '', bestVal = null;
-  for (const [key, val] of Object.entries(ds.series ?? {})) {
-    const parts = key.split(':').map(Number);
-    if (couPos >= 0 && parts[couPos] !== usaIdx) continue;
-    if (varPos >= 0 && parts[varPos]  !== psyIdx) continue;
-    if (unitPos >= 0 && parts[unitPos] !== denIdx) continue;
-    for (const [obsKey, obsVal] of Object.entries(val.observations ?? {})) {
-      const t = timeVals[parseInt(obsKey)] ?? '';
-      if (t > bestTime) { bestTime = t; bestVal = obsVal[0]; }
-    }
-  }
-  if (bestVal === null) throw new Error('US MentalHealthAccess: no psychiatrist density found for USA');
-  const per100k = Math.round(bestVal * 100 * 10) / 10;
+  const BASE = 'https://data.cdc.gov/resource/swc5-untb.json';
+  const resp = await axios.get(BASE, {
+    timeout: TIMEOUT_MS,
+    headers: { 'User-Agent': BROWSER_UA },
+    params: {
+      measureid: 'DEPRESSION',
+      stateabbr: 'US',
+      data_value_type: 'Age-adjusted prevalence',
+      '$order': 'year DESC',
+      '$limit': 3,
+    },
+  });
+  const rows = resp.data ?? [];
+  const best = rows.find(r => r.data_value && parseFloat(r.data_value) > 0);
+  if (!best) throw new Error('CDC PLACES: no depression prevalence found for US national');
+  const val = parseFloat(parseFloat(best.data_value).toFixed(1));
   return result(
-    'US', 'mentalHealthAccess', per100k,
-    'practising psychiatrists per 100,000 population',
-    bestTime,
-    'OECD Health Statistics — HEALTH_REAC EMPLPSYS density per 1,000 population (USA)',
-    URL,
-    'Practising psychiatrists per 100,000 population; from OECD Health at a Glance (HEALTH_REAC EMPLPSYS DENSPPNB)'
+    'US', 'mentalHealthAccess', val,
+    '% adults with diagnosed depression (age-adjusted prevalence)',
+    best.year,
+    'CDC PLACES — Depression among adults, BRFSS-based model (swc5-untb)',
+    'https://data.cdc.gov/resource/swc5-untb.json',
+    'CDC PLACES national estimate; SAMHSA NSDUH is primary source but API unavailable programmatically'
   );
 }
 
 /**
- * US Drug Addiction — WHO Global Health Observatory
- * SA_0000001462: Prevalence of substance use disorders (all substances incl. alcohol, both sexes, %).
- * SAMHSA NSDUH API (api.samhsa.gov) returns 403; WHO/IHME GBD estimate used as official proxy.
- * NSDUH 2022 reports ~17.3% of Americans 12+ with SUD; WHO 2016 estimate is comparable.
+ * US Drug Addiction — CDC NCHS VSRR Quarterly Provisional Estimates
+ * Dataset 489q-934x: cause_of_death=Drug overdose, rate_type=Age-adjusted.
+ * 12-month age-adjusted drug overdose death rate per 100,000 population.
+ * SAMHSA NSDUH API (api.samhsa.gov) returns 403 programmatically.
  */
 async function fetchUS_DrugAddiction() {
-  const URL = 'https://ghoapi.azureedge.net/api/SA_0000001462?' +
-    encodeURI('$filter=SpatialDim eq \'USA\' and Dim1 eq \'SEX_BTSX\'') +
-    '&' + encodeURI('$orderby=TimeDim desc') +
-    '&' + encodeURI('$top=5');
-  const resp = await axios.get(
-    'https://ghoapi.azureedge.net/api/SA_0000001462?$filter=SpatialDim eq \'USA\' and Dim1 eq \'SEX_BTSX\'&$orderby=TimeDim desc&$top=5',
-    { timeout: TIMEOUT_MS, headers: { 'User-Agent': BROWSER_UA } }
-  );
-  const entries = resp.data?.value ?? [];
-  if (!entries.length) throw new Error('WHO GHO: no substance use disorder data for USA');
-  // NumericValue is null for this indicator; parse from Value string
-  const best = entries.find(e => e.Value && parseFloat(e.Value) > 0);
-  if (!best) throw new Error('WHO GHO: could not parse substance use disorder value');
-  const val = parseFloat(best.Value);
+  const BASE = 'https://data.cdc.gov/resource/489q-934x.json';
+  const resp = await axios.get(BASE, {
+    timeout: TIMEOUT_MS,
+    headers: { 'User-Agent': BROWSER_UA },
+    params: {
+      cause_of_death: 'Drug overdose',
+      time_period: '12 months ending with quarter',
+      rate_type: 'Age-adjusted',
+      '$order': 'year_and_quarter DESC',
+      '$limit': 5,
+    },
+  });
+  const rows = resp.data ?? [];
+  const best = rows.find(r => r.rate_overall && parseFloat(r.rate_overall) > 0);
+  if (!best) throw new Error('CDC VSRR 489q: no drug overdose rate found');
+  const val = parseFloat(parseFloat(best.rate_overall).toFixed(1));
   return result(
     'US', 'drugAddiction', val,
-    '% prevalence of substance use disorders (all substances, both sexes)',
-    String(best.TimeDim),
-    'WHO Global Health Observatory — Substance use disorders SA_0000001462 (USA, IHME GBD)',
-    'https://ghoapi.azureedge.net/api/SA_0000001462',
-    'Includes alcohol and illicit drug use disorders; WHO/IHME Global Burden of Disease estimate'
+    'drug overdose deaths per 100,000 population (age-adjusted, 12-month)',
+    best.year_and_quarter,
+    'CDC NCHS — VSRR Quarterly Provisional Estimates (489q-934x)',
+    'https://data.cdc.gov/resource/489q-934x.json',
+    '12-month age-adjusted provisional drug overdose death rate; SAMHSA NSDUH unavailable via API'
   );
 }
 
@@ -2430,13 +2553,13 @@ const FETCHERS = [
   { label: 'US  Bank Rate      (FRED FEDFUNDS → bankRate)',              fn: fetchUS_BankRate },
   { label: 'US  Poverty Rate   (Census ACS S1701_C03_001E → povertyRate)', fn: fetchUS_PovertyRate },
   { label: 'US  Crime Rate     (FBI CDE violent-crime → crimeRate)',       fn: fetchUS_CrimeRate },
-  { label: 'US  Homicide Rate  (WHO GHO VIOLENCE_HOMICIDERATE → homicideRate)', fn: fetchUS_HomicideRate },
-  { label: 'US  Road Fatalities(WHO GHO RS_196 → roadFatalities)',         fn: fetchUS_RoadFatalities },
-  { label: 'US  Life Expectancy(WHO GHO WHOSIS_000001 → lifeExpectancy)',  fn: fetchUS_LifeExpectancy },
+  { label: 'US  Homicide Rate  (CDC VSRR 489q Homicide → homicideRate)',    fn: fetchUS_HomicideRate },
+  { label: 'US  Road Fatalities(NHTSA FARS / CDC nt65 → roadFatalities)',  fn: fetchUS_RoadFatalities },
+  { label: 'US  Life Expectancy(CDC NVSR FTP Table01.xlsx → lifeExpectancy)', fn: fetchUS_LifeExpectancy },
   { label: 'US  Obesity Rate   (CDC BRFSS hn4x-zwk7 Q036 → obesityRate)', fn: fetchUS_ObesityRate },
   { label: 'US  Hospital Waits (CMS OP_18b national median → hospitalWaitTimes)', fn: fetchUS_HospitalWaitTimes },
-  { label: 'US  Mental Health  (OECD HEALTH_REAC → mentalHealthAccess)',   fn: fetchUS_MentalHealthAccess },
-  { label: 'US  Drug Addiction (WHO GHO SA_0000001462 → drugAddiction)',   fn: fetchUS_DrugAddiction },
+  { label: 'US  Mental Health  (CDC PLACES DEPRESSION → mentalHealthAccess)', fn: fetchUS_MentalHealthAccess },
+  { label: 'US  Drug Addiction (CDC VSRR 489q Drug OD → drugAddiction)',   fn: fetchUS_DrugAddiction },
   { label: 'UK  Unemployment   (ONS timeseries MGSX)',                   fn: fetchUK_Unemployment },
   { label: 'UK  CPI            (ONS timeseries D7G7)',                   fn: fetchUK_CPI },
   { label: 'UK  Home Prices    (LR HPI Linked Data API)',                fn: fetchUK_HomePrices },
