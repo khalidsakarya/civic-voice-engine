@@ -38,13 +38,25 @@
  *
  * United States — Safety & Health:
  *   - crimeRate            FBI CDE API summarized/national/violent-crime (cde.fbi.gov)
- *   - homicideRate         WHO GHO VIOLENCE_HOMICIDERATE (USA)
- *   - roadFatalities       WHO GHO RS_196 estimated road traffic deaths (USA)
- *   - lifeExpectancy       WHO GHO WHOSIS_000001 (USA, both sexes)
+ *   - homicideRate         CDC NCHS VSRR Quarterly 489q-934x (age-adjusted, 12-month)
+ *   - roadFatalities       NHTSA FARS / CDC NCHS nt65-c7a7 fallback
+ *   - lifeExpectancy       CDC NCHS NVSR FTP Table01.xlsx (national life tables)
  *   - obesityRate          CDC BRFSS hn4x-zwk7 Q036 (adults with obesity, national)
  *   - hospitalWaitTimes    CMS Provider Data OP_18b median ED time (yv7e-xc69)
- *   - mentalHealthAccess   OECD HEALTH_REAC psychiatrists per 100,000 (USA)
- *   - drugAddiction        WHO GHO SA_0000001462 substance use disorder prevalence (USA)
+ *   - mentalHealthAccess   CDC PLACES swc5-untb DEPRESSION age-adjusted prevalence
+ *   - drugAddiction        CDC NCHS VSRR Quarterly 489q-934x drug overdose death rate
+ *
+ * United States — Housing & Social:
+ *   - homelessness         HUD AHAR PIT Count xlsb (2007–latest, national Total row)
+ *   - newBuilds            FRED PERMIT (new privately-owned housing units authorised, SAAR)
+ *   - graduationRate       Census ACS S1501_C02_014E (HS diploma or higher, adults 25+)
+ *   - studentDebt          FRED SLOAS (total student loans outstanding, $ millions)
+ *   - schoolFunding        NCES Digest Table 236.75 HTML (per-pupil current expenditure)
+ *   - childPoverty         Census ACS S1701_C03_006E (% children in poverty)
+ *   - immigration          Census ACS B05012_003E (total foreign-born population)
+ *   - giniCoefficient      Census ACS B19083_001E (Gini coefficient, national)
+ *   - minWageGap           FRED FEDMINNFRWG (federal minimum wage, $/hr)
+ *   - literacy             Census ACS S1501_C02_015E (bachelor's degree or higher, 25+)
  *
  * United Kingdom (JSON/CSV APIs, no key required):
  *   - unemployment  ONS timeseries MGSX (ILO measure, seasonally adjusted)
@@ -1826,6 +1838,301 @@ async function fetchUS_DrugAddiction() {
   );
 }
 
+// ─── US HOUSING & SOCIAL ──────────────────────────────────────────────────────
+
+/**
+ * US Homelessness — HUD Annual Homeless Assessment Report (AHAR) PIT Count
+ * Downloads the xlsb from the AHAR 2024 page, parses ZIP+BIFF12 records to
+ * extract the national "Total" row "Overall Homeless" count (2nd RK value).
+ * No JSON/CSV API exists; HUD publishes PIT data in xlsb format only.
+ */
+async function fetchUS_Homelessness() {
+  const PAGE_URL = 'https://www.huduser.gov/portal/datasets/ahar/2024-ahar-part-1-pit-estimates-of-homelessness-in-the-us.html';
+  const pageResp = await axios.get(PAGE_URL, { timeout: TIMEOUT_MS, headers: { 'User-Agent': BROWSER_UA } });
+  const linkMatch = pageResp.data.match(/href="([^"]*PIT-Counts-by-State\.xlsb[^"]*)"/i);
+  if (!linkMatch) throw new Error('HUD AHAR: no PIT-Counts-by-State.xlsb link found');
+  const xlsbUrl = linkMatch[1].startsWith('http') ? linkMatch[1] : 'https://www.huduser.gov' + linkMatch[1];
+  const yearMatch = xlsbUrl.match(/\d{4}-(\d{4})-PIT/);
+  const dataYear = yearMatch ? yearMatch[1] : 'latest';
+
+  const fileResp = await axios.get(xlsbUrl, {
+    timeout: 90000, headers: { 'User-Agent': BROWSER_UA }, responseType: 'arraybuffer',
+  });
+
+  // --- ZIP parser (xlsb is a ZIP container) ---
+  function unzip(b) {
+    const e = {};
+    let i = 0;
+    while (i < b.length - 4) {
+      if (b.readUInt32LE(i) !== 0x04034b50) { i++; continue; }
+      const method = b.readUInt16LE(i + 8);
+      const cSize  = b.readUInt32LE(i + 18);
+      const fnLen  = b.readUInt16LE(i + 26);
+      const exLen  = b.readUInt16LE(i + 28);
+      const name   = b.slice(i + 30, i + 30 + fnLen).toString('utf8');
+      const ds     = i + 30 + fnLen + exLen;
+      const raw    = b.slice(ds, ds + cSize);
+      if (method === 0) e[name] = raw;
+      else if (method === 8) { try { e[name] = zlib.inflateRawSync(raw); } catch (_) {} }
+      i = ds + cSize;
+    }
+    return e;
+  }
+
+  // --- BIFF12 record reader ---
+  function biff12(b) {
+    const recs = [];
+    let i = 0;
+    while (i < b.length - 2) {
+      let type, tl;
+      if (b[i] & 0x80) { type = (b[i] & 0x7F) | ((b[i + 1] & 0x7F) << 7); tl = 2; }
+      else { type = b[i]; tl = 1; }
+      i += tl;
+      let sz = 0, sl = 0;
+      for (let k = 0; k < 4 && i + k < b.length; k++) {
+        sz |= (b[i + k] & 0x7F) << (7 * k); sl++;
+        if (!(b[i + k] & 0x80)) break;
+      }
+      i += sl;
+      if (i + sz > b.length) break;
+      recs.push({ type, d: b.slice(i, i + sz) });
+      i += sz;
+    }
+    return recs;
+  }
+
+  // --- RK number decoder ---
+  function rkVal(v) {
+    const fX100 = v & 1, fInt = (v >> 1) & 1;
+    let n = fInt ? ((v | 0) >> 2) : (() => {
+      const t = Buffer.allocUnsafe(8); t.fill(0);
+      t.writeUInt32LE(v & 0xFFFFFFFC, 4); return t.readDoubleLE(0);
+    })();
+    return fX100 ? n / 100 : n;
+  }
+
+  const entries = unzip(Buffer.from(fileResp.data));
+
+  // Parse shared strings (BrtSSTItem = 0x13: [flag:1][cch:4][utf16le:cch*2])
+  const ss = [];
+  for (const rec of biff12(entries['xl/sharedStrings.bin'] ?? Buffer.alloc(0))) {
+    if (rec.type === 0x13 && rec.d.length >= 5) {
+      const cch = rec.d.readUInt32LE(1);
+      if (rec.d.length >= 5 + cch * 2) ss.push(rec.d.slice(5, 5 + cch * 2).toString('utf16le'));
+    }
+  }
+  const totalIdx = ss.findIndex(s => s === 'Total');
+  if (totalIdx < 0) throw new Error('HUD AHAR xlsb: "Total" string not found');
+
+  // Parse sheet1.bin: find "Total" row, collect RK values
+  // Layout: col0=label(str), col1=CoC-count(RK), col2=Overall Homeless(RK), ...
+  const sh1 = entries['xl/worksheets/sheet1.bin'];
+  if (!sh1) throw new Error('HUD AHAR xlsb: sheet1.bin not found');
+  const shRecs = biff12(sh1);
+  let inTotal = false, rkList = [];
+  for (const rec of shRecs) {
+    if (rec.type === 0) { if (inTotal && rkList.length) break; rkList = []; inTotal = false; }
+    if (rec.type === 7 && rec.d.length >= 12 && rec.d.readUInt32LE(8) === totalIdx) inTotal = true;
+    if (rec.type === 2 && inTotal) {
+      const off = rec.d.length >= 12 ? 8 : 4;
+      if (rec.d.length >= off + 4) rkList.push(rkVal(rec.d.readUInt32LE(off)));
+    }
+  }
+  if (rkList.length < 2) throw new Error(`HUD AHAR xlsb: Total row too short (${rkList.length} values)`);
+  const total = Math.round(rkList[1]); // col1=CoC count, col2=Overall Homeless
+  if (total < 100000 || total > 2000000) throw new Error(`HUD AHAR xlsb: implausible value ${total}`);
+
+  return result('US', 'homelessness', total,
+    'people experiencing homelessness (HUD PIT January count, national total)',
+    dataYear,
+    'HUD — Annual Homeless Assessment Report (AHAR), Point-in-Time (PIT) Count',
+    PAGE_URL,
+    'Parsed from HUD PIT-Counts-by-State.xlsb; sheet1 "Total" row, "Overall Homeless" column');
+}
+
+/**
+ * US New Builds — FRED PERMIT series
+ * Monthly new privately-owned housing units authorised by building permits (SAAR, thousands).
+ * Source: U.S. Census Bureau / U.S. Department of Housing and Urban Development.
+ */
+async function fetchUS_NewBuilds() {
+  const URL = 'https://fred.stlouisfed.org/graph/fredgraph.csv?id=PERMIT';
+  const resp = await axios.get(URL, { timeout: TIMEOUT_MS, headers: { 'User-Agent': BROWSER_UA } });
+  const lines = resp.data.trim().split('\n').filter(l => l && !l.startsWith('DATE'));
+  const last = lines[lines.length - 1].split(',');
+  const val = safeNum(last[1]);
+  if (!val) throw new Error('FRED PERMIT: could not parse value');
+  return result('US', 'newBuilds', val,
+    'thousands of new privately-owned housing units authorised (SAAR, monthly)',
+    last[0],
+    'U.S. Census Bureau / HUD via FRED — New Privately-Owned Housing Units Authorized (PERMIT)',
+    URL,
+    'Seasonally adjusted annual rate; latest monthly observation');
+}
+
+/**
+ * US Graduation Rate — Census Bureau American Community Survey
+ * Table S1501: Educational Attainment — S1501_C02_014E = % adults 25+ with HS diploma or higher.
+ * Best programmatic proxy for national graduation rate (NCES CCD ACGR ~87% but no national API).
+ */
+async function fetchUS_GraduationRate() {
+  const YEAR = 2023;
+  const URL = `https://api.census.gov/data/${YEAR}/acs/acs1/subject?get=S1501_C02_014E,NAME&for=us:1`;
+  const resp = await axios.get(URL, { timeout: TIMEOUT_MS });
+  const val = safeNum(resp.data?.[1]?.[0]);
+  if (val == null) throw new Error('Census ACS S1501: no value returned');
+  return result('US', 'graduationRate', val,
+    '% adults 25 and over with high school diploma or higher (ACS 1-year)',
+    String(YEAR),
+    'U.S. Census Bureau — American Community Survey 1-Year, Table S1501 (S1501_C02_014E)',
+    URL,
+    'Adult educational attainment proxy; NCES CCD 4-year ACGR ~87% but no public national API');
+}
+
+/**
+ * US Student Debt — FRED SLOAS series
+ * Total outstanding student loans (Federal + private, $ millions), FRBNY/Board of Governors.
+ */
+async function fetchUS_StudentDebt() {
+  const URL = 'https://fred.stlouisfed.org/graph/fredgraph.csv?id=SLOAS';
+  const resp = await axios.get(URL, { timeout: TIMEOUT_MS, headers: { 'User-Agent': BROWSER_UA } });
+  const lines = resp.data.trim().split('\n').filter(l => l && !l.startsWith('DATE'));
+  const last = lines[lines.length - 1].split(',');
+  const val = safeNum(last[1]);
+  if (!val) throw new Error('FRED SLOAS: could not parse value');
+  return result('US', 'studentDebt', val,
+    'millions of dollars (total student loans outstanding)',
+    last[0],
+    'Federal Reserve / FRBNY via FRED — Student Loans Outstanding (SLOAS)',
+    URL,
+    'Total outstanding student loan balances; studentaid.gov portfolio data not available via API');
+}
+
+/**
+ * US School Funding — NCES Digest of Education Statistics Table 236.75
+ * Current expenditure per pupil in fall enrollment for public K–12 schools, national average.
+ * Parsed from HTML table (no JSON API); most recent school year shown first.
+ */
+async function fetchUS_SchoolFunding() {
+  for (const digest of ['d23', 'd22', 'd21']) {
+    try {
+      const url = `https://nces.ed.gov/programs/digest/${digest}/tables/dt${digest.slice(1)}_236.75.asp`;
+      const resp = await axios.get(url, { timeout: TIMEOUT_MS, headers: { 'User-Agent': BROWSER_UA } });
+      const html = resp.data;
+      const usIdx = html.search(/United States/i);
+      if (usIdx < 0) continue;
+      const segment = html.slice(usIdx, usIdx + 1000).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
+      // First dollar amount after "United States" = most recent year's per-pupil expenditure
+      const m = segment.match(/\$\s*([\d,]+)/);
+      if (!m) continue;
+      const val = safeNum(m[1]);
+      if (!val || val < 5000 || val > 30000) continue;
+      // Derive school year from digest year e.g. d23 → 2022-23
+      const yr = parseInt(digest.slice(1));
+      const schoolYear = `${2000 + yr - 1}-${String(yr).padStart(2, '0')}`;
+      return result('US', 'schoolFunding', val,
+        'USD per pupil (public K-12 current expenditure per student in fall enrollment)',
+        schoolYear,
+        `NCES — Digest of Education Statistics Table 236.75 (${digest.toUpperCase()})`,
+        url,
+        'Most recent school-year figure from NCES Digest table; parsed from HTML (no JSON API)');
+    } catch (_) { /* try next digest year */ }
+  }
+  throw new Error('NCES Digest 236.75: could not parse per-pupil expenditure from any digest year');
+}
+
+/**
+ * US Child Poverty — Census Bureau ACS Table S1701
+ * S1701_C03_006E = % related children under 18 years below poverty level.
+ */
+async function fetchUS_ChildPoverty() {
+  const YEAR = 2023;
+  const URL = `https://api.census.gov/data/${YEAR}/acs/acs1/subject?get=S1701_C03_006E,NAME&for=us:1`;
+  const resp = await axios.get(URL, { timeout: TIMEOUT_MS });
+  const val = safeNum(resp.data?.[1]?.[0]);
+  if (val == null) throw new Error('Census ACS S1701: no value returned');
+  return result('US', 'childPoverty', val,
+    '% related children under 18 below poverty level (ACS 1-year)',
+    String(YEAR),
+    'U.S. Census Bureau — American Community Survey 1-Year, Table S1701 (S1701_C03_006E)',
+    URL);
+}
+
+/**
+ * US Immigration — Census Bureau ACS Table B05012
+ * B05012_003E = total foreign-born population (nativity proxy for immigration).
+ * DHS Yearbook LPR admissions data not accessible via programmatic API.
+ */
+async function fetchUS_Immigration() {
+  const YEAR = 2023;
+  const URL = `https://api.census.gov/data/${YEAR}/acs/acs1?get=B05012_003E,NAME&for=us:1`;
+  const resp = await axios.get(URL, { timeout: TIMEOUT_MS });
+  const val = safeNum(resp.data?.[1]?.[0]);
+  if (val == null) throw new Error('Census ACS B05012: no value returned');
+  return result('US', 'immigration', val,
+    'total foreign-born population (nativity count, ACS 1-year)',
+    String(YEAR),
+    'U.S. Census Bureau — American Community Survey 1-Year, Table B05012 (B05012_003E)',
+    URL,
+    'DHS Yearbook LPR admissions not accessible via API; Census ACS nativity used as proxy');
+}
+
+/**
+ * US Gini Coefficient — Census Bureau ACS Table B19083
+ * B19083_001E = Gini Index of Income Inequality, national estimate.
+ */
+async function fetchUS_GiniCoefficient() {
+  const YEAR = 2023;
+  const URL = `https://api.census.gov/data/${YEAR}/acs/acs1?get=B19083_001E,NAME&for=us:1`;
+  const resp = await axios.get(URL, { timeout: TIMEOUT_MS });
+  const val = safeNum(resp.data?.[1]?.[0]);
+  if (val == null) throw new Error('Census ACS B19083: no value returned');
+  return result('US', 'giniCoefficient', val,
+    'Gini coefficient (0 = perfect equality, 1 = perfect inequality, ACS 1-year)',
+    String(YEAR),
+    'U.S. Census Bureau — American Community Survey 1-Year, Table B19083 (B19083_001E)',
+    URL);
+}
+
+/**
+ * US Minimum Wage — FRED FEDMINNFRWG series
+ * Federal minimum wage ($/hr); source: U.S. Department of Labor.
+ */
+async function fetchUS_MinWageGap() {
+  const URL = 'https://fred.stlouisfed.org/graph/fredgraph.csv?id=FEDMINNFRWG';
+  const resp = await axios.get(URL, { timeout: TIMEOUT_MS, headers: { 'User-Agent': BROWSER_UA } });
+  const lines = resp.data.trim().split('\n').filter(l => l && !l.startsWith('DATE'));
+  const last = lines[lines.length - 1].split(',');
+  const val = safeNum(last[1]);
+  if (!val) throw new Error('FRED FEDMINNFRWG: could not parse value');
+  return result('US', 'minWageGap', val,
+    'USD/hour (federal minimum wage)',
+    last[0],
+    'U.S. Department of Labor via FRED — Federal Minimum Wage (FEDMINNFRWG)',
+    URL,
+    'Current federal minimum wage; many states have higher minimum wages');
+}
+
+/**
+ * US Literacy — Census Bureau ACS Table S1501
+ * S1501_C02_015E = % adults 25+ with bachelor's degree or higher.
+ * Used as higher education attainment proxy (NCES PIAAC functional literacy ~79%
+ * at Level 2+ in 2023 but no programmatic API is available).
+ */
+async function fetchUS_Literacy() {
+  const YEAR = 2023;
+  const URL = `https://api.census.gov/data/${YEAR}/acs/acs1/subject?get=S1501_C02_015E,NAME&for=us:1`;
+  const resp = await axios.get(URL, { timeout: TIMEOUT_MS });
+  const val = safeNum(resp.data?.[1]?.[0]);
+  if (val == null) throw new Error('Census ACS S1501: no value returned');
+  return result('US', 'literacy', val,
+    "% adults 25 and over with bachelor's degree or higher (ACS 1-year)",
+    String(YEAR),
+    'U.S. Census Bureau — American Community Survey 1-Year, Table S1501 (S1501_C02_015E)',
+    URL,
+    "Higher education attainment proxy; NCES PIAAC 2023 measures functional literacy (~79% Level 2+) but has no programmatic API");
+}
+
 // ─── UNITED KINGDOM ───────────────────────────────────────────────────────────
 
 /**
@@ -2560,6 +2867,16 @@ const FETCHERS = [
   { label: 'US  Hospital Waits (CMS OP_18b national median → hospitalWaitTimes)', fn: fetchUS_HospitalWaitTimes },
   { label: 'US  Mental Health  (CDC PLACES DEPRESSION → mentalHealthAccess)', fn: fetchUS_MentalHealthAccess },
   { label: 'US  Drug Addiction (CDC VSRR 489q Drug OD → drugAddiction)',   fn: fetchUS_DrugAddiction },
+  { label: 'US  Homelessness  (HUD AHAR PIT xlsb → homelessness)',         fn: fetchUS_Homelessness },
+  { label: 'US  New Builds    (FRED PERMIT housing permits → newBuilds)',   fn: fetchUS_NewBuilds },
+  { label: 'US  Grad Rate     (Census ACS S1501_C02_014E → graduationRate)',fn: fetchUS_GraduationRate },
+  { label: 'US  Student Debt  (FRED SLOAS outstanding loans → studentDebt)',fn: fetchUS_StudentDebt },
+  { label: 'US  School Funding(NCES Digest 236.75 per-pupil → schoolFunding)',fn: fetchUS_SchoolFunding },
+  { label: 'US  Child Poverty (Census ACS S1701_C03_006E → childPoverty)', fn: fetchUS_ChildPoverty },
+  { label: 'US  Immigration   (Census ACS B05012_003E → immigration)',      fn: fetchUS_Immigration },
+  { label: 'US  Gini Coeff    (Census ACS B19083_001E → giniCoefficient)', fn: fetchUS_GiniCoefficient },
+  { label: 'US  Min Wage      (FRED FEDMINNFRWG → minWageGap)',             fn: fetchUS_MinWageGap },
+  { label: 'US  Literacy      (Census ACS S1501_C02_015E → literacy)',      fn: fetchUS_Literacy },
   { label: 'UK  Unemployment   (ONS timeseries MGSX)',                   fn: fetchUK_Unemployment },
   { label: 'UK  CPI            (ONS timeseries D7G7)',                   fn: fetchUK_CPI },
   { label: 'UK  Home Prices    (LR HPI Linked Data API)',                fn: fetchUK_HomePrices },
