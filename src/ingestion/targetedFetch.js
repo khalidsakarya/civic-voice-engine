@@ -2152,7 +2152,7 @@ async function fetchUK_Unemployment() {
   const latest = sorted[0];
   const val = safeNum(latest?.value);
   if (val == null) throw new Error('ONS MGSX: could not parse value from latest month');
-  return result('UK', 'unemployment', val, '% (ILO measure, seasonally adjusted)',
+  return result('UK', 'unemploymentRate', val, '% (ILO measure, seasonally adjusted)',
     latest.date,
     'Office for National Statistics — ILO unemployment rate, series MGSX',
     URL);
@@ -2175,7 +2175,7 @@ async function fetchUK_CPI() {
   const latest = sorted[0];
   const val = safeNum(latest?.value);
   if (val == null) throw new Error('ONS D7G7: could not parse value from latest month');
-  return result('UK', 'cpi', val, '% (CPI 12-month rate)',
+  return result('UK', 'cpiInflation', val, '% (CPI 12-month rate)',
     latest.date,
     'Office for National Statistics — CPI 12-month rate, series D7G7',
     URL);
@@ -2199,7 +2199,7 @@ async function fetchUK_HomePrices() {
   const about = item['_about'] ?? '';
   const monthMatch = about.match(/(\d{4}-\d{2})$/);
   const period = monthMatch ? monthMatch[1] : null;
-  return result('UK', 'homePrice', safeNum(price), 'GBP (UK average house price)',
+  return result('UK', 'medianHomeValue', safeNum(price), 'GBP (UK average house price)',
     period,
     'HM Land Registry — UK House Price Index, average price (England & Wales)',
     'https://landregistry.data.gov.uk/data/ukhpi/region/united-kingdom/month.json?_sort=-refMonth');
@@ -2296,7 +2296,7 @@ async function fetchUK_DrugOverdoses() {
   const latest = rows[0];
   const val    = safeNum(latest[valueIdx]);
   if (val === null) throw new Error(`Fingertips 92432: cannot parse value "${latest[valueIdx]}"`);
-  return result('UK', 'drugOverdoses', val, 'deaths from drug misuse per 100,000 (age-standardised, England)',
+  return result('UK', 'drugOverdoseDeaths', val, 'deaths from drug misuse per 100,000 (age-standardised, England)',
     latest[periodIdx],
     'OHID Fingertips — Deaths from drug misuse, age-standardised rate (indicator 92432)',
     URL);
@@ -2733,6 +2733,166 @@ async function fetchUK_GiniCoefficient() {
     'Financial year ending (April–March); 0–100 scale (multiply by 0.01 for 0–1 scale); from annual ETB bulletin');
 }
 
+/**
+ * UK Median Rent — ONS Index of Private Housing Rental Prices (IPHRP)
+ * Series L522: Overall UK private rental index (Jan 2015 = 100).
+ * No API key required.
+ */
+async function fetchUK_MedianRent() {
+  const URL = 'https://www.ons.gov.uk/economy/inflationandpriceindices/timeseries/l522/data';
+  const resp = await axios.get(URL, {
+    timeout: TIMEOUT_MS,
+    headers: { 'User-Agent': BROWSER_UA, Accept: 'application/json' },
+  });
+  const months = resp.data?.months ?? [];
+  if (months.length === 0) throw new Error('ONS L522: no monthly data');
+  const sorted = [...months].sort((a, b) => b.date.localeCompare(a.date));
+  const latest = sorted[0];
+  const val = safeNum(latest?.value);
+  if (val == null) throw new Error('ONS L522: could not parse value');
+  return result('UK', 'medianGrossRent', val,
+    'Index (Jan 2015=100), UK private housing rental prices (IPHRP overall)',
+    latest.date,
+    'Office for National Statistics — Index of Private Housing Rental Prices, series L522',
+    URL,
+    'Index (Jan 2015=100); not a cash rent figure; reflects rental price growth across the UK');
+}
+
+/**
+ * UK Poverty Rate — DWP Households Below Average Income (HBAI) ODS
+ * Fetches the HBAI summary ODS via the GOV.UK content API, parses the
+ * "All individuals" relative low income percentage table (BHC <60% median)
+ * for the most recent financial year.
+ * Source: Department for Work and Pensions, gov.uk.
+ */
+async function fetchUK_PovertyRate() {
+  // Step 1: Get HBAI publication attachment URL dynamically
+  const CONTENT_URL = 'https://www.gov.uk/api/content/government/statistics/households-below-average-income-for-financial-years-ending-1995-to-2024';
+  const contentResp = await axios.get(CONTENT_URL, {
+    timeout: TIMEOUT_MS,
+    headers: { 'User-Agent': BROWSER_UA, Accept: 'application/json' },
+  });
+  const atts = contentResp.data?.details?.attachments ?? [];
+  const summaryAtt = atts.find(a => /HBAI_summary/i.test(a.url ?? '') || /summary_results/i.test(a.url ?? ''));
+  if (!summaryAtt) throw new Error('HBAI: no summary ODS attachment found');
+
+  // Step 2: Download ODS (ZIP container with content.xml)
+  const odsResp = await axios.get(summaryAtt.url, {
+    timeout: TIMEOUT_MS,
+    headers: { 'User-Agent': BROWSER_UA },
+    responseType: 'arraybuffer',
+  });
+  const buf = Buffer.from(odsResp.data);
+
+  // Step 3: Unzip ODS and parse content.xml
+  function unzipOds(b) {
+    const entries = {};
+    let i = 0;
+    while (i < b.length - 4) {
+      if (b.readUInt32LE(i) === 0x04034b50) {
+        const method   = b.readUInt16LE(i + 8);
+        const compSize = b.readUInt32LE(i + 18);
+        const fnLen    = b.readUInt16LE(i + 26);
+        const exLen    = b.readUInt16LE(i + 28);
+        const name     = b.slice(i + 30, i + 30 + fnLen).toString('utf8');
+        const dStart   = i + 30 + fnLen + exLen;
+        const compressed = b.slice(dStart, dStart + compSize);
+        if (method === 0) entries[name] = compressed;
+        else if (method === 8) { try { entries[name] = require('zlib').inflateRawSync(compressed); } catch (_) {} }
+        i = dStart + compSize;
+      } else i++;
+    }
+    return entries;
+  }
+  const xml = (unzipOds(buf)['content.xml'] ?? Buffer.alloc(0)).toString('utf8');
+
+  // Step 4: Extract rows from ODS XML
+  function odsRows(x) {
+    const rows = [];
+    for (const rowXml of (x.match(/<table:table-row[^>]*>[\s\S]*?<\/table:table-row>/g) ?? [])) {
+      const cells = [];
+      for (const cellXml of (rowXml.match(/<table:table-cell[^>]*>[\s\S]*?<\/table:table-cell>/g) ?? [])) {
+        const repeat = (cellXml.match(/table:number-columns-repeated="(\d+)"/) ?? [])[1];
+        const textMatch = cellXml.match(/<text:p[^>]*>([^<]*)<\/text:p>/);
+        const val = textMatch ? textMatch[1].trim() : '';
+        const cnt = repeat ? Math.min(parseInt(repeat, 10), 10) : 1;
+        for (let k = 0; k < cnt; k++) cells.push(val);
+      }
+      rows.push(cells);
+    }
+    return rows;
+  }
+  const rows = odsRows(xml);
+
+  // Step 5: Find the FIRST "Change" boundary row — it follows the "All individuals"
+  // relative poverty percentage table (BHC & AHC low income rates by year).
+  // The row immediately before Change is 2023/24 data.
+  // Columns: [year_or_empty, BHC<60%, BHC<50%, AHC<60%, AHC<50%]
+  const changeIdx = rows.findIndex(r => /^change$/i.test(r[0] ?? ''));
+  if (changeIdx < 2) throw new Error('HBAI: "Change" boundary row not found in ODS');
+
+  // Last data row = most recent year (2023/24, with merged/empty year cell)
+  const dataRow = rows[changeIdx - 1];
+  if (!dataRow) throw new Error('HBAI: no data row before "Change" boundary');
+
+  // First numeric cell = BHC<60% poverty rate (%)
+  const nums = dataRow.filter(c => /^\d{1,2}(\.\d)?$/.test(c)).map(Number);
+  if (nums.length === 0) throw new Error(`HBAI: no numeric values in last data row: ${JSON.stringify(dataRow)}`);
+  const povertyPct = nums[0];
+
+  // Infer the year: find last explicit "YYYY/YY" year, count empty-year rows after it
+  let lastExplicitYear = null;
+  let lastExplicitIdx  = -1;
+  for (let i = changeIdx - 1; i >= Math.max(0, changeIdx - 15); i--) {
+    const yearCell = rows[i].find(c => /^\d{4}\/\d{2}$/.test(c));
+    if (yearCell) { lastExplicitYear = yearCell; lastExplicitIdx = i; break; }
+  }
+  let financialYear = lastExplicitYear ?? null;
+  if (lastExplicitYear && lastExplicitIdx >= 0) {
+    const emptyAfter = changeIdx - 1 - lastExplicitIdx;
+    if (emptyAfter > 0) {
+      const [sy, sm] = lastExplicitYear.split('/').map(Number);
+      financialYear = `${sy + emptyAfter}/${String((sm + emptyAfter) % 100).padStart(2, '0')}`;
+    }
+  }
+
+  return result('UK', 'povertyRate', povertyPct,
+    '% individuals below 60% median household income before housing costs (UK)',
+    financialYear ?? '2023/24',
+    'Dept for Work and Pensions — Households Below Average Income (HBAI) summary table',
+    'https://www.gov.uk/government/statistics/households-below-average-income-for-financial-years-ending-1995-to-2024',
+    'Relative low income BHC: % of individuals below 60% of median equivalised household income; source: FRS');
+}
+
+/**
+ * UK School Funding — DfE Explore Education Statistics
+ * "LA and school expenditure" — average revenue expenditure per pupil
+ * by LA maintained schools. Key statistic from the latest release.
+ * Source: Department for Education, via explore-education-statistics.service.gov.uk.
+ */
+async function fetchUK_SchoolFunding() {
+  const PUB_URL = 'https://content.explore-education-statistics.service.gov.uk/api/publications/la-and-school-expenditure/releases/latest';
+  const resp = await axios.get(PUB_URL, {
+    timeout: TIMEOUT_MS,
+    headers: { 'User-Agent': BROWSER_UA, Accept: 'application/json' },
+  });
+  const keyStats = resp.data?.keyStatistics ?? [];
+  const perPupilStat = keyStats.find(s => /per\s*pupil/i.test(s.title ?? '') || /per\s*pupil/i.test(s.statistic ?? ''));
+  if (!perPupilStat) throw new Error(`DfE EES: no per-pupil key statistic. Available: ${keyStats.map(s => s.title).join(' | ')}`);
+
+  // statistic is like "£8,213" — strip £ before parsing
+  const val = safeNum(String(perPupilStat.statistic ?? '').replace(/£/g, ''));
+  if (val == null) throw new Error(`DfE EES: cannot parse per-pupil value from "${perPupilStat.statistic}"`);
+
+  const yearTitle = resp.data?.yearTitle ?? resp.data?.title ?? null;
+  return result('UK', 'federalAgencySpending', val,
+    'GBP per pupil (LA maintained schools, total revenue expenditure)',
+    yearTitle,
+    'Department for Education — LA and school expenditure, average spend per pupil',
+    'https://explore-education-statistics.service.gov.uk/find-statistics/la-and-school-expenditure',
+    'LA maintained schools only; total revenue expenditure per pupil in cash terms');
+}
+
 // ─── AUSTRALIA ────────────────────────────────────────────────────────────────
 
 /**
@@ -2877,23 +3037,26 @@ const FETCHERS = [
   { label: 'US  Gini Coeff    (Census ACS B19083_001E → giniCoefficient)', fn: fetchUS_GiniCoefficient },
   { label: 'US  Min Wage      (FRED FEDMINNFRWG → minWageGap)',             fn: fetchUS_MinWageGap },
   { label: 'US  Literacy      (Census ACS S1501_C02_015E → literacy)',      fn: fetchUS_Literacy },
-  { label: 'UK  Unemployment   (ONS timeseries MGSX)',                   fn: fetchUK_Unemployment },
-  { label: 'UK  CPI            (ONS timeseries D7G7)',                   fn: fetchUK_CPI },
-  { label: 'UK  Home Prices    (LR HPI Linked Data API)',                fn: fetchUK_HomePrices },
-  { label: 'UK  Bank Rate      (BoE IADB CSV series IUDBEDR)',           fn: fetchUK_BankRate },
-  { label: 'UK  Crime Rate     (Fingertips indicator 11202)',            fn: fetchUK_CrimeRate },
-  { label: 'UK  Drug Overdoses (Fingertips indicator 92432)',            fn: fetchUK_DrugOverdoses },
-  { label: 'UK  Homicide Rate  (WHO GHO VIOLENCE_HOMICIDERATE GBR)',    fn: fetchUK_HomicideRate },
-  { label: 'UK  Road Fatalities(DfT casualty-2023.csv severity=1)',     fn: fetchUK_RoadFatalities },
-  { label: 'UK  Life Expectancy(WHO GHO WHOSIS_000001 GBR)',            fn: fetchUK_LifeExpectancy },
-  { label: 'UK  Obesity Rate   (Fingertips indicator 93088)',            fn: fetchUK_ObesityRate },
-  { label: 'UK  Homelessness  (MHCLG rough sleeping snapshot, HTML)',   fn: fetchUK_Homelessness },
-  { label: 'UK  New Builds    (MHCLG housing supply indicators, HTML)', fn: fetchUK_NewBuilds },
-  { label: 'UK  Grad Rate     (World Bank SE.TER.CUAT.BA.ZS, GBR)',    fn: fetchUK_GraduationRate },
-  { label: 'UK  Student Debt  (SLC student-loans-for-HE-FE, HTML)',    fn: fetchUK_StudentDebt },
-  { label: 'UK  Child Poverty (Fingertips indicator 93701)',            fn: fetchUK_ChildPoverty },
-  { label: 'UK  Immigration   (ONS LTIM provisional bulletin, HTML)',   fn: fetchUK_Immigration },
-  { label: 'UK  Gini Coeff    (ONS ETB bulletin generator CSV)',        fn: fetchUK_GiniCoefficient },
+  { label: 'UK  Unemployment   (ONS MGSX → unemploymentRate)',          fn: fetchUK_Unemployment },
+  { label: 'UK  CPI            (ONS D7G7 → cpiInflation)',              fn: fetchUK_CPI },
+  { label: 'UK  Home Prices    (LR HPI → medianHomeValue)',             fn: fetchUK_HomePrices },
+  { label: 'UK  Bank Rate      (BoE IUDBEDR → bankRate)',               fn: fetchUK_BankRate },
+  { label: 'UK  Crime Rate     (Fingertips 11202 → crimeRate)',         fn: fetchUK_CrimeRate },
+  { label: 'UK  Drug Overdoses (Fingertips 92432 → drugOverdoseDeaths)',fn: fetchUK_DrugOverdoses },
+  { label: 'UK  Homicide Rate  (WHO GHO GBR → homicideRate)',           fn: fetchUK_HomicideRate },
+  { label: 'UK  Road Fatalities(DfT CSV → roadFatalities)',             fn: fetchUK_RoadFatalities },
+  { label: 'UK  Life Expectancy(WHO GHO GBR → lifeExpectancy)',         fn: fetchUK_LifeExpectancy },
+  { label: 'UK  Obesity Rate   (Fingertips 93088 → obesityRate)',       fn: fetchUK_ObesityRate },
+  { label: 'UK  Homelessness   (MHCLG HTML → homelessness)',            fn: fetchUK_Homelessness },
+  { label: 'UK  New Builds     (MHCLG HTML → newBuilds)',               fn: fetchUK_NewBuilds },
+  { label: 'UK  Grad Rate      (World Bank → graduationRate)',           fn: fetchUK_GraduationRate },
+  { label: 'UK  Student Debt   (SLC HTML → studentDebt)',               fn: fetchUK_StudentDebt },
+  { label: 'UK  Child Poverty  (Fingertips 93701 → childPoverty)',      fn: fetchUK_ChildPoverty },
+  { label: 'UK  Immigration    (ONS LTIM HTML → immigration)',           fn: fetchUK_Immigration },
+  { label: 'UK  Gini Coeff     (ONS ETB CSV → giniCoefficient)',        fn: fetchUK_GiniCoefficient },
+  { label: 'UK  Median Rent    (ONS L522 → medianGrossRent)',           fn: fetchUK_MedianRent },
+  { label: 'UK  Poverty Rate   (DWP HBAI ODS → povertyRate)',           fn: fetchUK_PovertyRate },
+  { label: 'UK  School Funding (DfE EES → federalAgencySpending)',      fn: fetchUK_SchoolFunding },
   { label: 'AU  Unemployment   (ABS SDMX-JSON LF/M13.3.1599.20.AUS.M)', fn: fetchAU_Unemployment },
   { label: 'AU  CPI            (ABS SDMX-JSON CPI/3.10001.10.50.M)',    fn: fetchAU_CPI },
   { label: 'AU  Bank Rate      (RBA F1 CSV — Cash Rate Target)',         fn: fetchAU_BankRate },
