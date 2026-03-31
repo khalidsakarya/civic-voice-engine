@@ -3161,6 +3161,451 @@ async function fetchAU_BankRate() {
     'https://www.rba.gov.au/statistics/tables/csv/f1-data.csv');
 }
 
+// ─── Australia — Safety & Health ──────────────────────────────────────────────
+
+/**
+ * AU Crime Rate — ABS Crime Victimisation, Australia
+ * Reports % of persons aged 15+ who experienced one or more selected personal crimes.
+ * Source: abs.gov.au latest-release HTML scrape.
+ */
+async function fetchAU_CrimeRate() {
+  const URL = 'https://www.abs.gov.au/statistics/people/crime-and-justice/crime-victimisation-australia/latest-release';
+  const resp = await axios.get(URL, { timeout: TIMEOUT_MS, headers: { 'User-Agent': BROWSER_UA } });
+  const text = String(resp.data).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
+  const m = text.match(/(\d+\.?\d*)\s*%[^.]{0,100}(?:one or more selected personal|experienced.{0,40}crime)/i)
+         ?? text.match(/(\d+\.?\d*)\s*per\s*cent[^.]{0,80}(?:personal crime|victimi)/i);
+  if (!m) throw new Error('ABS Crime Victimisation: % personal crime not found');
+  const val = safeNum(m[1]);
+  if (val == null) throw new Error(`ABS Crime Victimisation: cannot parse "${m[1]}"`);
+  const yearMatch = text.match(/(?:201[0-9]|202[0-9])/)?.[0] ?? null;
+  return result('AU', 'crimeRate', val,
+    '% of persons aged 15+ who experienced one or more selected personal crimes',
+    yearMatch,
+    'Australian Bureau of Statistics — Crime Victimisation, Australia',
+    URL);
+}
+
+/**
+ * AU Homicide Rate — ABS Recorded Crime Victims, Australia
+ * Extracts total homicide and related offences victims, then computes per-100,000 rate.
+ * ABS mid-2024 estimated resident population ≈ 26.5M (divisor = 265 per 100k unit).
+ */
+async function fetchAU_HomicideRate() {
+  const URL = 'https://www.abs.gov.au/statistics/people/crime-and-justice/recorded-crime-victims/latest-release';
+  const resp = await axios.get(URL, { timeout: TIMEOUT_MS, headers: { 'User-Agent': BROWSER_UA } });
+  const text = String(resp.data).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
+  const m = text.match(/(?:were|was)\s*([\d,]+)\s*victims?\s*of\s*homicide/i)
+         ?? text.match(/homicide[^.]{0,30}(?:were|was)\s*([\d,]+)\s*victims?/i)
+         ?? text.match(/homicide[^.]{0,80}(\d{3,4})\s+(?:victims?|people)/i);
+  if (!m) throw new Error('ABS Recorded Crime: homicide victim count not found');
+  const count = safeNum(m[1]);
+  if (count == null) throw new Error(`ABS Recorded Crime: cannot parse "${m[1]}"`);
+  // Compute rate per 100,000 using approximate mid-2024 ERP of 26.5M
+  const APPROX_POP_100K = 265; // 26.5M / 100,000
+  const rate = Math.round(count / APPROX_POP_100K * 100) / 100;
+  const yearMatch = text.match(/(?:In\s+)(202[0-9])/i)?.[1] ?? null;
+  return result('AU', 'homicideRate', rate,
+    'homicides per 100,000 population (computed from ABS victim count ÷ 26.5M ERP)',
+    yearMatch,
+    'Australian Bureau of Statistics — Recorded Crime – Victims, Australia',
+    URL,
+    `Total homicide and related offences victims: ${count}`);
+}
+
+/**
+ * AU Road Fatalities — ABS Causes of Death, Australia (2022)
+ * Motor vehicle accident deaths. The 2022 release has structured text; latest-release
+ * uses a different layout so the specific-year URL is used.
+ */
+async function fetchAU_RoadFatalities() {
+  const URL = 'https://www.abs.gov.au/statistics/health/causes-death/causes-death-australia/2022';
+  const resp = await axios.get(URL, { timeout: TIMEOUT_MS, headers: { 'User-Agent': BROWSER_UA } });
+  const text = String(resp.data).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
+  const m = text.match(/[Mm]otor\s*vehicle\s*accidents?\s*[Tt]here\s*were\s*([\d,]+)\s*deaths?/i)
+         ?? text.match(/[Mm]otor\s*vehicle[^.]{0,60}(1[,.]?\d{3})\s*deaths?/i)
+         ?? text.match(/[Tt]here\s*were\s*([\d,]+)\s*deaths?[^.]{0,60}(?:motor|road|transport)/i);
+  if (!m) throw new Error('ABS COD 2022: motor vehicle deaths not found');
+  const val = safeNum(m[1]);
+  if (val == null) throw new Error(`ABS COD 2022: cannot parse "${m[1]}"`);
+  return result('AU', 'roadFatalities', val,
+    'deaths from motor vehicle accidents',
+    '2022',
+    'Australian Bureau of Statistics — Causes of Death, Australia, 2022',
+    URL);
+}
+
+/**
+ * AU Drug Overdose Deaths — ABS Causes of Death, Australia (2022)
+ * Drug-induced deaths (not including alcohol). From the same ABS COD 2022 release.
+ */
+async function fetchAU_DrugOverdoseDeaths() {
+  const URL = 'https://www.abs.gov.au/statistics/health/causes-death/causes-death-australia/2022';
+  const resp = await axios.get(URL, { timeout: TIMEOUT_MS, headers: { 'User-Agent': BROWSER_UA } });
+  const text = String(resp.data).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
+  const m = text.match(/([\d,]+)\s*drug.induced\s*deaths?/i)
+         ?? text.match(/drug.induced\s*deaths?[^.]{0,60}([\d,]+)/i)
+         ?? text.match(/drug[^.]{0,60}(1[,.]?\d{3}|2[,.]?\d{3})\s*deaths?/i);
+  if (!m) throw new Error('ABS COD 2022: drug-induced deaths not found');
+  const val = safeNum(m[1]);
+  if (val == null) throw new Error(`ABS COD 2022: cannot parse "${m[1]}"`);
+  return result('AU', 'drugOverdoseDeaths', val,
+    'drug-induced deaths (excluding alcohol)',
+    '2022',
+    'Australian Bureau of Statistics — Causes of Death, Australia, 2022',
+    URL,
+    'Includes deaths from accidental poisoning, suicide by drugs, and drug-related conditions');
+}
+
+/**
+ * AU Life Expectancy — ABS Life Tables, Australia
+ * Reports life expectancy at birth for males from the latest Life Tables release.
+ */
+async function fetchAU_LifeExpectancy() {
+  const URL = 'https://www.abs.gov.au/statistics/people/population/life-tables/latest-release';
+  const resp = await axios.get(URL, { timeout: TIMEOUT_MS, headers: { 'User-Agent': BROWSER_UA } });
+  const text = String(resp.data).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
+  const m = text.match(/[Ll]ife\s*expectancy\s*at\s*birth\s*(?:for\s*males?\s*)?(?:was\s*)?(\d{2}\.\d)/i)
+         ?? text.match(/(\d{2}\.\d)\s*years?[^.]{0,40}(?:male|born|birth)/i);
+  if (!m) throw new Error('ABS Life Tables: life expectancy not found');
+  const val = safeNum(m[1]);
+  if (val == null) throw new Error(`ABS Life Tables: cannot parse "${m[1]}"`);
+  const yearMatch = text.match(/(?:201[0-9][-–]202[0-9]|202[0-9][-–]202[0-9])/)?.[0] ?? null;
+  return result('AU', 'lifeExpectancy', val,
+    'years — life expectancy at birth (males)',
+    yearMatch,
+    'Australian Bureau of Statistics — Life Tables, Australia',
+    URL);
+}
+
+/**
+ * AU Obesity Rate — ABS Overweight and Obesity, Australia
+ * Reports % of adults who are overweight or obese (combined).
+ */
+async function fetchAU_ObesityRate() {
+  const URL = 'https://www.abs.gov.au/statistics/health/health-conditions-and-risks/overweight-and-obesity/latest-release';
+  const resp = await axios.get(URL, { timeout: TIMEOUT_MS, headers: { 'User-Agent': BROWSER_UA } });
+  const text = String(resp.data).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
+  const m = text.match(/(\d{2}\.?\d*)\s*%[^.]{0,60}(?:obese|obesity)/i)
+         ?? text.match(/obes[^\d.]{0,60}(\d{2}\.?\d*)\s*%/i)
+         ?? text.match(/(\d{2}\.?\d*)\s*(?:per\s*cent|%)[^.]{0,80}(?:overweight|obese)/i);
+  if (!m) throw new Error('ABS Overweight and Obesity: % obese/overweight not found');
+  const val = safeNum(m[1]);
+  if (val == null) throw new Error(`ABS Overweight and Obesity: cannot parse "${m[1]}"`);
+  const yearMatch = text.match(/(?:201[0-9][-–]20[0-9]{2}|202[0-9][-–]20[0-9]{2})/)?.[0] ?? null;
+  return result('AU', 'obesityRate', val,
+    '% of adults who are overweight or obese (combined, BMI ≥ 25)',
+    yearMatch,
+    'Australian Bureau of Statistics — Overweight and Obesity, Australia',
+    URL,
+    'Includes both overweight (BMI 25–29.9) and obese (BMI ≥ 30) adults');
+}
+
+/**
+ * AU Hospital Wait Times — AIHW 2022-23 Emergency Department Care (hardcoded)
+ * AIHW blocks all programmatic access (HTTP 403). Value from published annual report.
+ * National median waiting time for ED triage: 19 minutes (AIHW 2022-23).
+ */
+async function fetchAU_HospitalWaitTimes() {
+  return result('AU', 'hospitalWaitTimes', 19,
+    'minutes — national median ED waiting time (triage to clinician)',
+    '2022-23',
+    'Australian Institute of Health and Welfare — Emergency Department Care 2022-23',
+    'https://www.aihw.gov.au/reports/hospitals/ahs-2022-23-emergency-department-care',
+    'Hardcoded from AIHW published report; AIHW website blocks programmatic access');
+}
+
+/**
+ * AU Mental Health Access — ABS National Study of Mental Health and Wellbeing
+ * Reports % of persons aged 16–85 who had experienced a mental disorder in their lifetime.
+ */
+async function fetchAU_MentalHealthAccess() {
+  const URL = 'https://www.abs.gov.au/statistics/health/mental-health/national-study-mental-health-and-wellbeing/latest-release';
+  const resp = await axios.get(URL, { timeout: TIMEOUT_MS, headers: { 'User-Agent': BROWSER_UA } });
+  const text = String(resp.data).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
+  const m = text.match(/(\d{2}\.?\d*)\s*%[^.]{0,80}(?:mental\s*health\s*(?:disorder|condition)|mental\s*disorder)/i)
+         ?? text.match(/(\d{2}\.?\d*)\s*(?:per\s*cent|%)[^.]{0,80}(?:experienced|had\s*a)\s*mental/i);
+  if (!m) throw new Error('ABS NSMHW: mental health prevalence not found');
+  const val = safeNum(m[1]);
+  if (val == null) throw new Error(`ABS NSMHW: cannot parse "${m[1]}"`);
+  const yearMatch = text.match(/(?:201[0-9][-–]20[0-9]{2}|202[0-9][-–]20[0-9]{2})/)?.[0] ?? null;
+  return result('AU', 'mentalHealthAccess', val,
+    '% of persons aged 16–85 who have ever experienced a mental disorder (lifetime prevalence)',
+    yearMatch,
+    'Australian Bureau of Statistics — National Study of Mental Health and Wellbeing',
+    URL,
+    'Includes mood, anxiety, and substance use disorders; lifetime prevalence measure');
+}
+
+/**
+ * AU Drug Addiction — ABS Alcohol Consumption, Australia (National Health Survey)
+ * Reports % of adults who exceeded the lifetime risk guideline for alcohol consumption
+ * (more than 10 standard drinks per week on average). Used as proxy for problematic use.
+ */
+async function fetchAU_DrugAddiction() {
+  const URL = 'https://www.abs.gov.au/statistics/health/health-conditions-and-risks/alcohol-consumption/latest-release';
+  const resp = await axios.get(URL, { timeout: TIMEOUT_MS, headers: { 'User-Agent': BROWSER_UA } });
+  const text = String(resp.data).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
+  const m = text.match(/(\d{2}\.?\d*)\s*(?:per\s*cent|%)[^.]{0,80}(?:exceed|lifetime\s*risk|risk\s*guideline)/i)
+         ?? text.match(/(\d+\.?\d*)\s*(?:per\s*cent|%)[^.]{0,80}(?:drank|more\s*than[^.]{0,40}standard)/i);
+  if (!m) throw new Error('ABS Alcohol Consumption: at-risk % not found');
+  const val = safeNum(m[1]);
+  if (val == null) throw new Error(`ABS Alcohol Consumption: cannot parse "${m[1]}"`);
+  const yearMatch = text.match(/(?:201[0-9][-–]20[0-9]{2}|202[0-9][-–]20[0-9]{2})/)?.[0] ?? null;
+  return result('AU', 'drugAddiction', val,
+    '% of adults exceeding the lifetime risk guideline (>10 standard drinks/week)',
+    yearMatch,
+    'Australian Bureau of Statistics — Alcohol Consumption, Australia (National Health Survey)',
+    URL,
+    'Proxy for problematic alcohol/drug use; based on NHMRC 2020 guideline threshold');
+}
+
+// ─── Australia — Housing & Social ─────────────────────────────────────────────
+
+/**
+ * AU Homelessness — ABS Estimating Homelessness: Census, 2021
+ * Total persons experiencing homelessness on Census night (rough sleepers + supported
+ * accommodation + other forms of homelessness).
+ */
+async function fetchAU_Homelessness() {
+  const URL = 'https://www.abs.gov.au/statistics/people/housing/estimating-homelessness-census/2021';
+  const resp = await axios.get(URL, { timeout: TIMEOUT_MS, headers: { 'User-Agent': BROWSER_UA } });
+  const text = String(resp.data).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
+  const m = text.match(/([\d,]+)\s*(?:people|persons)[^.]{0,60}(?:homeless|homelessness)/i)
+         ?? text.match(/(?:homeless|homelessness)[^.]{0,80}([\d,]+)\s*(?:people|persons)/i);
+  if (!m) throw new Error('ABS Estimating Homelessness: person count not found');
+  const val = safeNum(m[1]);
+  if (val == null) throw new Error(`ABS Estimating Homelessness: cannot parse "${m[1]}"`);
+  return result('AU', 'homelessness', val,
+    'persons estimated to be experiencing homelessness on Census night',
+    '2021',
+    'Australian Bureau of Statistics — Estimating Homelessness: Census, 2021',
+    URL);
+}
+
+/**
+ * AU New Builds — ABS Building Approvals, Australia
+ * Total dwelling units approved in the latest month (seasonally adjusted).
+ */
+async function fetchAU_NewBuilds() {
+  const URL = 'https://www.abs.gov.au/statistics/industry/building-and-construction/building-approvals-australia/latest-release';
+  const resp = await axios.get(URL, { timeout: TIMEOUT_MS, headers: { 'User-Agent': BROWSER_UA } });
+  // Decode &nbsp; entities before stripping tags so table cells separate correctly
+  const text = String(resp.data).replace(/&nbsp;/gi, ' ').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
+  const m = text.match(/[Tt]otal\s+dwelling\s+units?\s+approved\s+([\d,]+)/i)
+         ?? text.match(/[Tt]otal\s*dwelling\s*units?\s*approved[^.]{0,60}(\d[\d,]{3,})/i)
+         ?? text.match(/(\d[\d,]{3,})\s+[Dd]welling\s+units?\s+approved/i);
+  if (!m) throw new Error('ABS Building Approvals: dwelling units approved not found');
+  const val = safeNum(m[1]);
+  if (val == null) throw new Error(`ABS Building Approvals: cannot parse "${m[1]}"`);
+  const periodMatch = text.match(/(?:January|February|March|April|May|June|July|August|September|October|November|December)\s*\d{4}/i)?.[0] ?? null;
+  return result('AU', 'newBuilds', val,
+    'dwelling units approved (total, seasonally adjusted, monthly)',
+    periodMatch,
+    'Australian Bureau of Statistics — Building Approvals, Australia',
+    URL);
+}
+
+/**
+ * AU Median Gross Rent — ABS Census of Population and Housing, 2021 QuickStats
+ * Median weekly rent from the 2021 Census national QuickStats.
+ */
+async function fetchAU_MedianGrossRent() {
+  const URL = 'https://www.abs.gov.au/census/find-census-data/quickstats/2021/AUS';
+  const resp = await axios.get(URL, { timeout: TIMEOUT_MS, headers: { 'User-Agent': BROWSER_UA } });
+  const text = String(resp.data).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
+  const m = text.match(/[Mm]edian[^.]{0,40}(?:rent|weekly\s*rent)[^.]{0,60}\$\s*(\d[\d,]+)/i)
+         ?? text.match(/\$\s*(\d[\d,]+)[^.]{0,60}[Mm]edian\s*(?:monthly|weekly)\s*rent/i)
+         ?? text.match(/(?:weekly\s*rent)[^.]{0,60}\$\s*(\d{2,4})/i);
+  if (!m) throw new Error('ABS Census QuickStats: median rent not found');
+  const val = safeNum(m[1]);
+  if (val == null) throw new Error(`ABS Census QuickStats: cannot parse "${m[1]}"`);
+  return result('AU', 'medianGrossRent', val,
+    'AUD per week — median weekly rent (Census 2021)',
+    '2021',
+    'Australian Bureau of Statistics — Census of Population and Housing, 2021 QuickStats',
+    URL);
+}
+
+/**
+ * AU Median Home Value — ABS Total Value of Dwellings, Australia
+ * Mean price of residential dwellings in Australia (latest quarter).
+ */
+async function fetchAU_MedianHomeValue() {
+  const URL = 'https://www.abs.gov.au/statistics/economy/price-indexes-and-inflation/total-value-dwellings/latest-release';
+  const resp = await axios.get(URL, { timeout: TIMEOUT_MS, headers: { 'User-Agent': BROWSER_UA } });
+  const text = String(resp.data).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
+  const m = text.match(/mean\s*price[^.]{0,60}\$\s*([\d,]+)/i)
+         ?? text.match(/\$\s*([\d,]+)[^.]{0,60}mean\s*price/i)
+         ?? text.match(/(?:mean|average)\s*(?:dwelling|residential)\s*(?:price|value)[^$]{0,30}\$([\d,]+)/i);
+  if (!m) throw new Error('ABS Total Value of Dwellings: mean price not found');
+  const val = safeNum(m[1]);
+  if (val == null) throw new Error(`ABS Total Value of Dwellings: cannot parse "${m[1]}"`);
+  const periodMatch = text.match(/(?:September|December|March|June)\s*quarter\s*\d{4}/i)?.[0] ?? null;
+  return result('AU', 'medianHomeValue', val,
+    'AUD — mean price of residential dwellings (Australia)',
+    periodMatch,
+    'Australian Bureau of Statistics — Total Value of Dwellings, Australia',
+    URL);
+}
+
+// ─── Australia — Education & Social ───────────────────────────────────────────
+
+/**
+ * AU Graduation Rate — ABS Schools, Australia
+ * Apparent retention rate: full-time students from Years 7/8 through to Year 12.
+ */
+async function fetchAU_GraduationRate() {
+  const URL = 'https://www.abs.gov.au/statistics/people/education/schools/latest-release';
+  const resp = await axios.get(URL, { timeout: TIMEOUT_MS, headers: { 'User-Agent': BROWSER_UA } });
+  const text = String(resp.data).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
+  const m = text.match(/(?:[Yy]ear\s*12|apparent\s*retention)[^.]{0,80}(\d{2}\.?\d*)\s*%/i)
+         ?? text.match(/(\d{2}\.?\d*)\s*%[^.]{0,80}(?:[Yy]ear\s*12|retention)/i);
+  if (!m) throw new Error('ABS Schools: Year 12 retention rate not found');
+  const val = safeNum(m[1]);
+  if (val == null) throw new Error(`ABS Schools: cannot parse "${m[1]}"`);
+  const yearMatch = text.match(/(?:201[0-9]|202[0-9])/)?.[0] ?? null;
+  return result('AU', 'graduationRate', val,
+    '% — apparent retention rate Year 7/8 to Year 12 (full-time students)',
+    yearMatch,
+    'Australian Bureau of Statistics — Schools, Australia',
+    URL);
+}
+
+/**
+ * AU Student Debt — ATO HELP (Higher Education Loan Program) (hardcoded)
+ * Total HELP debt outstanding. ATO data portal blocks programmatic access.
+ * Value from ATO Annual Report 2022-23: $74.1 billion outstanding.
+ */
+async function fetchAU_StudentDebt() {
+  return result('AU', 'studentDebt', 74.1,
+    'AUD billion — total HELP (Higher Education Loan Program) debt outstanding',
+    '2022-23',
+    'Australian Taxation Office — Annual Report 2022-23',
+    'https://www.ato.gov.au/about-ato/commitments-and-reporting/annual-reports',
+    'Hardcoded from ATO Annual Report; ATO data portal blocks programmatic access');
+}
+
+/**
+ * AU School Funding — Hardcoded from ABS/ACARA published data
+ * Average total government expenditure per student across all school types.
+ * Value from ABS Government Finance Statistics and ACARA 2021-22: ~$18,600 per student.
+ */
+async function fetchAU_SchoolFunding() {
+  return result('AU', 'schoolFunding', 18600,
+    'AUD per student per year — total government recurrent expenditure (all school types)',
+    '2021-22',
+    'Australian Bureau of Statistics — Government Finance Statistics; ACARA',
+    'https://www.abs.gov.au/statistics/economy/government/government-finance-statistics-australia/latest-release',
+    'Hardcoded from ABS GFS 5512.0 and ACARA national report; programmatic access unavailable');
+}
+
+/**
+ * AU Literacy — ABS Programme for the International Assessment of Adult Competencies (PIAAC)
+ * Reports % of Australian adults with skills at literacy Level 3 or above.
+ * Level 3+ is considered the minimum for full participation in a knowledge economy.
+ */
+async function fetchAU_Literacy() {
+  const URL = 'https://www.abs.gov.au/statistics/people/education/programme-international-assessment-adult-competencies-australia/latest-release';
+  const resp = await axios.get(URL, { timeout: TIMEOUT_MS, headers: { 'User-Agent': BROWSER_UA } });
+  const text = String(resp.data).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
+  const m = text.match(/Australia[^.]{0,50}(\d{2}\.?\d*)\s*%[^.]{0,60}literacy\s*[Ll]evel\s*3/i)
+         ?? text.match(/(\d{2}\.?\d*)\s*%[^.]{0,60}(?:had\s*skills\s*at\s*literacy\s*level\s*3|literacy\s*level\s*3\s*or\s*above)/i);
+  if (!m) throw new Error('ABS PIAAC: national literacy Level 3+ % not found');
+  const val = safeNum(m[1]);
+  if (val == null) throw new Error(`ABS PIAAC: cannot parse "${m[1]}"`);
+  const yearMatch = text.match(/(?:201[0-9]|202[0-9])/)?.[0] ?? null;
+  return result('AU', 'literacy', val,
+    '% of adults with skills at literacy Level 3 or above (PIAAC, national)',
+    yearMatch,
+    'Australian Bureau of Statistics — Programme for the International Assessment of Adult Competencies, Australia',
+    URL,
+    'Level 3+ regarded as minimum for full participation in knowledge economy; 51% are below Level 3');
+}
+
+/**
+ * AU Poverty Rate — ACOSS Poverty in Australia 2023 (hardcoded)
+ * % of population living below the poverty line (50% of median income).
+ * ACOSS website returns 403 for programmatic access.
+ */
+async function fetchAU_PovertyRate() {
+  return result('AU', 'povertyRate', 13.4,
+    '% of population below the poverty line (50% of median income)',
+    '2019-20',
+    'ACOSS / UNSW — Poverty in Australia 2023: Who is affected',
+    'https://povertyandinequality.acoss.org.au/poverty/',
+    'Hardcoded from ACOSS Poverty Report 2023; ACOSS website blocks programmatic access');
+}
+
+/**
+ * AU Child Poverty — ACOSS Poverty in Australia 2023 (hardcoded)
+ * % of children (under 15) living below the poverty line.
+ */
+async function fetchAU_ChildPoverty() {
+  return result('AU', 'childPoverty', 17.7,
+    '% of children under 15 below the poverty line (50% of median income)',
+    '2019-20',
+    'ACOSS / UNSW — Poverty in Australia 2023: Who is affected',
+    'https://povertyandinequality.acoss.org.au/poverty/children/',
+    'Hardcoded from ACOSS Poverty Report 2023; ACOSS website blocks programmatic access');
+}
+
+/**
+ * AU Immigration — ABS Migration, Australia
+ * Net Overseas Migration (NOM) — people added to population through international migration.
+ */
+async function fetchAU_Immigration() {
+  const URL = 'https://www.abs.gov.au/statistics/people/population/migration-australia/latest-release';
+  const resp = await axios.get(URL, { timeout: TIMEOUT_MS, headers: { 'User-Agent': BROWSER_UA } });
+  const text = String(resp.data).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
+  const m = text.match(/net\s*overseas\s*migration\s*([\d,]+)\s*people/i)
+         ?? text.match(/([\d,]+)\s*people[^.]{0,60}net\s*overseas\s*migration/i)
+         ?? text.match(/net\s*overseas\s*migration[^.]{0,60}was\s*([\d,]+)/i);
+  if (!m) throw new Error('ABS Migration: Net Overseas Migration figure not found');
+  const val = safeNum(m[1]);
+  if (val == null) throw new Error(`ABS Migration: cannot parse "${m[1]}"`);
+  const yearMatch = text.match(/(?:201[0-9][-–]20[0-9]{2}|202[0-9][-–]20[0-9]{2})/)?.[0] ?? null;
+  return result('AU', 'immigration', val,
+    'persons — Net Overseas Migration (NOM), annual',
+    yearMatch,
+    'Australian Bureau of Statistics — Migration, Australia',
+    URL);
+}
+
+/**
+ * AU Gini Coefficient — ABS Household Income and Wealth, Australia
+ * Gini coefficient for equivalised disposable household income.
+ */
+async function fetchAU_GiniCoefficient() {
+  const URL = 'https://www.abs.gov.au/statistics/economy/finance/household-income-and-wealth-australia/latest-release';
+  const resp = await axios.get(URL, { timeout: TIMEOUT_MS, headers: { 'User-Agent': BROWSER_UA } });
+  const text = String(resp.data).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
+  const m = text.match(/[Gg]ini[^.]{0,80}(0\.\d{3})/i)
+         ?? text.match(/(0\.\d{3})[^.]{0,80}[Gg]ini/i);
+  if (!m) throw new Error('ABS Household Income: Gini coefficient not found');
+  const val = safeNum(m[1]);
+  if (val == null) throw new Error(`ABS Household Income: cannot parse "${m[1]}"`);
+  const yearMatch = text.match(/(?:201[0-9][-–]20[0-9]{2}|202[0-9][-–]20[0-9]{2})/)?.[0] ?? null;
+  return result('AU', 'giniCoefficient', val,
+    'Gini coefficient — equivalised disposable household income (0 = perfect equality)',
+    yearMatch,
+    'Australian Bureau of Statistics — Household Income and Wealth, Australia',
+    URL);
+}
+
+/**
+ * AU Min Wage Gap — Fair Work Commission National Minimum Wage (hardcoded)
+ * National Minimum Wage effective 1 July 2024: $24.10 per hour (FWC Annual Wage Review 2024).
+ * Fair Work Commission website blocks programmatic access.
+ */
+async function fetchAU_MinWageGap() {
+  return result('AU', 'minWageGap', 24.10,
+    'AUD per hour — National Minimum Wage (adult, full-time)',
+    'July 2024',
+    'Fair Work Commission — Annual Wage Review 2023-24',
+    'https://www.fwc.gov.au/wage-pay-rates/minimum-wages/national-minimum-wage',
+    'Hardcoded from FWC Annual Wage Review decision; FWC website blocks programmatic access');
+}
+
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
 const FETCHERS = [
@@ -3241,6 +3686,28 @@ const FETCHERS = [
   { label: 'AU  Unemployment   (ABS SDMX-JSON LF/M13.3.1599.20.AUS.M)', fn: fetchAU_Unemployment },
   { label: 'AU  CPI            (ABS SDMX-JSON CPI/3.10001.10.50.M)',    fn: fetchAU_CPI },
   { label: 'AU  Bank Rate      (RBA F1 CSV — Cash Rate Target)',         fn: fetchAU_BankRate },
+  { label: 'AU  Crime Rate     (ABS Crime Victimisation → crimeRate)',   fn: fetchAU_CrimeRate },
+  { label: 'AU  Homicide Rate  (ABS Recorded Crime Victims → homicideRate)', fn: fetchAU_HomicideRate },
+  { label: 'AU  Road Fatalities(ABS COD 2022 motor vehicle → roadFatalities)', fn: fetchAU_RoadFatalities },
+  { label: 'AU  Drug OD Deaths (ABS COD 2022 drug-induced → drugOverdoseDeaths)', fn: fetchAU_DrugOverdoseDeaths },
+  { label: 'AU  Life Expectancy(ABS Life Tables → lifeExpectancy)',      fn: fetchAU_LifeExpectancy },
+  { label: 'AU  Obesity Rate   (ABS Overweight & Obesity → obesityRate)', fn: fetchAU_ObesityRate },
+  { label: 'AU  Hospital Wait  (AIHW 2022-23 hardcoded → hospitalWaitTimes)', fn: fetchAU_HospitalWaitTimes },
+  { label: 'AU  Mental Health  (ABS NSMHW → mentalHealthAccess)',        fn: fetchAU_MentalHealthAccess },
+  { label: 'AU  Drug Addiction (ABS Alcohol NHS → drugAddiction)',       fn: fetchAU_DrugAddiction },
+  { label: 'AU  Homelessness   (ABS Census 2021 → homelessness)',        fn: fetchAU_Homelessness },
+  { label: 'AU  New Builds     (ABS Building Approvals → newBuilds)',    fn: fetchAU_NewBuilds },
+  { label: 'AU  Median Rent    (ABS Census 2021 QuickStats → medianGrossRent)', fn: fetchAU_MedianGrossRent },
+  { label: 'AU  Median Home    (ABS Total Value Dwellings → medianHomeValue)', fn: fetchAU_MedianHomeValue },
+  { label: 'AU  Grad Rate      (ABS Schools → graduationRate)',          fn: fetchAU_GraduationRate },
+  { label: 'AU  Student Debt   (ATO HELP hardcoded → studentDebt)',      fn: fetchAU_StudentDebt },
+  { label: 'AU  School Funding (ABS/ACARA hardcoded → schoolFunding)',   fn: fetchAU_SchoolFunding },
+  { label: 'AU  Literacy       (ABS PIAAC → literacy)',                  fn: fetchAU_Literacy },
+  { label: 'AU  Poverty Rate   (ACOSS 2023 hardcoded → povertyRate)',    fn: fetchAU_PovertyRate },
+  { label: 'AU  Child Poverty  (ACOSS 2023 hardcoded → childPoverty)',   fn: fetchAU_ChildPoverty },
+  { label: 'AU  Immigration    (ABS Migration NOM → immigration)',       fn: fetchAU_Immigration },
+  { label: 'AU  Gini Coeff     (ABS Household Income → giniCoefficient)', fn: fetchAU_GiniCoefficient },
+  { label: 'AU  Min Wage       (FWC 2024 hardcoded → minWageGap)',       fn: fetchAU_MinWageGap },
 ];
 
 async function main() {
