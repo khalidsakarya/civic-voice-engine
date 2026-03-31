@@ -2893,6 +2893,182 @@ async function fetchUK_SchoolFunding() {
     'LA maintained schools only; total revenue expenditure per pupil in cash terms');
 }
 
+/**
+ * UK Min Wage — GOV.UK National Minimum Wage rates page (HTML scrape)
+ * Extracts National Living Wage (21+) from the published rates page.
+ */
+async function fetchUK_MinWage() {
+  const URL = 'https://www.gov.uk/national-minimum-wage-rates';
+  const resp = await axios.get(URL, { timeout: TIMEOUT_MS, headers: { 'User-Agent': BROWSER_UA } });
+  const text = String(resp.data).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
+  const nlwMatch = text.match(/(?:National Living Wage|21 and over)[^£]{0,80}£([\d.]+)/i);
+  if (!nlwMatch) throw new Error('GOV.UK NMW: could not find NLW rate in page');
+  const val = safeNum(nlwMatch[1]);
+  if (val == null) throw new Error(`GOV.UK NMW: cannot parse rate "${nlwMatch[1]}"`);
+  const periodMatch = text.match(/(?:April|from)\s+\d{4}/i);
+  return result('UK', 'minWageGap', val,
+    'GBP per hour — National Living Wage (aged 21 and over)',
+    periodMatch?.[0] ?? null,
+    'GOV.UK — National Minimum Wage and National Living Wage rates',
+    URL,
+    'National Living Wage rate; applies to workers aged 21 and over');
+}
+
+/**
+ * UK Hospital Wait Times — NHS England Referral-to-Treatment (RTT) XLSX
+ * Downloads the Incomplete-Commissioner national XLSX and extracts the
+ * median waiting time (weeks) for the latest month from the Total row.
+ */
+async function fetchUK_HospitalWaitTimes() {
+  // Discover the latest RTT Incomplete Commissioner XLSX from the data page
+  const pageUrl = 'https://www.england.nhs.uk/statistics/statistical-work-areas/rtt-waiting-times/rtt-data-2024-25/';
+  const pageResp = await axios.get(pageUrl, { timeout: TIMEOUT_MS, headers: { 'User-Agent': BROWSER_UA } });
+  const xlsxLinks = [...String(pageResp.data).matchAll(/href="([^"]*Incomplete-Commissioner[^"]*\.xlsx?)"/gi)].map(m => m[1]);
+  if (xlsxLinks.length === 0) throw new Error('RTT: no Incomplete-Commissioner XLSX link found on data page');
+  const xlsxUrl = xlsxLinks[0].startsWith('http') ? xlsxLinks[0] : 'https://www.england.nhs.uk' + xlsxLinks[0];
+
+  const resp = await axios.get(xlsxUrl, { timeout: 90000, headers: { 'User-Agent': BROWSER_UA }, responseType: 'arraybuffer' });
+  const buf = Buffer.from(resp.data);
+
+  // Parse ZIP entries
+  const entries = {};
+  let i = 0;
+  while (i < buf.length - 4) {
+    if (buf.readUInt32LE(i) === 0x04034b50) {
+      const method = buf.readUInt16LE(i + 8);
+      const compSize = buf.readUInt32LE(i + 18);
+      const fnLen = buf.readUInt16LE(i + 26);
+      const exLen = buf.readUInt16LE(i + 28);
+      const name = buf.slice(i + 30, i + 30 + fnLen).toString('utf8');
+      const dataStart = i + 30 + fnLen + exLen;
+      const compressed = buf.slice(dataStart, dataStart + compSize);
+      if (method === 0) entries[name] = compressed;
+      else if (method === 8) { try { entries[name] = require('zlib').inflateRawSync(compressed); } catch (_) {} }
+      i = dataStart + compSize;
+    } else i++;
+  }
+
+  const ssXml = entries['xl/sharedStrings.xml']?.toString('utf8') ?? '';
+  const strings = [...ssXml.matchAll(/<t(?:\s[^>]*)?>([^<]*)<\/t>/g)].map(m => m[1]);
+  const totalIdx = strings.indexOf('Total');
+  if (totalIdx < 0) throw new Error('RTT XLSX: shared string "Total" not found');
+
+  // Column DG = "% within 18 weeks", DH = "Average (median) waiting time (in weeks)"
+  // Column DE = "Total number of incomplete pathways"
+  // The "Total" string (index totalIdx) appears in per-week bucket cells in row 23
+  // as a numeric value, so we must only match rows where col B or C has the Total label.
+  const sh1 = entries['xl/worksheets/sheet1.xml']?.toString('utf8') ?? '';
+  const rowRe = /<row[^>]*>(.*?)<\/row>/gs;
+  let medianWeeks = null, pctWithin18 = null, totalPathways = null;
+  let rowMatch;
+  while ((rowMatch = rowRe.exec(sh1)) !== null) {
+    const rowContent = rowMatch[1];
+    // Only match where column B or C has the Total string as a shared-string cell
+    const labelCellRe = new RegExp('<c r="[BC]\\d+"[^>]*t="s"[^>]*><v>(' + totalIdx + ')<\\/v>', 'g');
+    if (!labelCellRe.test(rowContent)) continue;
+    const cellRe = /<c r="([^"]+)"[^>]*(?:t="([^"]+)")?[^>]*>(?:<v>([^<]*)<\/v>)?/g;
+    const colMap = {};
+    let cm;
+    while ((cm = cellRe.exec(rowContent)) !== null) {
+      const col = cm[1].replace(/\d/g, '');
+      colMap[col] = cm[2] === 's' ? strings[parseInt(cm[3])] : cm[3];
+    }
+    totalPathways = safeNum(colMap['DE']);
+    medianWeeks = safeNum(colMap['DH']);
+    pctWithin18 = safeNum(colMap['DG']);
+    break;
+  }
+  if (medianWeeks == null) throw new Error('RTT XLSX: could not extract median wait time from Total row');
+
+  // Extract period from filename (e.g. "Mar25")
+  const monthMatch = xlsxUrl.match(/([A-Z][a-z]{2}\d{2})(?=[\-.])/);
+  const period = monthMatch ? monthMatch[1] : null;
+
+  return result('UK', 'hospitalWaitTimes', Math.round(medianWeeks * 10) / 10,
+    'weeks (median wait, all incomplete RTT pathways, national)',
+    period ? `${period.slice(0, 3)} 20${period.slice(3)}` : null,
+    'NHS England — Consultant-led Referral to Treatment (RTT) waiting times',
+    pageUrl,
+    `Total pathways: ${totalPathways?.toLocaleString()}; % within 18 weeks: ${pctWithin18 != null ? Math.round(pctWithin18 * 1000) / 10 + '%' : 'n/a'}`);
+}
+
+/**
+ * UK Mental Health Access — NHS England Talking Therapies overview page
+ * Reports the number of people who received a course of treatment in the latest year.
+ */
+async function fetchUK_MentalHealthAccess() {
+  const URL = 'https://www.england.nhs.uk/mental-health/adults/nhs-talking-therapies/';
+  const resp = await axios.get(URL, { timeout: TIMEOUT_MS, headers: { 'User-Agent': BROWSER_UA } });
+  const text = String(resp.data).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
+  // Match "670,000 people received a course of treatment in 2023/24"
+  const m = text.match(/([\d,]+)\s+people\s+received\s+a\s+course\s+of\s+treatment\s+in\s+([\d/]+)/i);
+  if (!m) throw new Error('NHS England Talking Therapies: could not find treatment count in page');
+  const val = safeNum(m[1]);
+  if (val == null) throw new Error(`NHS England Talking Therapies: cannot parse "${m[1]}"`);
+  return result('UK', 'mentalHealthAccess', val,
+    'people finishing a course of NHS Talking Therapies treatment',
+    m[2],
+    'NHS England — NHS Talking Therapies for Anxiety and Depression overview',
+    URL,
+    'Formerly known as IAPT (Improving Access to Psychological Therapies)');
+}
+
+/**
+ * UK Drug Addiction — OHID NDTMS via GOV.UK content API
+ * Fetches the HTML summary page for the adult substance misuse treatment statistics
+ * and extracts the headline adults-in-treatment count.
+ */
+async function fetchUK_DrugAddiction() {
+  const CONTENT_URL = 'https://www.gov.uk/api/content/government/statistics/substance-misuse-treatment-for-adults-statistics-2024-to-2025';
+  const contentResp = await axios.get(CONTENT_URL, { timeout: TIMEOUT_MS, headers: { 'User-Agent': BROWSER_UA } });
+  const atts = contentResp.data?.details?.attachments ?? [];
+  const reportAtt = atts.find(a => /report/i.test(a.title ?? ''));
+  if (!reportAtt?.url) throw new Error('NDTMS: no report attachment found');
+  // GOV.UK content API returns relative URLs — prepend base
+  const reportUrl = reportAtt.url.startsWith('http') ? reportAtt.url : 'https://www.gov.uk' + reportAtt.url;
+
+  const reportResp = await axios.get(reportUrl, { timeout: TIMEOUT_MS, headers: { 'User-Agent': BROWSER_UA } });
+  const text = String(reportResp.data).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
+  // "329,646 adults aged 18 and over in contact with drug and alcohol treatment services between April 2024 and March 2025"
+  const m = text.match(/([\d,]+)\s+adults?\s+(?:aged\s+[\d\s+and]+over\s+)?in\s+contact\s+with\s+drug\s+and\s+alcohol\s+treatment/i);
+  if (!m) throw new Error('NDTMS: could not find adults-in-treatment figure');
+  const val = safeNum(m[1]);
+  if (val == null) throw new Error(`NDTMS: cannot parse "${m[1]}"`);
+  const yearMatch = text.match(/(?:April|1\s+April)\s+(\d{4})\s+(?:to|and)\s+(?:31\s+)?March\s+(\d{4})/i);
+  const period = yearMatch ? `${yearMatch[1]}-${yearMatch[2].slice(2)}` : '2024-25';
+  return result('UK', 'drugAddiction', val,
+    'adults in contact with drug and alcohol treatment services (England)',
+    period,
+    'Office for Health Improvement and Disparities — National Drug Treatment Monitoring System (NDTMS)',
+    'https://www.gov.uk/government/statistics/substance-misuse-treatment-for-adults-statistics-2024-to-2025',
+    'Annual NDTMS data: covers April 2024 to March 2025');
+}
+
+/**
+ * UK Literacy — DfE Explore Education Statistics: Further Education and Skills
+ * Uses the keyStatistics from the latest FE and Skills release to report
+ * adult (19+) further education and skills participation.
+ */
+async function fetchUK_Literacy() {
+  const PUB_URL = 'https://content.explore-education-statistics.service.gov.uk/api/publications/further-education-and-skills/releases/latest';
+  const resp = await axios.get(PUB_URL, { timeout: TIMEOUT_MS, headers: { 'User-Agent': BROWSER_UA, Accept: 'application/json' } });
+  const keyStats = resp.data?.keyStatistics ?? [];
+  const adultStat = keyStats.find(s =>
+    /adult\s*\(19\+\)\s*further\s*education\s*and\s*skills\s*participation/i.test(s.title ?? '')
+  ) ?? keyStats.find(s => /adult.*further.*education/i.test(s.title ?? ''));
+  if (!adultStat) throw new Error(`DfE FE skills: no adult participation stat. Available: ${keyStats.map(s => s.title).join(' | ')}`);
+  // statistic is like "1,298,590"
+  const val = safeNum(String(adultStat.statistic ?? '').replace(/[£,]/g, ''));
+  if (val == null) throw new Error(`DfE FE skills: cannot parse "${adultStat.statistic}"`);
+  const yearTitle = resp.data?.yearTitle ?? resp.data?.title ?? null;
+  return result('UK', 'literacy', val,
+    'Adult (19+) further education and skills participation (England)',
+    yearTitle,
+    'Department for Education — Further Education and Skills statistics',
+    'https://explore-education-statistics.service.gov.uk/find-statistics/further-education-and-skills',
+    'Includes FE colleges, independent learning providers, and local authority providers');
+}
+
 // ─── AUSTRALIA ────────────────────────────────────────────────────────────────
 
 /**
@@ -3057,6 +3233,11 @@ const FETCHERS = [
   { label: 'UK  Median Rent    (ONS L522 → medianGrossRent)',           fn: fetchUK_MedianRent },
   { label: 'UK  Poverty Rate   (DWP HBAI ODS → povertyRate)',           fn: fetchUK_PovertyRate },
   { label: 'UK  School Funding (DfE EES → federalAgencySpending)',      fn: fetchUK_SchoolFunding },
+  { label: 'UK  Min Wage      (GOV.UK NMW HTML → minWageGap)',          fn: fetchUK_MinWage },
+  { label: 'UK  Hospital Wait (NHS England RTT XLSX → hospitalWaitTimes)', fn: fetchUK_HospitalWaitTimes },
+  { label: 'UK  Mental Health (NHS England Talking Therapies → mentalHealthAccess)', fn: fetchUK_MentalHealthAccess },
+  { label: 'UK  Drug Addiction(NDTMS GOV.UK → drugAddiction)',           fn: fetchUK_DrugAddiction },
+  { label: 'UK  Literacy      (DfE EES FE Skills → literacy)',           fn: fetchUK_Literacy },
   { label: 'AU  Unemployment   (ABS SDMX-JSON LF/M13.3.1599.20.AUS.M)', fn: fetchAU_Unemployment },
   { label: 'AU  CPI            (ABS SDMX-JSON CPI/3.10001.10.50.M)',    fn: fetchAU_CPI },
   { label: 'AU  Bank Rate      (RBA F1 CSV — Cash Rate Target)',         fn: fetchAU_BankRate },
