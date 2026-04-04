@@ -47,6 +47,10 @@
     "upload:targeted": "node src/firebase/uploadTargetedStats.js",
     "pipeline:targeted": "npm run fetch:targeted && npm run upload:targeted",
     "scheduler:targeted-stats": "node src/scheduler.js --targeted-stats",
+    "ingest:member-disclosures": "node src/ingestion/memberDisclosureFetcher.js",
+    "upload:member-disclosures": "node src/firebase/uploadMemberDisclosures.js",
+    "upload:member-lobbying": "node src/firebase/uploadMemberLobbying.js",
+    "pipeline:member-disclosures": "npm run ingest:member-disclosures && npm run upload:member-disclosures && npm run upload:member-lobbying",
     "pipeline:full": "npm run start && npm run process:bills && npm run score:efficiency && npm run upload:firebase",
     "test": "node --experimental-vm-modules node_modules/.bin/jest"
   },

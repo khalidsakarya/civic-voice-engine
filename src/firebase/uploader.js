@@ -274,6 +274,48 @@ async function uploadLobbyingActivity() {
 }
 
 /**
+ * Upload US House financial disclosures and any other member-level disclosure
+ * files to the `member_disclosures` Firestore collection.
+ * Reads all JSON files from output/member_disclosures/.
+ */
+async function uploadMemberDisclosures() {
+  const files = loadLatestFiles(path.join(OUTPUT_ROOT, 'member_disclosures'));
+  const allRecords = [];
+  for (const file of files) {
+    const { records } = JSON.parse(fs.readFileSync(file));
+    allRecords.push(...records.map(withTimestamp));
+  }
+  if (allRecords.length === 0) {
+    console.log('[firebase] ⚠ member_disclosures: no records found, skipping');
+    return 0;
+  }
+  const count = await batchWrite('member_disclosures', allRecords);
+  console.log(`[firebase] ✓ member_disclosures: ${count} documents written`);
+  return count;
+}
+
+/**
+ * Upload Canadian lobbying communications and US Senate LDA filings to the
+ * `member_lobbying` Firestore collection.
+ * Reads all JSON files from output/member_lobbying/.
+ */
+async function uploadMemberLobbying() {
+  const files = loadLatestFiles(path.join(OUTPUT_ROOT, 'member_lobbying'));
+  const allRecords = [];
+  for (const file of files) {
+    const { records } = JSON.parse(fs.readFileSync(file));
+    allRecords.push(...records.map(withTimestamp));
+  }
+  if (allRecords.length === 0) {
+    console.log('[firebase] ⚠ member_lobbying: no records found, skipping');
+    return 0;
+  }
+  const count = await batchWrite('member_lobbying', allRecords);
+  console.log(`[firebase] ✓ member_lobbying: ${count} documents written`);
+  return count;
+}
+
+/**
  * Upload government contracts to the `contracts` collection.
  */
 async function uploadContracts() {
@@ -1400,6 +1442,8 @@ module.exports = {
   uploadDepartmentPerformance,
   uploadFinancialDisclosures,
   uploadLobbyingActivity,
+  uploadMemberDisclosures,
+  uploadMemberLobbying,
   uploadContracts,
   uploadCorporateAffiliations,
   uploadFlaggedExpenses,
