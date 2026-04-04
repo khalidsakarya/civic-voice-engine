@@ -8,11 +8,19 @@
  * ─────────────────────────────────────────────────────────────────────────────
  * US   disclosures.house.gov  — House Financial Disclosures (EFTS JSON API)
  *      Endpoint: GET https://efts.house.gov/EFTS-Public/query
- *      Returns filings with member name, office, filing type, year, PDF link.
  *
- * CA   lobbycanada.gc.ca       — Lobbying Communication Reports
- *      Endpoint: GET https://lobbycanada.gc.ca/app/secure/ocl/lrs/do/clntSmmry
- *      Falls back to open.canada.ca CKAN dataset for lobbyist registry snapshots.
+ * CA   open.canada.ca CKAN    — Lobbyist Registry / Communication Reports
+ *
+ * UK   members-api.parliament.uk — MPs' Registered Interests
+ *      Step 1: GET /api/Members/Search?house=1&isCurrentMember=true&take=N
+ *      Step 2: GET /api/Members/{id}/RegisteredInterests  (per MP)
+ *      No auth required. Full OpenAPI spec at members-api.parliament.uk/swagger.
+ *
+ * AU   aph.gov.au              — Members' Register of Interests (HTML index)
+ *      The official register has no API; data exists only as PDFs per member.
+ *      We fetch the HTML register index page and parse member names, electorates,
+ *      parties, and disclosure PDF links — all real data from the live page.
+ *      Endpoint: GET https://www.aph.gov.au/Senators_and_Members/Members/Register
  */
 
 'use strict';
@@ -269,12 +277,307 @@ async function fetchUSFederalLobbying() {
   });
 }
 
+// ─── UK Parliament: MPs' Registered Financial Interests ──────────────────────
+//
+//  members-api.parliament.uk (no auth required, full OpenAPI spec available)
+//
+//  Strategy:
+//    Step 1 — Search active Commons MPs (house=1, isCurrentMember=true).
+//             Fetch up to TAKE_MPs members per run.
+//    Step 2 — For each MP fetch /Members/{id}/RegisteredInterests.
+//             Response: { value: [ { id, name, sortOrder, interests: [{…}] } ] }
+//    Step 3 — Flatten: one Firestore doc per MP, interests embedded as array.
+//
+//  Registered interest categories (from the Register of Members' Financial
+//  Interests): employment, shareholdings, land/property, gifts, visits, misc.
+//  Each interest has: id, interest (text), createdWhen, lastAmendedWhen.
+
+const UK_MEMBERS_API = 'https://members-api.parliament.uk/api';
+const PAGE_SIZE      = 20;   // API hard cap per page
+const TARGET_MPs     = 60;   // fetch this many MPs per run (3 pages × 20)
+const INTER_REQ_MS   = 150;  // polite delay between per-member interest requests
+const INTER_PAGE_MS  = 300;  // delay between member-search pages
+
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+async function fetchUKMPsRegisteredInterests() {
+  console.log(`[disclosures:UK] Fetching up to ${TARGET_MPs} current Commons MPs (paginating ${PAGE_SIZE}/page)…`);
+
+  // Step 1 — paginate the Members Search to collect TARGET_MPs members
+  const items = [];
+  for (let skip = 0; items.length < TARGET_MPs; skip += PAGE_SIZE) {
+    const pageResp = await axios.get(`${UK_MEMBERS_API}/Members/Search`, {
+      params: { house: 1, isCurrentMember: true, skip, take: PAGE_SIZE },
+      headers: { Accept: 'application/json' },
+      timeout: TIMEOUT_MS,
+    });
+    const pageItems = pageResp.data?.items || [];
+    if (pageItems.length === 0) break;
+    items.push(...pageItems);
+    if (pageItems.length < PAGE_SIZE) break; // last page
+    if (items.length < TARGET_MPs) await sleep(INTER_PAGE_MS);
+  }
+
+  const batch = items.slice(0, TARGET_MPs);
+  if (batch.length === 0) throw new Error('[disclosures:UK] No members returned from Search');
+  console.log(`[disclosures:UK] Retrieved ${batch.length} MPs — fetching registered interests…`);
+
+  const records = [];
+
+  // Step 2 — fetch interests for each MP
+  for (let i = 0; i < batch.length; i++) {
+    const member   = batch[i].value || batch[i];
+    const memberId = member.id;
+    if (!memberId) continue;
+
+    let categories = [];
+    try {
+      const intResp = await axios.get(`${UK_MEMBERS_API}/Members/${memberId}/RegisteredInterests`, {
+        headers: { Accept: 'application/json' },
+        timeout: TIMEOUT_MS,
+      });
+      categories = intResp.data?.value || [];
+    } catch (err) {
+      // A 404 means the member has no registered interests on record — skip quietly
+      if (err.response?.status !== 404) {
+        console.warn(`[disclosures:UK]   ⚠ interests fetch failed for MP ${memberId}: ${err.message}`);
+      }
+    }
+
+    // Step 3 — flatten interests into a searchable list
+    const flatInterests = [];
+    for (const cat of categories) {
+      for (const interest of cat.interests || []) {
+        flatInterests.push({
+          category_id:       interest.id        ?? null,
+          category_name:     safeStr(cat.name),
+          interest_text:     safeStr(interest.interest),
+          registered_date:   safeStr(interest.createdWhen),
+          last_amended_date: safeStr(interest.lastAmendedWhen),
+          deleted_date:      safeStr(interest.deletedWhen) || null,
+          is_correction:     interest.isCorrection ?? false,
+          // child interests (e.g. sub-entries under a shareholding)
+          child_interests: (interest.childInterests || []).map(c => safeStr(c.interest)).filter(Boolean),
+        });
+      }
+    }
+
+    const party      = member.latestParty || {};
+    const membership = member.latestHouseMembership || {};
+
+    records.push({
+      id:                `uk-mp-${memberId}`,
+      member_id:         memberId,
+      member_name:       safeStr(member.nameDisplayAs || member.nameListAs),
+      name_list_as:      safeStr(member.nameListAs),
+      party:             safeStr(party.name),
+      party_abbr:        safeStr(party.abbreviation),
+      constituency:      safeStr(membership.membershipFrom),
+      gender:            safeStr(member.gender),
+      membership_start:  safeStr(membership.membershipStartDate),
+      is_active:         membership.membershipStatus?.statusIsActive ?? null,
+      interests_count:   flatInterests.length,
+      interests:         flatInterests,
+      thumbnail_url:     safeStr(member.thumbnailUrl),
+      jurisdiction:      'UK',
+      chamber:           'Commons',
+      sourceUrl:         `https://members-api.parliament.uk/api/Members/${memberId}/RegisteredInterests`,
+    });
+
+    if (i < batch.length - 1) await sleep(INTER_REQ_MS);
+  }
+
+  const totalInterests = records.reduce((s, r) => s + r.interests_count, 0);
+  console.log(`[disclosures:UK] ${records.length} MPs, ${totalInterests} interest entries`);
+
+  return saveRecords(OUTPUT_DISCLOSURES, 'uk_mp_registered_interests', records, {
+    mpsReturned:      records.length,
+    totalInterests,
+    sourceApi:        `${UK_MEMBERS_API}/Members/{id}/RegisteredInterests`,
+    parliamentaryHouse: 'Commons',
+  });
+}
+
+// ─── Australia: Members' Register of Interests (HTML index) ──────────────────
+//
+//  The Australian Parliament has no API for the register of interests.
+//  All disclosures are individual PDFs linked from the HTML index page at:
+//    https://www.aph.gov.au/Senators_and_Members/Members/Register
+//
+//  We fetch that page and parse:
+//    • Member full name
+//    • Electorate
+//    • State
+//    • Party (if present in the link text / surrounding markup)
+//    • Disclosure document URL (absolute link to the PDF or HTML form)
+//    • Last updated date (shown next to each member's entry)
+//
+//  Parsing uses targeted regex patterns against the raw HTML. The APH page
+//  structure has been stable; we match <a> tags inside the register table and
+//  the "Last updated" text adjacent to each row.
+
+const AU_REGISTER_URL = 'https://www.aph.gov.au/Senators_and_Members/Members/Register';
+const AU_BASE_URL     = 'https://www.aph.gov.au';
+
+// Parse the 48th Parliament Members' Register of Interests index page.
+//
+// Confirmed table structure (live as of 2026-04):
+//   <thead><tr>
+//     <th class="date">Last updated</th>
+//     <th>Member name and electorate</th>
+//     <th class="format"></th>
+//   </tr></thead>
+//   <tbody>
+//     <tr>
+//       <td class="date">10 October 2025</td>
+//       <td>Abdo, Mr Basem, Member for Calwell, VIC </td>
+//       <td class="format">
+//         <a href="/-/media/.../Abdo_48P.pdf"><img title="520KB" … /></a>
+//       </td>
+//     </tr>
+//     …
+//   </tbody>
+//
+// Column 2 format: "LastName, Title FirstName, Member for Electorate, STATE"
+// We split on ", Member for " to isolate the name and electorate+state parts.
+
+async function fetchAUMembersRegister() {
+  console.log('[disclosures:AU] Fetching Members Register of Interests index page…');
+
+  const resp = await axios.get(AU_REGISTER_URL, {
+    headers: {
+      Accept:       'text/html,application/xhtml+xml',
+      'User-Agent': 'CivicVoiceBot/1.0 (civic data aggregator)',
+    },
+    timeout: TIMEOUT_MS,
+  });
+
+  const html = resp.data || '';
+  if (typeof html !== 'string' || html.length < 1000) {
+    throw new Error('[disclosures:AU] Response too short — page structure may have changed');
+  }
+  console.log(`[disclosures:AU] Received ${html.length} bytes — parsing register table…`);
+
+  // The register page splits members across 6 <tbody> sections (one per
+  // alphabetical group). Concatenate all of them before parsing rows.
+  let tbody = '';
+  let searchFrom = 0;
+  while (true) {
+    const start = html.indexOf('<tbody>', searchFrom);
+    if (start === -1) break;
+    const end = html.indexOf('</tbody>', start);
+    if (end === -1) break;
+    tbody += html.slice(start, end + 8);
+    searchFrom = end + 8;
+  }
+  if (!tbody) {
+    throw new Error('[disclosures:AU] Could not locate any <tbody> in register page');
+  }
+
+  // Match each <tr>…</tr> in the tbody
+  const rowRe = /<tr>([\s\S]*?)<\/tr>/g;
+  // Within a row, match the three <td> contents in order:
+  //   td[0]: class="date"  → last updated date text
+  //   td[1]: no class      → "LastName, Title FirstName, Member for Electorate, STATE"
+  //   td[2]: class="format"→ contains <a href="…pdf">
+  const cellRe  = /<td[^>]*>([\s\S]*?)<\/td>/g;
+  const hrefRe  = /href="([^"]+)"/;
+
+  const records = [];
+  let rowMatch;
+
+  while ((rowMatch = rowRe.exec(tbody)) !== null) {
+    const rowHtml = rowMatch[1];
+    cellRe.lastIndex = 0; // reset since we reuse the regex
+
+    const cells = [];
+    let cm;
+    while ((cm = cellRe.exec(rowHtml)) !== null) {
+      cells.push(cm[1]); // raw inner HTML of this cell
+    }
+    if (cells.length < 2) continue; // header or empty row
+
+    // Cell 0 — date
+    const lastUpdated = cells[0].replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim() || null;
+
+    // Cell 1 — "LastName, Title FirstName, Member for Electorate, STATE"
+    const rawMeta = cells[1].replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim();
+    if (!rawMeta) continue;
+
+    // Split "Name part, Member for Electorate, STATE"
+    const mforIdx = rawMeta.indexOf(', Member for ');
+    let memberName, electorate, state;
+    if (mforIdx !== -1) {
+      memberName        = rawMeta.slice(0, mforIdx).trim();
+      const afterMfor   = rawMeta.slice(mforIdx + ', Member for '.length).trim();
+      // afterMfor = "Electorate, STATE" — last comma-separated token is the state
+      const lastComma   = afterMfor.lastIndexOf(',');
+      if (lastComma !== -1) {
+        electorate = afterMfor.slice(0, lastComma).trim();
+        state      = afterMfor.slice(lastComma + 1).trim();
+      } else {
+        electorate = afterMfor;
+        state      = null;
+      }
+    } else {
+      // Fallback: no "Member for" — treat entire text as name
+      memberName = rawMeta;
+      electorate = null;
+      state      = null;
+    }
+
+    if (!memberName || memberName.length < 3) continue;
+
+    // Cell 2 — PDF href (optional: some rows may only have 2 cells)
+    let disclosureUrl = null;
+    if (cells[2]) {
+      const hm = hrefRe.exec(cells[2]);
+      if (hm) {
+        disclosureUrl = hm[1].startsWith('http') ? hm[1] : `${AU_BASE_URL}${hm[1]}`;
+      }
+    }
+
+    const slug = memberName.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+    records.push({
+      id:             `au-member-register-${slug}`,
+      member_name:    safeStr(memberName),
+      electorate:     safeStr(electorate),
+      state:          safeStr(state),
+      disclosure_url: disclosureUrl,
+      last_updated:   safeStr(lastUpdated),
+      jurisdiction:   'AU',
+      chamber:        'House of Representatives',
+      register_type:  'Members Register of Interests',
+      parliament:     '48th Parliament',
+      sourceUrl:      AU_REGISTER_URL,
+    });
+  }
+
+  if (records.length === 0) {
+    throw new Error(
+      '[disclosures:AU] No member rows parsed — page structure may have changed. ' +
+      'Re-inspect tbody content at ' + AU_REGISTER_URL
+    );
+  }
+
+  console.log(`[disclosures:AU] Parsed ${records.length} member entries`);
+
+  return saveRecords(OUTPUT_DISCLOSURES, 'au_members_register_of_interests', records, {
+    sourceUrl:    AU_REGISTER_URL,
+    parseMethod:  'html-table-scrape',
+    parliament:   '48th Parliament',
+    note:         'Full interest details are in individual PDFs per member — this index captures member list, electorate, state, and disclosure PDF links.',
+  });
+}
+
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
 const SOURCES = [
-  { name: 'US House — Financial Disclosures (EFTS)',  fn: fetchUSHouseDisclosures, type: 'disclosures' },
-  { name: 'CA     — Lobbying Communications (CKAN)',  fn: fetchCanadaLobbying,     type: 'lobbying'    },
-  { name: 'US     — Senate LDA Lobbying Filings',    fn: fetchUSFederalLobbying,  type: 'lobbying'    },
+  { name: 'US House — Financial Disclosures (EFTS)',       fn: fetchUSHouseDisclosures,       type: 'disclosures' },
+  { name: 'UK     — MPs Registered Interests (Parliament)', fn: fetchUKMPsRegisteredInterests, type: 'disclosures' },
+  { name: 'AU     — Members Register of Interests (APH)',  fn: fetchAUMembersRegister,        type: 'disclosures' },
+  { name: 'CA     — Lobbying Communications (CKAN)',       fn: fetchCanadaLobbying,           type: 'lobbying'    },
+  { name: 'US     — Senate LDA Lobbying Filings',         fn: fetchUSFederalLobbying,        type: 'lobbying'    },
 ];
 
 async function fetchAllMemberData() {
@@ -310,7 +613,14 @@ async function fetchAllMemberData() {
   return summary;
 }
 
-module.exports = { fetchAllMemberData, fetchUSHouseDisclosures, fetchCanadaLobbying, fetchUSFederalLobbying };
+module.exports = {
+  fetchAllMemberData,
+  fetchUSHouseDisclosures,
+  fetchUKMPsRegisteredInterests,
+  fetchAUMembersRegister,
+  fetchCanadaLobbying,
+  fetchUSFederalLobbying,
+};
 
 if (require.main === module) {
   fetchAllMemberData().then(summary => {
