@@ -13,12 +13,13 @@ const { fetchAllBudgetAnalytics }   = require('./ingestion/budgetAnalyticsFetche
 const { main: runTargetedFetch }    = require('./ingestion/targetedFetch');
 const { fetchAllGovStats }          = require('./ingestion/govStatsFetcher');
 const { fetchAllMemberData }        = require('./ingestion/memberDisclosureFetcher');
+const { fetchAllMemberVotes }       = require('./ingestion/memberVotesFetcher');
 const { processGovStats }           = require('./processing/govStatsProcessor');
 const {
   uploadBills, uploadVotes, uploadMembers, uploadEfficiencyScores,
   uploadMonthlyEfficiencyScores, uploadBudgetSpending, uploadAuditFindings, uploadDepartmentPerformance,
   uploadFinancialDisclosures, uploadLobbyingActivity, uploadContracts, uploadCorporateAffiliations,
-  uploadMemberDisclosures, uploadMemberLobbying,
+  uploadMemberDisclosures, uploadMemberLobbying, uploadMemberVotes,
   uploadFlaggedExpenses, uploadWasteReports, uploadLeaderExpenses, uploadLeaderboard,
   uploadExpenseAnomalies, uploadBudgetData, uploadAnalyticsData, uploadGovStats,
   uploadTargetedStats,
@@ -165,23 +166,29 @@ async function runWeeklyCycle() {
   console.log(`[scheduler:weekly] Sources: ${weeklySources.map(s => s.name).join(', ')}`);
   console.log('='.repeat(60));
 
-  let memberCount = 0;
+  let memberCount = 0, memberVotesCount = 0;
 
   try {
-    console.log('\n[scheduler:weekly] Step 1/2 — Ingesting member profiles...');
+    console.log('\n[scheduler:weekly] Step 1/4 — Ingesting member profiles...');
     await runPipeline(weeklySources);
 
-    console.log('\n[scheduler:weekly] Step 2/2 — Uploading members to Firebase...');
+    console.log('\n[scheduler:weekly] Step 2/4 — Uploading members to Firebase...');
     memberCount = await uploadMembers();
 
+    console.log('\n[scheduler:weekly] Step 3/4 — Fetching member voting records (CA / US / UK)...');
+    await fetchAllMemberVotes();
+
+    console.log('\n[scheduler:weekly] Step 4/4 — Uploading member votes to Firebase...');
+    memberVotesCount = await uploadMemberVotes();
+
     console.log(`\n[scheduler:weekly] ✓ Done at ${new Date().toISOString()}`);
-    console.log(`[scheduler:weekly]   members: ${memberCount}`);
+    console.log(`[scheduler:weekly]   members: ${memberCount}  member_votes: ${memberVotesCount}`);
 
     await writeSchedulerStatus('weekly', {
       startedAt,
       status:         'success',
-      collections:    ['members'],
-      recordsUpdated: memberCount,
+      collections:    ['members', 'member_votes'],
+      recordsUpdated: memberCount + memberVotesCount,
       recordsSkipped: 0,
       aiCallsMade:    0,
       cronSchedule:   WEEKLY_SCHEDULE,
@@ -192,8 +199,8 @@ async function runWeeklyCycle() {
     await writeSchedulerStatus('weekly', {
       startedAt,
       status:         'error',
-      collections:    ['members'],
-      recordsUpdated: memberCount,
+      collections:    ['members', 'member_votes'],
+      recordsUpdated: memberCount + memberVotesCount,
       recordsSkipped: 0,
       aiCallsMade:    0,
       cronSchedule:   WEEKLY_SCHEDULE,
