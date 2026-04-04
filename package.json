@@ -51,6 +51,9 @@
     "upload:member-disclosures": "node src/firebase/uploadMemberDisclosures.js",
     "upload:member-lobbying": "node src/firebase/uploadMemberLobbying.js",
     "pipeline:member-disclosures": "npm run ingest:member-disclosures && npm run upload:member-disclosures && npm run upload:member-lobbying",
+    "ingest:member-votes": "node src/ingestion/memberVotesFetcher.js",
+    "upload:member-votes": "node src/firebase/uploadMemberVotes.js",
+    "pipeline:member-votes": "npm run ingest:member-votes && npm run upload:member-votes",
     "pipeline:full": "npm run start && npm run process:bills && npm run score:efficiency && npm run upload:firebase",
     "test": "node --experimental-vm-modules node_modules/.bin/jest"
   },
