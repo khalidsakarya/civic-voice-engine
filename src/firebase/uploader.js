@@ -316,6 +316,28 @@ async function uploadMemberLobbying() {
 }
 
 /**
+ * Upload per-member attendance records (CA session attendance, US House Clerk
+ * roll-call participation, UK Commons division attendance) to the
+ * `member_attendance` Firestore collection.
+ * Reads all JSON files from output/member_attendance/.
+ */
+async function uploadMemberAttendance() {
+  const files = loadLatestFiles(path.join(OUTPUT_ROOT, 'member_attendance'));
+  const allRecords = [];
+  for (const file of files) {
+    const { records } = JSON.parse(fs.readFileSync(file));
+    allRecords.push(...records.map(withTimestamp));
+  }
+  if (allRecords.length === 0) {
+    console.log('[firebase] ⚠ member_attendance: no records found, skipping');
+    return 0;
+  }
+  const count = await batchWrite('member_attendance', allRecords);
+  console.log(`[firebase] ✓ member_attendance: ${count} documents written`);
+  return count;
+}
+
+/**
  * Upload per-member voting records (CA openparliament.ca ballots, US House Clerk
  * roll calls, UK Commons divisions) to the `member_votes` Firestore collection.
  * Reads all JSON files from output/member_votes/.
@@ -1466,6 +1488,7 @@ module.exports = {
   uploadMemberDisclosures,
   uploadMemberLobbying,
   uploadMemberVotes,
+  uploadMemberAttendance,
   uploadContracts,
   uploadCorporateAffiliations,
   uploadFlaggedExpenses,

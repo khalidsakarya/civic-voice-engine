@@ -54,6 +54,9 @@
     "ingest:member-votes": "node src/ingestion/memberVotesFetcher.js",
     "upload:member-votes": "node src/firebase/uploadMemberVotes.js",
     "pipeline:member-votes": "npm run ingest:member-votes && npm run upload:member-votes",
+    "ingest:member-attendance": "node src/ingestion/memberAttendanceFetcher.js",
+    "upload:member-attendance": "node src/firebase/uploadMemberAttendance.js",
+    "pipeline:member-attendance": "npm run ingest:member-attendance && npm run upload:member-attendance",
     "pipeline:full": "npm run start && npm run process:bills && npm run score:efficiency && npm run upload:firebase",
     "test": "node --experimental-vm-modules node_modules/.bin/jest"
   },
