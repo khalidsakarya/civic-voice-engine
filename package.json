@@ -60,6 +60,9 @@
     "ingest:member-bios": "node src/ingestion/memberBioFetcher.js",
     "upload:member-bios": "node src/firebase/uploadMemberBios.js",
     "pipeline:member-bios": "npm run ingest:member-bios && npm run upload:member-bios",
+    "ingest:member-committees": "node src/ingestion/memberCommitteesFetcher.js",
+    "upload:member-committees": "node src/firebase/uploadMemberCommittees.js",
+    "pipeline:member-committees": "npm run ingest:member-committees && npm run upload:member-committees",
     "pipeline:full": "npm run start && npm run process:bills && npm run score:efficiency && npm run upload:firebase",
     "test": "node --experimental-vm-modules node_modules/.bin/jest"
   },
