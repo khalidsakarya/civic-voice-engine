@@ -17,12 +17,13 @@ const { fetchAllMemberVotes }       = require('./ingestion/memberVotesFetcher');
 const { fetchAllMemberAttendance }  = require('./ingestion/memberAttendanceFetcher');
 const { fetchAllMemberBios }        = require('./ingestion/memberBioFetcher');
 const { fetchAllMemberCommittees }  = require('./ingestion/memberCommitteesFetcher');
+const { fetchAllMemberExpenses }    = require('./ingestion/memberExpensesFetcher');
 const { processGovStats }           = require('./processing/govStatsProcessor');
 const {
   uploadBills, uploadVotes, uploadMembers, uploadEfficiencyScores,
   uploadMonthlyEfficiencyScores, uploadBudgetSpending, uploadAuditFindings, uploadDepartmentPerformance,
   uploadFinancialDisclosures, uploadLobbyingActivity, uploadContracts, uploadCorporateAffiliations,
-  uploadMemberDisclosures, uploadMemberLobbying, uploadMemberVotes, uploadMemberAttendance, uploadMemberBios, uploadMemberCommittees,
+  uploadMemberDisclosures, uploadMemberLobbying, uploadMemberVotes, uploadMemberAttendance, uploadMemberBios, uploadMemberCommittees, uploadMemberExpenses,
   uploadFlaggedExpenses, uploadWasteReports, uploadLeaderExpenses, uploadLeaderboard,
   uploadExpenseAnomalies, uploadBudgetData, uploadAnalyticsData, uploadGovStats,
   uploadTargetedStats,
@@ -300,16 +301,16 @@ async function runBiMonthlyCycle() {
   console.log('='.repeat(60));
 
   let disclosureCount = 0, lobbyingCount = 0, contractCount = 0, corporateCount = 0;
-  let memberDisclosureCount = 0, memberLobbyingCount = 0;
+  let memberDisclosureCount = 0, memberLobbyingCount = 0, memberExpensesCount = 0;
 
   try {
-    console.log('\n[scheduler:bimonthly] Step 1/3 — Ingesting financial & lobbying data...');
+    console.log('\n[scheduler:bimonthly] Step 1/5 — Ingesting financial & lobbying data...');
     await runPipeline(biMonthlySources);
 
-    console.log('\n[scheduler:bimonthly] Step 2/3 — Fetching member disclosures & lobbying (US/UK/AU/CA)...');
+    console.log('\n[scheduler:bimonthly] Step 2/5 — Fetching member disclosures & lobbying (US/UK/AU/CA)...');
     await fetchAllMemberData();
 
-    console.log('\n[scheduler:bimonthly] Step 3/3 — Uploading to Firebase...');
+    console.log('\n[scheduler:bimonthly] Step 3/5 — Uploading disclosures & lobbying to Firebase...');
     disclosureCount       = await uploadFinancialDisclosures();
     lobbyingCount         = await uploadLobbyingActivity();
     contractCount         = await uploadContracts();
@@ -317,15 +318,21 @@ async function runBiMonthlyCycle() {
     memberDisclosureCount = await uploadMemberDisclosures();
     memberLobbyingCount   = await uploadMemberLobbying();
 
-    const total = disclosureCount + lobbyingCount + contractCount + corporateCount + memberDisclosureCount + memberLobbyingCount;
+    console.log('\n[scheduler:bimonthly] Step 4/5 — Fetching member expense reports (CA/US/UK/AU)...');
+    await fetchAllMemberExpenses();
+
+    console.log('\n[scheduler:bimonthly] Step 5/5 — Uploading member expenses to Firebase...');
+    memberExpensesCount = await uploadMemberExpenses();
+
+    const total = disclosureCount + lobbyingCount + contractCount + corporateCount + memberDisclosureCount + memberLobbyingCount + memberExpensesCount;
     console.log(`\n[scheduler:bimonthly] ✓ Done at ${new Date().toISOString()}`);
     console.log(`[scheduler:bimonthly]   financial_disclosures: ${disclosureCount}  lobbying_activity: ${lobbyingCount}  contracts: ${contractCount}  corporate_affiliations: ${corporateCount}`);
-    console.log(`[scheduler:bimonthly]   member_disclosures: ${memberDisclosureCount}  member_lobbying: ${memberLobbyingCount}`);
+    console.log(`[scheduler:bimonthly]   member_disclosures: ${memberDisclosureCount}  member_lobbying: ${memberLobbyingCount}  member_expenses: ${memberExpensesCount}`);
 
     await writeSchedulerStatus('bimonthly', {
       startedAt,
       status:         'success',
-      collections:    ['financial_disclosures', 'lobbying_activity', 'contracts', 'corporate_affiliations', 'member_disclosures', 'member_lobbying'],
+      collections:    ['financial_disclosures', 'lobbying_activity', 'contracts', 'corporate_affiliations', 'member_disclosures', 'member_lobbying', 'member_expenses'],
       recordsUpdated: total,
       recordsSkipped: 0,
       aiCallsMade:    0,
@@ -337,8 +344,8 @@ async function runBiMonthlyCycle() {
     await writeSchedulerStatus('bimonthly', {
       startedAt,
       status:         'error',
-      collections:    ['financial_disclosures', 'lobbying_activity', 'contracts', 'corporate_affiliations', 'member_disclosures', 'member_lobbying'],
-      recordsUpdated: disclosureCount + lobbyingCount + contractCount + corporateCount + memberDisclosureCount + memberLobbyingCount,
+      collections:    ['financial_disclosures', 'lobbying_activity', 'contracts', 'corporate_affiliations', 'member_disclosures', 'member_lobbying', 'member_expenses'],
+      recordsUpdated: disclosureCount + lobbyingCount + contractCount + corporateCount + memberDisclosureCount + memberLobbyingCount + memberExpensesCount,
       recordsSkipped: 0,
       aiCallsMade:    0,
       cronSchedule:   BIMONTHLY_SCHEDULE,

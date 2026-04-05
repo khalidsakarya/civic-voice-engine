@@ -63,6 +63,9 @@
     "ingest:member-committees": "node src/ingestion/memberCommitteesFetcher.js",
     "upload:member-committees": "node src/firebase/uploadMemberCommittees.js",
     "pipeline:member-committees": "npm run ingest:member-committees && npm run upload:member-committees",
+    "ingest:member-expenses": "node src/ingestion/memberExpensesFetcher.js",
+    "upload:member-expenses": "node src/firebase/uploadMemberExpenses.js",
+    "pipeline:member-expenses": "npm run ingest:member-expenses && npm run upload:member-expenses",
     "pipeline:full": "npm run start && npm run process:bills && npm run score:efficiency && npm run upload:firebase",
     "test": "node --experimental-vm-modules node_modules/.bin/jest"
   },

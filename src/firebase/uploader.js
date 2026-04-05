@@ -359,6 +359,28 @@ async function uploadMemberCommittees() {
 }
 
 /**
+ * Upload member expense reports (CA ourcommons quarterly CSV, US identity-only
+ * with SOD data-note, UK IPSA individual claims + totals, AU IPEA quarterly)
+ * to the `member_expenses` Firestore collection.
+ * Reads all JSON files from output/member_expenses/.
+ */
+async function uploadMemberExpenses() {
+  const files = loadLatestFiles(path.join(OUTPUT_ROOT, 'member_expenses'));
+  const allRecords = [];
+  for (const file of files) {
+    const { records } = JSON.parse(fs.readFileSync(file));
+    allRecords.push(...records.map(withTimestamp));
+  }
+  if (allRecords.length === 0) {
+    console.log('[firebase] ⚠ member_expenses: no records found, skipping');
+    return 0;
+  }
+  const count = await batchWrite('member_expenses', allRecords);
+  console.log(`[firebase] ✓ member_expenses: ${count} documents written`);
+  return count;
+}
+
+/**
  * Upload member biographies (CA openparliament.ca, US congress.gov, UK members-api,
  * AU aph.gov.au HTML scrape) to the `member_bios` Firestore collection.
  * Reads all JSON files from output/member_bios/.
@@ -1533,6 +1555,7 @@ module.exports = {
   uploadMemberAttendance,
   uploadMemberBios,
   uploadMemberCommittees,
+  uploadMemberExpenses,
   uploadContracts,
   uploadCorporateAffiliations,
   uploadFlaggedExpenses,
