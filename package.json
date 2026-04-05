@@ -57,6 +57,9 @@
     "ingest:member-attendance": "node src/ingestion/memberAttendanceFetcher.js",
     "upload:member-attendance": "node src/firebase/uploadMemberAttendance.js",
     "pipeline:member-attendance": "npm run ingest:member-attendance && npm run upload:member-attendance",
+    "ingest:member-bios": "node src/ingestion/memberBioFetcher.js",
+    "upload:member-bios": "node src/firebase/uploadMemberBios.js",
+    "pipeline:member-bios": "npm run ingest:member-bios && npm run upload:member-bios",
     "pipeline:full": "npm run start && npm run process:bills && npm run score:efficiency && npm run upload:firebase",
     "test": "node --experimental-vm-modules node_modules/.bin/jest"
   },

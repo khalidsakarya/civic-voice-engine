@@ -338,6 +338,27 @@ async function uploadMemberAttendance() {
 }
 
 /**
+ * Upload member biographies (CA openparliament.ca, US congress.gov, UK members-api,
+ * AU aph.gov.au HTML scrape) to the `member_bios` Firestore collection.
+ * Reads all JSON files from output/member_bios/.
+ */
+async function uploadMemberBios() {
+  const files = loadLatestFiles(path.join(OUTPUT_ROOT, 'member_bios'));
+  const allRecords = [];
+  for (const file of files) {
+    const { records } = JSON.parse(fs.readFileSync(file));
+    allRecords.push(...records.map(withTimestamp));
+  }
+  if (allRecords.length === 0) {
+    console.log('[firebase] ⚠ member_bios: no records found, skipping');
+    return 0;
+  }
+  const count = await batchWrite('member_bios', allRecords);
+  console.log(`[firebase] ✓ member_bios: ${count} documents written`);
+  return count;
+}
+
+/**
  * Upload per-member voting records (CA openparliament.ca ballots, US House Clerk
  * roll calls, UK Commons divisions) to the `member_votes` Firestore collection.
  * Reads all JSON files from output/member_votes/.
@@ -1489,6 +1510,7 @@ module.exports = {
   uploadMemberLobbying,
   uploadMemberVotes,
   uploadMemberAttendance,
+  uploadMemberBios,
   uploadContracts,
   uploadCorporateAffiliations,
   uploadFlaggedExpenses,
