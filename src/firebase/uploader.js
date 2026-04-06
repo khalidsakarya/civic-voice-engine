@@ -359,6 +359,27 @@ async function uploadMemberCommittees() {
 }
 
 /**
+ * Upload STOCK Act Periodic Transaction Report (PTR) filings for US House
+ * and Senate members to the `member_stock_trades` Firestore collection.
+ * Reads all JSON files from output/stock_trades/.
+ */
+async function uploadMemberStockTrades() {
+  const files = loadLatestFiles(path.join(OUTPUT_ROOT, 'stock_trades'));
+  const allRecords = [];
+  for (const file of files) {
+    const { records } = JSON.parse(fs.readFileSync(file));
+    allRecords.push(...records.map(withTimestamp));
+  }
+  if (allRecords.length === 0) {
+    console.log('[firebase] ⚠ member_stock_trades: no records found, skipping');
+    return 0;
+  }
+  const count = await batchWrite('member_stock_trades', allRecords);
+  console.log(`[firebase] ✓ member_stock_trades: ${count} documents written`);
+  return count;
+}
+
+/**
  * Upload member expense reports (CA ourcommons quarterly CSV, US identity-only
  * with SOD data-note, UK IPSA individual claims + totals, AU IPEA quarterly)
  * to the `member_expenses` Firestore collection.
@@ -1556,6 +1577,7 @@ module.exports = {
   uploadMemberBios,
   uploadMemberCommittees,
   uploadMemberExpenses,
+  uploadMemberStockTrades,
   uploadContracts,
   uploadCorporateAffiliations,
   uploadFlaggedExpenses,

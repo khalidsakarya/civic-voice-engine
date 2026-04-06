@@ -66,6 +66,9 @@
     "ingest:member-expenses": "node src/ingestion/memberExpensesFetcher.js",
     "upload:member-expenses": "node src/firebase/uploadMemberExpenses.js",
     "pipeline:member-expenses": "npm run ingest:member-expenses && npm run upload:member-expenses",
+    "ingest:stock-trades": "node src/ingestion/stockTradesFetcher.js",
+    "upload:stock-trades": "node src/firebase/uploadMemberStockTrades.js",
+    "pipeline:stock-trades": "npm run ingest:stock-trades && npm run upload:stock-trades",
     "pipeline:full": "npm run start && npm run process:bills && npm run score:efficiency && npm run upload:firebase",
     "test": "node --experimental-vm-modules node_modules/.bin/jest"
   },
