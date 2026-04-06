@@ -359,6 +359,28 @@ async function uploadMemberCommittees() {
 }
 
 /**
+ * Upload corporate affiliation records (CA DPOH contacts, US LDA clients,
+ * UK employment interests, AU register stubs) to the
+ * `member_corporate_affiliations` Firestore collection.
+ * Reads all JSON files from output/corporate_affiliations/.
+ */
+async function uploadMemberCorporateAffiliations() {
+  const files = loadLatestFiles(path.join(OUTPUT_ROOT, 'corporate_affiliations'));
+  const allRecords = [];
+  for (const file of files) {
+    const { records } = JSON.parse(fs.readFileSync(file));
+    allRecords.push(...records.map(withTimestamp));
+  }
+  if (allRecords.length === 0) {
+    console.log('[firebase] ⚠ member_corporate_affiliations: no records found, skipping');
+    return 0;
+  }
+  const count = await batchWrite('member_corporate_affiliations', allRecords);
+  console.log(`[firebase] ✓ member_corporate_affiliations: ${count} documents written`);
+  return count;
+}
+
+/**
  * Upload STOCK Act Periodic Transaction Report (PTR) filings for US House
  * and Senate members to the `member_stock_trades` Firestore collection.
  * Reads all JSON files from output/stock_trades/.
@@ -1577,6 +1599,7 @@ module.exports = {
   uploadMemberBios,
   uploadMemberCommittees,
   uploadMemberExpenses,
+  uploadMemberCorporateAffiliations,
   uploadMemberStockTrades,
   uploadContracts,
   uploadCorporateAffiliations,
