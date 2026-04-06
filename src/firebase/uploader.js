@@ -199,11 +199,16 @@ async function uploadBudgetSpending() {
 
 /**
  * Upload audit findings to the `audit_findings` collection.
+ * Reads from both output/audit/ (legacy generic pipeline) and
+ * output/audit_findings/ (rich schema from auditFindingsFetcher.js).
  */
 async function uploadAuditFindings() {
-  const files = loadLatestFiles(path.join(OUTPUT_ROOT, 'audit'));
-  const allRecords = [];
-  for (const file of files) {
+  const legacyFiles = loadLatestFiles(path.join(OUTPUT_ROOT, 'audit'));
+  const richFiles   = loadLatestFiles(path.join(OUTPUT_ROOT, 'audit_findings'));
+  const allFiles    = [...legacyFiles, ...richFiles];
+  const allRecords  = [];
+
+  for (const file of allFiles) {
     const { records } = JSON.parse(fs.readFileSync(file));
     allRecords.push(...records.map(withTimestamp));
   }
@@ -212,7 +217,7 @@ async function uploadAuditFindings() {
     return 0;
   }
   const count = await batchWrite('audit_findings', allRecords);
-  console.log(`[firebase] ✓ audit_findings: ${count} documents written`);
+  console.log(`[firebase] ✓ audit_findings: ${count} documents written (${legacyFiles.length} legacy + ${richFiles.length} rich source files)`);
   return count;
 }
 

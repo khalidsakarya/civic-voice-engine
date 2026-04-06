@@ -66,6 +66,8 @@
     "ingest:member-expenses": "node src/ingestion/memberExpensesFetcher.js",
     "upload:member-expenses": "node src/firebase/uploadMemberExpenses.js",
     "pipeline:member-expenses": "npm run ingest:member-expenses && npm run upload:member-expenses",
+    "ingest:audit-findings": "node src/ingestion/auditFindingsFetcher.js",
+    "pipeline:audit-findings": "npm run ingest:audit-findings",
     "ingest:corporate-affiliations": "node src/ingestion/corporateAffiliationsFetcher.js",
     "upload:corporate-affiliations": "node src/firebase/uploadMemberCorporateAffiliations.js",
     "pipeline:corporate-affiliations": "npm run ingest:corporate-affiliations && npm run upload:corporate-affiliations",

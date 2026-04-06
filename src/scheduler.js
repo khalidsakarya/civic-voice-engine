@@ -20,6 +20,7 @@ const { fetchAllMemberCommittees }  = require('./ingestion/memberCommitteesFetch
 const { fetchAllMemberExpenses }    = require('./ingestion/memberExpensesFetcher');
 const { fetchAllStockTrades }             = require('./ingestion/stockTradesFetcher');
 const { fetchAllCorporateAffiliations }   = require('./ingestion/corporateAffiliationsFetcher');
+const { fetchAllAuditFindings }           = require('./ingestion/auditFindingsFetcher');
 const { processGovStats }           = require('./processing/govStatsProcessor');
 const {
   uploadBills, uploadVotes, uploadMembers, uploadEfficiencyScores,
@@ -245,23 +246,26 @@ async function runMonthlyCycle() {
   let efficiencyCount = 0, budgetCount = 0, auditCount = 0, performanceCount = 0, targetedCount = 0;
 
   try {
-    console.log('\n[scheduler:monthly] Step 1/5 — Ingesting budget, audit & performance data...');
+    console.log('\n[scheduler:monthly] Step 1/6 — Ingesting budget, audit & performance data...');
     await runPipeline(monthlySources);
 
-    console.log('\n[scheduler:monthly] Step 2/5 — Recalculating efficiency scores...');
+    console.log('\n[scheduler:monthly] Step 2/6 — Fetching real audit findings (CA OAG / US GAO / UK NAO / AU ANAO)...');
+    await fetchAllAuditFindings();
+
+    console.log('\n[scheduler:monthly] Step 3/6 — Recalculating efficiency scores...');
     delete require.cache[require.resolve('./scoreEfficiency')];
     require('./scoreEfficiency');
 
-    console.log('\n[scheduler:monthly] Step 3/5 — Uploading efficiency/budget/audit to Firebase...');
+    console.log('\n[scheduler:monthly] Step 4/6 — Uploading efficiency/budget/audit to Firebase...');
     efficiencyCount  = await uploadMonthlyEfficiencyScores();
     budgetCount      = await uploadBudgetSpending();
     auditCount       = await uploadAuditFindings();
     performanceCount = await uploadDepartmentPerformance();
 
-    console.log('\n[scheduler:monthly] Step 4/5 — Fetching live targeted stats (CA / US / UK / AU)...');
+    console.log('\n[scheduler:monthly] Step 5/6 — Fetching live targeted stats (CA / US / UK / AU)...');
     await runTargetedFetch();
 
-    console.log('\n[scheduler:monthly] Step 5/5 — Uploading targeted stats to social_stats...');
+    console.log('\n[scheduler:monthly] Step 6/6 — Uploading targeted stats to social_stats...');
     targetedCount = await uploadTargetedStats();
 
     const total = efficiencyCount + budgetCount + auditCount + performanceCount + targetedCount;
