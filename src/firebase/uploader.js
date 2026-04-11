@@ -509,6 +509,27 @@ async function uploadCorporateAffiliations() {
 }
 
 /**
+ * Upload government promise tracker records to the `promise_tracker` collection.
+ * Reads from output/promises/ (one file per jurisdiction per run).
+ */
+async function uploadPromiseTracker() {
+  const dir = path.join(OUTPUT_ROOT, 'promises');
+  const files = loadLatestFiles(dir);
+  const allRecords = [];
+  for (const file of files) {
+    const { records } = JSON.parse(fs.readFileSync(file));
+    allRecords.push(...records.map(withTimestamp));
+  }
+  if (allRecords.length === 0) {
+    console.log('[firebase] ⚠ promise_tracker: no records found, skipping');
+    return 0;
+  }
+  const count = await batchWrite('promise_tracker', allRecords);
+  console.log(`[firebase] ✓ promise_tracker: ${count} documents written`);
+  return count;
+}
+
+/**
  * Upload department budget records to the `department_budgets` collection.
  * Reads all files from output/department_budgets/ (one file per jurisdiction).
  */
@@ -1642,4 +1663,5 @@ module.exports = {
   uploadSocialStatsCanonical,
   uploadTargetedStats,
   uploadDepartmentBudgets,
+  uploadPromiseTracker,
 };

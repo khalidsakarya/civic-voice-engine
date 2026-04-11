@@ -22,6 +22,7 @@ const { fetchAllStockTrades }             = require('./ingestion/stockTradesFetc
 const { fetchAllCorporateAffiliations }   = require('./ingestion/corporateAffiliationsFetcher');
 const { fetchAllAuditFindings }           = require('./ingestion/auditFindingsFetcher');
 const { fetchAllDepartmentBudgets }       = require('./ingestion/departmentBudgetsFetcher');
+const { fetchAllPromises }                = require('./ingestion/promiseTrackerFetcher');
 const { processGovStats }           = require('./processing/govStatsProcessor');
 const {
   uploadBills, uploadVotes, uploadMembers, uploadEfficiencyScores,
@@ -30,7 +31,7 @@ const {
   uploadMemberDisclosures, uploadMemberLobbying, uploadMemberVotes, uploadMemberAttendance, uploadMemberBios, uploadMemberCommittees, uploadMemberExpenses, uploadMemberStockTrades, uploadMemberCorporateAffiliations,
   uploadFlaggedExpenses, uploadWasteReports, uploadLeaderExpenses, uploadLeaderboard,
   uploadExpenseAnomalies, uploadBudgetData, uploadAnalyticsData, uploadGovStats,
-  uploadTargetedStats, uploadDepartmentBudgets,
+  uploadTargetedStats, uploadDepartmentBudgets, uploadPromiseTracker,
 } = require('./firebase/uploader');
 const { writeSchedulerStatus } = require('./firebase/statusWriter');
 const fs = require('fs');
@@ -175,46 +176,55 @@ async function runWeeklyCycle() {
   console.log('='.repeat(60));
 
   let memberCount = 0, memberVotesCount = 0, memberAttendanceCount = 0, memberBiosCount = 0, memberCommitteesCount = 0;
+  let promisesCount = 0;
 
   try {
-    console.log('\n[scheduler:weekly] Step 1/10 — Ingesting member profiles...');
+    console.log('\n[scheduler:weekly] Step 1/12 — Ingesting member profiles...');
     await runPipeline(weeklySources);
 
-    console.log('\n[scheduler:weekly] Step 2/10 — Uploading members to Firebase...');
+    console.log('\n[scheduler:weekly] Step 2/12 — Uploading members to Firebase...');
     memberCount = await uploadMembers();
 
-    console.log('\n[scheduler:weekly] Step 3/10 — Fetching member voting records (CA / US / UK)...');
+    console.log('\n[scheduler:weekly] Step 3/12 — Fetching member voting records (CA / US / UK)...');
     await fetchAllMemberVotes();
 
-    console.log('\n[scheduler:weekly] Step 4/10 — Uploading member votes to Firebase...');
+    console.log('\n[scheduler:weekly] Step 4/12 — Uploading member votes to Firebase...');
     memberVotesCount = await uploadMemberVotes();
 
-    console.log('\n[scheduler:weekly] Step 5/10 — Fetching member attendance (CA / US / UK)...');
+    console.log('\n[scheduler:weekly] Step 5/12 — Fetching member attendance (CA / US / UK)...');
     await fetchAllMemberAttendance();
 
-    console.log('\n[scheduler:weekly] Step 6/10 — Uploading member attendance to Firebase...');
+    console.log('\n[scheduler:weekly] Step 6/12 — Uploading member attendance to Firebase...');
     memberAttendanceCount = await uploadMemberAttendance();
 
-    console.log('\n[scheduler:weekly] Step 7/10 — Fetching member biographies (CA / US / UK / AU)...');
+    console.log('\n[scheduler:weekly] Step 7/12 — Fetching member biographies (CA / US / UK / AU)...');
     await fetchAllMemberBios();
 
-    console.log('\n[scheduler:weekly] Step 8/10 — Uploading member bios to Firebase...');
+    console.log('\n[scheduler:weekly] Step 8/12 — Uploading member bios to Firebase...');
     memberBiosCount = await uploadMemberBios();
 
-    console.log('\n[scheduler:weekly] Step 9/10 — Fetching member committee assignments (CA / US / UK / AU)...');
+    console.log('\n[scheduler:weekly] Step 9/12 — Fetching member committee assignments (CA / US / UK / AU)...');
     await fetchAllMemberCommittees();
 
-    console.log('\n[scheduler:weekly] Step 10/10 — Uploading member committees to Firebase...');
+    console.log('\n[scheduler:weekly] Step 10/12 — Uploading member committees to Firebase...');
     memberCommitteesCount = await uploadMemberCommittees();
 
+    console.log('\n[scheduler:weekly] Step 11/12 — Fetching government promises (CA liberal.ca + mandate / US WH priorities + EOs / UK King\'s Speech + manifesto / AU ALP policies)...');
+    await fetchAllPromises();
+
+    console.log('\n[scheduler:weekly] Step 12/12 — Uploading promise tracker to Firebase...');
+    promisesCount = await uploadPromiseTracker();
+
+    const total = memberCount + memberVotesCount + memberAttendanceCount + memberBiosCount + memberCommitteesCount + promisesCount;
     console.log(`\n[scheduler:weekly] ✓ Done at ${new Date().toISOString()}`);
     console.log(`[scheduler:weekly]   members: ${memberCount}  votes: ${memberVotesCount}  attendance: ${memberAttendanceCount}  bios: ${memberBiosCount}  committees: ${memberCommitteesCount}`);
+    console.log(`[scheduler:weekly]   promise_tracker: ${promisesCount}`);
 
     await writeSchedulerStatus('weekly', {
       startedAt,
       status:         'success',
-      collections:    ['members', 'member_votes', 'member_attendance', 'member_bios', 'member_committees'],
-      recordsUpdated: memberCount + memberVotesCount + memberAttendanceCount + memberBiosCount + memberCommitteesCount,
+      collections:    ['members', 'member_votes', 'member_attendance', 'member_bios', 'member_committees', 'promise_tracker'],
+      recordsUpdated: total,
       recordsSkipped: 0,
       aiCallsMade:    0,
       cronSchedule:   WEEKLY_SCHEDULE,
@@ -225,8 +235,8 @@ async function runWeeklyCycle() {
     await writeSchedulerStatus('weekly', {
       startedAt,
       status:         'error',
-      collections:    ['members', 'member_votes', 'member_attendance', 'member_bios', 'member_committees'],
-      recordsUpdated: memberCount + memberVotesCount + memberAttendanceCount + memberBiosCount + memberCommitteesCount,
+      collections:    ['members', 'member_votes', 'member_attendance', 'member_bios', 'member_committees', 'promise_tracker'],
+      recordsUpdated: memberCount + memberVotesCount + memberAttendanceCount + memberBiosCount + memberCommitteesCount + promisesCount,
       recordsSkipped: 0,
       aiCallsMade:    0,
       cronSchedule:   WEEKLY_SCHEDULE,
