@@ -508,6 +508,27 @@ async function uploadCorporateAffiliations() {
   return count;
 }
 
+/**
+ * Upload department budget records to the `department_budgets` collection.
+ * Reads all files from output/department_budgets/ (one file per jurisdiction).
+ */
+async function uploadDepartmentBudgets() {
+  const dir = path.join(OUTPUT_ROOT, 'department_budgets');
+  const files = loadLatestFiles(dir);
+  const allRecords = [];
+  for (const file of files) {
+    const { records } = JSON.parse(fs.readFileSync(file));
+    allRecords.push(...records.map(withTimestamp));
+  }
+  if (allRecords.length === 0) {
+    console.log('[firebase] ⚠ department_budgets: no records found, skipping');
+    return 0;
+  }
+  const count = await batchWrite('department_budgets', allRecords);
+  console.log(`[firebase] ✓ department_budgets: ${count} documents written`);
+  return count;
+}
+
 // ─── Currency lookup ──────────────────────────────────────────────────────────
 
 const CURRENCY_BY_JUR = { AU: 'AUD', CA: 'CAD', UK: 'GBP', US: 'USD' };
@@ -1620,4 +1641,5 @@ module.exports = {
   uploadLiveStats,
   uploadSocialStatsCanonical,
   uploadTargetedStats,
+  uploadDepartmentBudgets,
 };
