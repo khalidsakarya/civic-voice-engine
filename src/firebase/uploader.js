@@ -1619,6 +1619,27 @@ async function uploadAll() {
   return results;
 }
 
+/**
+ * Upload election records to the `elections` collection.
+ * Reads from output/elections/ (one file per jurisdiction per run).
+ */
+async function uploadElections() {
+  const dir = path.join(OUTPUT_ROOT, 'elections');
+  const files = loadLatestFiles(dir);
+  const allRecords = [];
+  for (const file of files) {
+    const { records } = JSON.parse(fs.readFileSync(file));
+    allRecords.push(...records.map(withTimestamp));
+  }
+  if (allRecords.length === 0) {
+    console.log('[firebase] ⚠ elections: no records found, skipping');
+    return 0;
+  }
+  const count = await batchWrite('elections', allRecords);
+  console.log(`[firebase] ✓ elections: ${count} documents written`);
+  return count;
+}
+
 function sanitizeId(id) {
   return String(id).replace(/\//g, '-').replace(/[^a-zA-Z0-9_\-]/g, '_').slice(0, 500);
 }
@@ -1664,4 +1685,5 @@ module.exports = {
   uploadTargetedStats,
   uploadDepartmentBudgets,
   uploadPromiseTracker,
+  uploadElections,
 };
