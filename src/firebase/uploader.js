@@ -209,7 +209,9 @@ async function uploadAuditFindings() {
   const allRecords  = [];
 
   for (const file of allFiles) {
-    const { records } = JSON.parse(fs.readFileSync(file));
+    const data = JSON.parse(fs.readFileSync(file));
+    const records = data.records ?? data.results ?? [];
+    if (!Array.isArray(records)) continue;
     allRecords.push(...records.map(withTimestamp));
   }
   if (allRecords.length === 0) {

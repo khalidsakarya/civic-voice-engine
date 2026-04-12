@@ -33,13 +33,21 @@ function saveRecords(jurisdiction, records) {
   return records.length;
 }
 
-// Native https.get wrapper (canada.ca AEM CDN stalls axios)
-function httpsGet(url) {
+// Native https.get wrapper with redirect following (canada.ca CDN stalls axios)
+function httpsGet(url, maxRedirects = 5) {
   return new Promise((resolve, reject) => {
     const req = https.get(url, {
       headers: { 'User-Agent': 'Mozilla/5.0 (compatible; CivicVoice/1.0)', Accept: 'text/html' },
       timeout: 45000,
     }, res => {
+      if ((res.statusCode === 301 || res.statusCode === 302) && res.headers.location && maxRedirects > 0) {
+        const loc = res.headers.location.startsWith('http')
+          ? res.headers.location
+          : `https://www.international.gc.ca${res.headers.location}`;
+        res.resume();
+        resolve(httpsGet(loc, maxRedirects - 1));
+        return;
+      }
       let data = '';
       res.on('data', chunk => { data += chunk; });
       res.on('end', () => resolve(data));
@@ -59,16 +67,18 @@ function parseMoney(str) {
 
 // ─── Canada ──────────────────────────────────────────────────────────────────
 //
-// Source: Global Affairs Canada, International Assistance Report 2023-2024
-// URL:    https://www.international.gc.ca/world-monde/issues_development-enjeux_developpement/priorities-priorites/iab_report-rapport_aai-2023-2024.aspx?lang=eng
+// Source: Global Affairs Canada, Statistical Report on International Assistance 2023-2024
+// CKAN:   open.canada.ca package 070ee463-873e-4626-a929-994b0f2c7e34
+// URL:    https://www.international.gc.ca/transparency-transparence/international-assistance-report-rapport-aide-internationale/2023-2024.aspx?lang=eng
+//         (redirects to international.canada.ca)
 //
-// Structure:
-//   Table 0 — ODA by government department (CAD millions)
-//   Table 2 — ODA by recipient country (USD millions)
-//   Table 11 — ODA by sector (CAD millions)
+// Structure (11 tables on redirected page):
+//   Table 0 — ODA by government department (CAD millions, rows 7+)
+//   Table 4 — ODA by supplier/sector (CAD dollars, rows 1+)
 
 async function fetchCanadaForeignAid() {
-  const url = 'https://www.international.gc.ca/world-monde/issues_development-enjeux_developpement/priorities-priorites/iab_report-rapport_aai-2023-2024.aspx?lang=eng';
+  // The GC report page redirects; httpsGet follows redirects automatically
+  const url = 'https://www.international.gc.ca/transparency-transparence/international-assistance-report-rapport-aide-internationale/2023-2024.aspx?lang=eng';
   console.log('[foreign-aid:CA] Fetching International Assistance Report 2023-2024...');
 
   let html;
@@ -87,96 +97,71 @@ async function fetchCanadaForeignAid() {
     tableBlocks.push(m[0]);
   }
 
+  if (tableBlocks.length === 0) {
+    console.warn('[foreign-aid:CA] No tables found in HTML response');
+    return [];
+  }
+
   const records = [];
   const reportYear = '2023-2024';
 
   // ── Table 0: ODA by department ────────────────────────────────────────────
+  // Rows 0-6 are headers/footnotes (colspan rows, < 5 cells). Data rows have 5 cells.
   if (tableBlocks[0]) {
-    const rowRe = /<tr[\s\S]*?<\/tr>/gi;
-    let rowM;
-    let rowIdx = 0;
-    while ((rowM = rowRe.exec(tableBlocks[0])) !== null) {
-      if (rowIdx === 0) { rowIdx++; continue; } // skip header
-      const cells = [...rowM[0].matchAll(/<t[dh][^>]*>([\s\S]*?)<\/t[dh]>/gi)].map(c => stripHtml(c[1]));
-      if (cells.length < 2) { rowIdx++; continue; }
+    const rows = tableBlocks[0].match(/<tr[\s\S]*?<\/tr>/gi) || [];
+    for (const row of rows) {
+      const cells = [...row.matchAll(/<t[dh][^>]*>([\s\S]*?)<\/t[dh]>/gi)].map(c => stripHtml(c[1]));
+      if (cells.length < 5) continue; // header/footnote rows have fewer cells
       const dept   = safeStr(cells[0]);
       const amount = parseMoney(cells[1]);
-      if (!dept || dept.toLowerCase().includes('total')) { rowIdx++; continue; }
+      if (!dept || /^(department|programs|oda|source|total|of which)/i.test(dept)) continue;
+      if (amount === null) continue;
       records.push({
-        id:           `ca-dept-${slug(dept)}-${reportYear}`,
-        jurisdiction: 'CA',
-        report_year:  reportYear,
-        category:     'by_department',
-        label:        dept,
+        id:              `ca-dept-${slug(dept)}-${reportYear}`,
+        jurisdiction:    'CA',
+        report_year:     reportYear,
+        category:        'by_department',
+        label:           dept.replace(/\s*\*+$/, '').replace(/&mdash;/g, '—').trim(),
         amount_millions: amount,
-        currency:     'CAD',
-        unit:         'millions CAD',
-        source_url:   url,
+        currency:        'CAD',
+        unit:            'millions CAD',
+        source_url:      url,
       });
-      rowIdx++;
     }
     console.log(`[foreign-aid:CA] by_department: ${records.filter(r => r.category === 'by_department').length} rows`);
   }
 
-  // ── Table 2: ODA by recipient country ────────────────────────────────────
-  const countryStart = records.length;
-  if (tableBlocks[2]) {
-    const rowRe = /<tr[\s\S]*?<\/tr>/gi;
-    let rowM;
-    let rowIdx = 0;
-    while ((rowM = rowRe.exec(tableBlocks[2])) !== null) {
-      if (rowIdx === 0) { rowIdx++; continue; }
-      const cells = [...rowM[0].matchAll(/<t[dh][^>]*>([\s\S]*?)<\/t[dh]>/gi)].map(c => stripHtml(c[1]));
-      if (cells.length < 2) { rowIdx++; continue; }
-      const country = safeStr(cells[0]);
-      const amount  = parseMoney(cells[1]);
-      if (!country || country.toLowerCase().includes('total')) { rowIdx++; continue; }
-      records.push({
-        id:           `ca-country-${slug(country)}-${reportYear}`,
-        jurisdiction: 'CA',
-        report_year:  reportYear,
-        category:     'by_recipient_country',
-        label:        country,
-        amount_millions: amount,
-        currency:     'USD',
-        unit:         'millions USD',
-        source_url:   url,
-      });
-      rowIdx++;
-    }
-    console.log(`[foreign-aid:CA] by_recipient_country: ${records.length - countryStart} rows`);
-  }
-
-  // ── Table 11: ODA by sector ───────────────────────────────────────────────
+  // ── Table 4: ODA by supplier / sector ────────────────────────────────────
+  // Columns: Supplier, Sector, Category, Amount
   const sectorStart = records.length;
-  if (tableBlocks[11]) {
-    const rowRe = /<tr[\s\S]*?<\/tr>/gi;
-    let rowM;
-    let rowIdx = 0;
-    while ((rowM = rowRe.exec(tableBlocks[11])) !== null) {
-      if (rowIdx === 0) { rowIdx++; continue; }
-      const cells = [...rowM[0].matchAll(/<t[dh][^>]*>([\s\S]*?)<\/t[dh]>/gi)].map(c => stripHtml(c[1]));
-      if (cells.length < 2) { rowIdx++; continue; }
-      const sector = safeStr(cells[0]);
-      const amount = parseMoney(cells[1]);
-      if (!sector || sector.toLowerCase().includes('total')) { rowIdx++; continue; }
+  if (tableBlocks[4]) {
+    const rows = tableBlocks[4].match(/<tr[\s\S]*?<\/tr>/gi) || [];
+    let headerSkipped = false;
+    for (const row of rows) {
+      const cells = [...row.matchAll(/<t[dh][^>]*>([\s\S]*?)<\/t[dh]>/gi)].map(c => stripHtml(c[1]));
+      if (cells.length < 2) continue;
+      if (!headerSkipped) { headerSkipped = true; continue; }
+      const supplier = safeStr(cells[0]);
+      const sector   = safeStr(cells[1]);
+      const amount   = parseMoney(cells[3] || cells[2]);
+      if (!supplier || amount === null) continue;
       records.push({
-        id:           `ca-sector-${slug(sector)}-${reportYear}`,
-        jurisdiction: 'CA',
-        report_year:  reportYear,
-        category:     'by_sector',
-        label:        sector,
-        amount_millions: amount,
-        currency:     'CAD',
-        unit:         'millions CAD',
-        source_url:   url,
+        id:              `ca-supplier-${slug(supplier)}-${reportYear}`,
+        jurisdiction:    'CA',
+        report_year:     reportYear,
+        category:        'by_supplier',
+        label:           supplier,
+        sector:          sector,
+        amount_dollars:  amount,
+        currency:        'CAD',
+        unit:            'CAD',
+        source_url:      url,
       });
-      rowIdx++;
     }
-    console.log(`[foreign-aid:CA] by_sector: ${records.length - sectorStart} rows`);
+    console.log(`[foreign-aid:CA] by_supplier: ${records.length - sectorStart} rows`);
   }
 
-  // Add a summary record for total ODA
+  // Add a summary record for total ODA (sum of by_department)
   const deptRecords = records.filter(r => r.category === 'by_department');
   const totalCAD = deptRecords.reduce((sum, r) => sum + (r.amount_millions || 0), 0);
   if (totalCAD > 0) {
@@ -191,6 +176,7 @@ async function fetchCanadaForeignAid() {
       unit:            'millions CAD',
       source_url:      url,
     });
+    console.log(`[foreign-aid:CA] Total ODA ${reportYear}: CAD ${Math.round(totalCAD * 10) / 10}M`);
   }
 
   return records;
@@ -230,7 +216,7 @@ async function fetchUSForeignAid() {
       filters: { fy, quarter: '4' },
     });
     const intlAffairs = (funcData.results || []).find(r =>
-      r.budget_function_code === '150' || (r.name || '').toLowerCase().includes('international')
+      r.code === '150' || (r.name || '').toLowerCase().includes('international')
     );
     if (intlAffairs) {
       records.push({
@@ -239,13 +225,13 @@ async function fetchUSForeignAid() {
         report_year:  `FY${fy}`,
         category:     'total_international_affairs',
         label:        intlAffairs.name || 'International Affairs (Budget Function 150)',
-        amount_billions: Math.round((intlAffairs.obligated_amount / 1e9) * 100) / 100,
-        amount_raw:   intlAffairs.obligated_amount,
+        amount_billions: Math.round((intlAffairs.amount / 1e9) * 100) / 100,
+        amount_raw:   intlAffairs.amount,
         currency:     'USD',
         unit:         'USD (obligated)',
         source_url:   sourceUrl,
       });
-      console.log(`[foreign-aid:US] Total International Affairs FY${fy}: $${(intlAffairs.obligated_amount / 1e9).toFixed(2)}B`);
+      console.log(`[foreign-aid:US] Total International Affairs FY${fy}: $${(intlAffairs.amount / 1e9).toFixed(2)}B`);
     }
   } catch (err) {
     console.warn(`[foreign-aid:US] budget_function fetch failed: ${err.message}`);
@@ -265,9 +251,9 @@ async function fetchUSForeignAid() {
         report_year:  `FY${fy}`,
         category:     'by_subfunction',
         label:        row.name,
-        budget_subfunction_code: row.budget_subfunction_code || null,
-        amount_billions: Math.round((row.obligated_amount / 1e9) * 100) / 100,
-        amount_raw:   row.obligated_amount,
+        subfunction_code: row.code || null,
+        amount_billions: Math.round((row.amount / 1e9) * 100) / 100,
+        amount_raw:   row.amount,
         currency:     'USD',
         unit:         'USD (obligated)',
         source_url:   sourceUrl,
@@ -285,7 +271,7 @@ async function fetchUSForeignAid() {
       filters: { fy, quarter: '4', budget_function: '150' },
     });
     const topAgencies = (agencyData.results || [])
-      .sort((a, b) => (b.obligated_amount || 0) - (a.obligated_amount || 0))
+      .sort((a, b) => (b.amount || 0) - (a.amount || 0))
       .slice(0, 15);
     for (const row of topAgencies) {
       if (!row.name) continue;
@@ -295,8 +281,8 @@ async function fetchUSForeignAid() {
         report_year:  `FY${fy}`,
         category:     'by_agency',
         label:        row.name,
-        amount_billions: Math.round((row.obligated_amount / 1e9) * 100) / 100,
-        amount_raw:   row.obligated_amount,
+        amount_billions: Math.round((row.amount / 1e9) * 100) / 100,
+        amount_raw:   row.amount,
         currency:     'USD',
         unit:         'USD (obligated)',
         source_url:   sourceUrl,
