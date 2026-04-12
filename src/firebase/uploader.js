@@ -1620,6 +1620,27 @@ async function uploadAll() {
 }
 
 /**
+ * Upload department heads to the `department_heads` collection.
+ * Reads from output/department_heads/ (one file per jurisdiction per run).
+ */
+async function uploadDepartmentHeads() {
+  const dir = path.join(OUTPUT_ROOT, 'department_heads');
+  const files = loadLatestFiles(dir);
+  const allRecords = [];
+  for (const file of files) {
+    const { records } = JSON.parse(fs.readFileSync(file));
+    allRecords.push(...records.map(withTimestamp));
+  }
+  if (allRecords.length === 0) {
+    console.log('[firebase] ⚠ department_heads: no records found, skipping');
+    return 0;
+  }
+  const count = await batchWrite('department_heads', allRecords);
+  console.log(`[firebase] ✓ department_heads: ${count} documents written`);
+  return count;
+}
+
+/**
  * Upload election records to the `elections` collection.
  * Reads from output/elections/ (one file per jurisdiction per run).
  */
@@ -1686,4 +1707,5 @@ module.exports = {
   uploadDepartmentBudgets,
   uploadPromiseTracker,
   uploadElections,
+  uploadDepartmentHeads,
 };
