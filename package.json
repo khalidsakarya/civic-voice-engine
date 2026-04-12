@@ -86,6 +86,9 @@
     "ingest:stock-trades": "node src/ingestion/stockTradesFetcher.js",
     "upload:stock-trades": "node src/firebase/uploadMemberStockTrades.js",
     "pipeline:stock-trades": "npm run ingest:stock-trades && npm run upload:stock-trades",
+    "ingest:foreign-aid": "node src/ingestion/foreignAidFetcher.js",
+    "upload:foreign-aid": "node src/firebase/uploadForeignAid.js",
+    "pipeline:foreign-aid": "npm run ingest:foreign-aid && npm run upload:foreign-aid",
     "pipeline:full": "npm run start && npm run process:bills && npm run score:efficiency && npm run upload:firebase",
     "test": "node --experimental-vm-modules node_modules/.bin/jest"
   },

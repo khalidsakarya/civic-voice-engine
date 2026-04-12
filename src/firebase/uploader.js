@@ -1661,6 +1661,29 @@ async function uploadElections() {
   return count;
 }
 
+/**
+ * Upload foreign aid records to the `foreign_aid` collection.
+ * Reads from output/foreign_aid/ (one file per jurisdiction per run).
+ * Records cover: total ODA, by_department, by_recipient_country, by_sector,
+ * by_subfunction, by_agency, annual series, key figures, regional shares.
+ */
+async function uploadForeignAid() {
+  const dir = path.join(OUTPUT_ROOT, 'foreign_aid');
+  const files = loadLatestFiles(dir);
+  const allRecords = [];
+  for (const file of files) {
+    const { records } = JSON.parse(fs.readFileSync(file));
+    allRecords.push(...records.map(withTimestamp));
+  }
+  if (allRecords.length === 0) {
+    console.log('[firebase] ⚠ foreign_aid: no records found, skipping');
+    return 0;
+  }
+  const count = await batchWrite('foreign_aid', allRecords);
+  console.log(`[firebase] ✓ foreign_aid: ${count} documents written`);
+  return count;
+}
+
 function sanitizeId(id) {
   return String(id).replace(/\//g, '-').replace(/[^a-zA-Z0-9_\-]/g, '_').slice(0, 500);
 }
@@ -1708,4 +1731,5 @@ module.exports = {
   uploadPromiseTracker,
   uploadElections,
   uploadDepartmentHeads,
+  uploadForeignAid,
 };
