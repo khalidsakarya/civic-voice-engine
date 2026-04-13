@@ -184,8 +184,9 @@ async function fetchCanadaDepartmentBudgets() {
     );
     const resources = pkgRes.data?.result?.resources || [];
 
-    const estRes  = resources.find(r => /abv_apc_en/i.test(r.name || r.url || ''));
-    const planRes = resources.find(r => /rbpo_rppo_en/i.test(r.name || r.url || ''));
+    // Match by URL (which contains the filename slug) — resource names are in English
+    const estRes  = resources.find(r => /abv_apc_en/i.test(r.url || '') || /Estimates.*Budgetary Authorities by Vote/i.test(r.name || ''));
+    const planRes = resources.find(r => /rbpo_rppo_en/i.test(r.url || '') || (r.name || '').includes('Departmental Plans') && (r.name || '').includes('Expenditures'));
 
     if (!estRes && !planRes) {
       console.warn('[dept-budgets:CA] Could not find GC InfoBase CSV resources, skipping');
@@ -343,29 +344,32 @@ async function fetchUKDepartmentBudgets() {
       return 0;
     }
 
-    // Find the data region: look for a row where col 0 is a non-numeric string
-    // and at least one later column is numeric (the DEL allocation).
-    // Skip title/header rows at the top (usually first 3-6 rows).
+    // The DEL tables have data starting in column B (index 1):
+    //   col 1 = department name (shared string)
+    //   col 2 = DEL allocation (£ billion)
+    // Rows 0-3 are title/header; data rows start from row 4.
     const records = [];
     for (const r of rows) {
-      const name = safeStr(r[0]);
+      // Name is in column B (index 1), not A (index 0)
+      const name = safeStr(r[1]);
       if (!name || name.length < 3) continue;
       // Skip header/label/total rows
-      if (/^total|^of which|^note|^source|^\d{4}|^department$/i.test(name)) continue;
+      if (/^total|^of which|^note|^source|^\d{4}|^department|^table|^£|^resource del|^capital del/i.test(name)) continue;
       if (/^\s*$/.test(name)) continue;
 
-      // Find the first numeric column value after col 0
+      // Find the first numeric column value starting at col 2
       let totalBudget = null;
-      for (let ci = 1; ci < Math.min((r.length || 0), 15); ci++) {
+      for (let ci = 2; ci < Math.min((r.length || 0), 15); ci++) {
         const n = safeNum(r[ci]);
         if (n !== null && Math.abs(n) > 0) { totalBudget = n; break; }
       }
       if (totalBudget === null) continue;
 
+      const cleanName = name.replace(/\d+$/, '').trim(); // strip trailing footnote numbers
       records.push({
-        id:           `uk-dept-${slug(name)}`,
+        id:           `uk-dept-${slug(cleanName)}`,
         jurisdiction: 'UK',
-        name,
+        name:         cleanName,
         fiscal_year:  '2025-26',
         total_budget: totalBudget,
         total_spent:  null,
