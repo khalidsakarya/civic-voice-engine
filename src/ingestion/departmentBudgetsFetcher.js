@@ -171,6 +171,106 @@ function colIndex(col) {
   return n - 1;
 }
 
+// ZIP parser using Central Directory — needed for files that use data descriptor
+// pattern (compSize=0 in local headers, sizes only in Central Directory).
+function extractZipEntriesFromCD(buf) {
+  const entries = {};
+  let eocdOffset = -1;
+  for (let i = buf.length - 22; i >= 0; i--) {
+    if (buf[i]===0x50&&buf[i+1]===0x4B&&buf[i+2]===0x05&&buf[i+3]===0x06) { eocdOffset = i; break; }
+  }
+  if (eocdOffset === -1) return entries;
+  const cdOffset     = buf.readUInt32LE(eocdOffset + 16);
+  const totalEntries = buf.readUInt16LE(eocdOffset + 10);
+  let pos = cdOffset;
+  for (let e = 0; e < totalEntries; e++) {
+    if (pos + 46 > buf.length) break;
+    if (!(buf[pos]===0x50&&buf[pos+1]===0x4B&&buf[pos+2]===0x01&&buf[pos+3]===0x02)) break;
+    const compMethod  = buf.readUInt16LE(pos + 10);
+    const compSize    = buf.readUInt32LE(pos + 20);
+    const fnLen       = buf.readUInt16LE(pos + 28);
+    const extraLen    = buf.readUInt16LE(pos + 30);
+    const commentLen  = buf.readUInt16LE(pos + 32);
+    const localOffset = buf.readUInt32LE(pos + 42);
+    const fn          = buf.slice(pos + 46, pos + 46 + fnLen).toString('utf8');
+    const lfhFnLen    = buf.readUInt16LE(localOffset + 26);
+    const lfhExtra    = buf.readUInt16LE(localOffset + 28);
+    const dataStart   = localOffset + 30 + lfhFnLen + lfhExtra;
+    if (compSize > 0) {
+      const cd = buf.slice(dataStart, dataStart + compSize);
+      try { entries[fn] = (compMethod === 8 ? zlib.inflateRawSync(cd) : cd).toString('utf8'); }
+      catch { entries[fn] = ''; }
+    } else { entries[fn] = ''; }
+    pos += 46 + fnLen + extraLen + commentLen;
+  }
+  return entries;
+}
+
+// Parse a named sheet from an XLSX buffer by navigating workbook.xml rels.
+function parseXlsxSheetByName(buf, sheetName) {
+  const entries = extractZipEntries(buf);
+  const wbRels  = entries['xl/_rels/workbook.xml.rels'] || '';
+  const relMap  = {};
+  [...wbRels.matchAll(/<Relationship[^>]+>/g)].forEach(m => {
+    const idM  = m[0].match(/\bId="([^"]+)"/);
+    const tM   = m[0].match(/\bTarget="([^"]+)"/);
+    if (idM && tM) relMap[idM[1]] = tM[1];
+  });
+  const wbXml = entries['xl/workbook.xml'] || '';
+  const shM   = [...wbXml.matchAll(/<sheet\s[^>]*/g)]
+    .map(m => ({
+      name: (m[0].match(/name="([^"]+)"/) || [])[1],
+      rId:  (m[0].match(/r:id="([^"]+)"/) || [])[1],
+    }))
+    .find(s => s.name === sheetName);
+  if (!shM) return [];
+  const sheetFile = relMap[shM.rId];
+  if (!sheetFile) return [];
+  const sheetXml = entries[`xl/${sheetFile}`] || '';
+  const strings  = parseSharedStrings(entries['xl/sharedStrings.xml'] || '');
+  return parseSheet(sheetXml, strings);
+}
+
+// Parse a named table from an ODS buffer (ODS is ZIP with content.xml).
+function parseOdsTable(buf, tableName) {
+  const entries = extractZipEntries(buf);
+  const xml     = entries['content.xml'] || '';
+  const tStart  = xml.indexOf(`table:name="${tableName}"`);
+  if (tStart === -1) return [];
+  const tEnd = xml.indexOf('</table:table>', tStart);
+  const tXml = xml.substring(tStart, tEnd + 14);
+  const rows = [];
+  const rowRe = /<table:table-row[^>]*>([\s\S]*?)<\/table:table-row>/g;
+  let rowM;
+  while ((rowM = rowRe.exec(tXml)) !== null) {
+    const cells    = [];
+    const rowXml   = rowM[1];
+    // Match both open/close and self-closing table-cell tags
+    const cellRe   = /<table:table-cell([^>]*?)(\/>|>([\s\S]*?)<\/table:table-cell>)/g;
+    let cellM;
+    while ((cellM = cellRe.exec(rowXml)) !== null) {
+      const attrs   = cellM[1];
+      const content = cellM[3] || '';
+      const repM    = attrs.match(/table:number-columns-repeated="(\d+)"/);
+      const rep     = repM ? parseInt(repM[1]) : 1;
+      if (rep > 50) break; // trailing empty-cell run → end of row
+      const valM = attrs.match(/office:value="([^"]+)"/);
+      const txtM = content.match(/<text:p[^>]*>([^<]*)<\/text:p>/);
+      const val  = valM ? parseFloat(valM[1]) : (txtM ? decodeXmlEntities(txtM[1]) : '');
+      for (let r = 0; r < Math.min(rep, 20); r++) cells.push(val);
+    }
+    if (cells.some(c => c !== '' && c !== 0)) rows.push(cells);
+  }
+  return rows;
+}
+
+// Normalise a department name for fuzzy matching across data sources.
+function normName(s) {
+  return String(s || '').toLowerCase()
+    .replace(/^(department of the|department of|department for|ministry of|office of the|office of|the )\s*/i, '')
+    .replace(/[^a-z0-9]+/g, ' ').trim();
+}
+
 // ─── Canada — GC InfoBase CSVs (open.canada.ca CKAN) ─────────────────────────
 
 const CA_CKAN_PKG = 'a35cf382-690c-4221-a971-cf0fd189a46f';
@@ -215,23 +315,31 @@ async function fetchCanadaDepartmentBudgets() {
       console.log(`[dept-budgets:CA] Estimates: ${Object.keys(estimatesMap).length} orgs`);
     }
 
-    // ── Departmental Plans CSV: programs by org ────────────────────────────
+    // ── Departmental Plans CSV: programs + FTE by org ────────────────────────
     const plansMap = {};
+    const fteByOrg = {}; // { org: { fy, total } }
     if (planRes) {
       console.log(`[dept-budgets:CA] Fetching Departmental Plans CSV...`);
       const resp = await axios.get(planRes.url, {
         timeout: 60000, responseType: 'arraybuffer', maxRedirects: 10,
       });
       const rows = csvToObjects(Buffer.from(resp.data).toString('utf8'));
-      // Fields: fy_ef, organization, program_name, planned_spending_1, actual_spending
+      // Fields: fy_ef, organization, program_name, planned_spending_1, actual_spending, actual_ftes, ...
       for (const r of rows) {
-        const org  = r['organization']      || '';
-        const prog = r['program_name']       || '';
+        const org  = r['organization']       || '';
+        const prog = r['program_name']        || '';
         const plan = safeNum(r['planned_spending_1']);
         const act  = safeNum(r['actual_spending']);
+        const fy   = r['fy_ef']              || '';
+        const fte  = safeNum(r['actual_ftes']);
         if (!org) continue;
         if (!plansMap[org]) plansMap[org] = [];
         if (prog) plansMap[org].push({ program_name: prog, planned_spending: plan, actual_spending: act });
+        // Accumulate FTEs for the most recent fiscal year
+        if (fte != null) {
+          if (!fteByOrg[org] || fy > fteByOrg[org].fy) { fteByOrg[org] = { fy, total: 0 }; }
+          if (fy === fteByOrg[org].fy) fteByOrg[org].total += fte;
+        }
       }
     }
 
@@ -244,17 +352,19 @@ async function fetchCanadaDepartmentBudgets() {
       const totalSpent = programs.length
         ? programs.reduce((s, p) => s + (p.actual_spending || 0), 0) || null
         : null;
+      const fteTotals = fteByOrg[org];
       records.push({
-        id:           `ca-dept-${slug(org)}`,
-        jurisdiction: 'CA',
-        name:         org,
-        fiscal_year:  est?.fy || '2026-27',
-        total_budget: est?.total ?? null,
-        total_spent:  totalSpent,
-        currency:     'CAD',
-        budget_note:  'GC InfoBase Estimates — authorities granted by Parliament (thousands CAD)',
-        key_programs: programs,
-        source_url:   `https://open.canada.ca/data/dataset/${CA_CKAN_PKG}`,
+        id:             `ca-dept-${slug(org)}`,
+        jurisdiction:   'CA',
+        name:           org,
+        fiscal_year:    est?.fy || '2026-27',
+        total_budget:   est?.total ?? null,
+        total_spent:    totalSpent,
+        currency:       'CAD',
+        budget_note:    'GC InfoBase Estimates — authorities granted by Parliament (thousands CAD)',
+        key_programs:   programs,
+        employee_count: fteTotals ? Math.round(fteTotals.total) : null,
+        source_url:     `https://open.canada.ca/data/dataset/${CA_CKAN_PKG}`,
       });
     }
     return saveRecords('CA', records);
@@ -273,7 +383,10 @@ const US_PROGRAMS_URL = (code, fy) =>
 async function fetchUSDepartmentBudgets() {
   try {
     console.log('[dept-budgets:US] Fetching top-tier agencies from USASpending...');
-    const agencyRes = await axios.get(US_AGENCIES_URL, { timeout: 30000 });
+    const [agencyRes, empCounts] = await Promise.all([
+      axios.get(US_AGENCIES_URL, { timeout: 30000 }),
+      fetchUSEmployeeCounts(),
+    ]);
     const agencies  = agencyRes.data?.results || [];
     console.log(`[dept-budgets:US] Got ${agencies.length} agencies — fetching program activity for top 10...`);
 
@@ -304,17 +417,18 @@ async function fetchUSDepartmentBudgets() {
       }
 
       records.push({
-        id:           `us-dept-${slug(code + '-' + name)}`,
-        jurisdiction: 'US',
+        id:             `us-dept-${slug(code + '-' + name)}`,
+        jurisdiction:   'US',
         name,
-        toptier_code: code,
-        fiscal_year:  String(currentFY),
-        total_budget: totalBudget,
-        total_spent:  totalSpent,
-        currency:     'USD',
-        budget_note:  'USASpending.gov — budget authority and obligations (USD)',
-        key_programs: programs,
-        source_url:   `https://www.usaspending.gov/agency/${code}`,
+        toptier_code:   code,
+        fiscal_year:    String(currentFY),
+        total_budget:   totalBudget,
+        total_spent:    totalSpent,
+        currency:       'USD',
+        budget_note:    'USASpending.gov — budget authority and obligations (USD)',
+        key_programs:   programs,
+        employee_count: empCounts[code] ?? null,
+        source_url:     `https://www.usaspending.gov/agency/${code}`,
       });
     }
 
@@ -331,10 +445,11 @@ const UK_DEL_URL = 'https://assets.publishing.service.gov.uk/media/6827211850dbd
 
 async function fetchUKDepartmentBudgets() {
   try {
-    console.log('[dept-budgets:UK] Downloading HM Treasury DEL tables XLSX...');
-    const resp = await axios.get(UK_DEL_URL, {
-      timeout: 60000, responseType: 'arraybuffer', maxRedirects: 5,
-    });
+    console.log('[dept-budgets:UK] Downloading HM Treasury DEL tables XLSX + Civil Service employee counts...');
+    const [resp, empCounts] = await Promise.all([
+      axios.get(UK_DEL_URL, { timeout: 60000, responseType: 'arraybuffer', maxRedirects: 5 }),
+      fetchUKEmployeeCounts(),
+    ]);
     const buf  = Buffer.from(resp.data);
     console.log(`[dept-budgets:UK] Downloaded ${buf.length} bytes, parsing XLSX...`);
 
@@ -367,16 +482,17 @@ async function fetchUKDepartmentBudgets() {
 
       const cleanName = name.replace(/\d+$/, '').trim(); // strip trailing footnote numbers
       records.push({
-        id:           `uk-dept-${slug(cleanName)}`,
-        jurisdiction: 'UK',
-        name:         cleanName,
-        fiscal_year:  '2025-26',
-        total_budget: totalBudget,
-        total_spent:  null,
-        currency:     'GBP',
-        budget_note:  'HM Treasury Main Supply Estimates 2025-26 — Departmental Expenditure Limit (DEL, £millions)',
-        key_programs: [],
-        source_url:   'https://www.gov.uk/government/publications/main-supply-estimates-2025-to-2026',
+        id:             `uk-dept-${slug(cleanName)}`,
+        jurisdiction:   'UK',
+        name:           cleanName,
+        fiscal_year:    '2025-26',
+        total_budget:   totalBudget,
+        total_spent:    null,
+        currency:       'GBP',
+        budget_note:    'HM Treasury Main Supply Estimates 2025-26 — Departmental Expenditure Limit (DEL, £millions)',
+        key_programs:   [],
+        employee_count: empCounts[normName(cleanName)] ?? null,
+        source_url:     'https://www.gov.uk/government/publications/main-supply-estimates-2025-to-2026',
       });
     }
 
@@ -397,10 +513,11 @@ const AU_PAES_URL = 'https://data.gov.au/data/dataset/f84698ea-c749-4ff2-a5c5-e4
 
 async function fetchAUDepartmentBudgets() {
   try {
-    console.log('[dept-budgets:AU] Fetching PAES 2025-26 CSV from data.gov.au...');
-    const resp = await axios.get(AU_PAES_URL, {
-      timeout: 60000, responseType: 'arraybuffer', maxRedirects: 5,
-    });
+    console.log('[dept-budgets:AU] Fetching PAES 2025-26 CSV + APS employee counts...');
+    const [resp, empCounts] = await Promise.all([
+      axios.get(AU_PAES_URL, { timeout: 60000, responseType: 'arraybuffer', maxRedirects: 5 }),
+      fetchAUEmployeeCounts(),
+    ]);
     const rows = csvToObjects(Buffer.from(resp.data).toString('utf8'));
     console.log(`[dept-budgets:AU] Parsed ${rows.length} rows`);
 
@@ -427,17 +544,18 @@ async function fetchAUDepartmentBudgets() {
     const records = [];
     for (const [agency, data] of Object.entries(byAgency)) {
       records.push({
-        id:           `au-dept-${slug(agency)}`,
-        jurisdiction: 'AU',
-        name:         agency,
-        portfolio:    data.portfolio,
-        fiscal_year:  '2025-26',
-        total_budget: data.totalBudget || null,
-        total_spent:  data.totalSpent  || null,
-        currency:     'AUD',
-        budget_note:  'PAES 2025-26 program expenses (AUD thousands; total_spent = 2024-25 actuals)',
-        key_programs: Array.from(data.programs).slice(0, 20).map(p => ({ program_name: p })),
-        source_url:   AU_PAES_URL,
+        id:             `au-dept-${slug(agency)}`,
+        jurisdiction:   'AU',
+        name:           agency,
+        portfolio:      data.portfolio,
+        fiscal_year:    '2025-26',
+        total_budget:   data.totalBudget || null,
+        total_spent:    data.totalSpent  || null,
+        currency:       'AUD',
+        budget_note:    'PAES 2025-26 program expenses (AUD thousands; total_spent = 2024-25 actuals)',
+        key_programs:   Array.from(data.programs).slice(0, 20).map(p => ({ program_name: p })),
+        employee_count: empCounts[normName(agency)] ?? null,
+        source_url:     AU_PAES_URL,
       });
     }
 
@@ -446,6 +564,76 @@ async function fetchAUDepartmentBudgets() {
     console.warn(`[dept-budgets:AU] Error: ${err.message}`);
     return 0;
   }
+}
+
+// ─── Employee count helpers ───────────────────────────────────────────────────
+
+// US: OMB Historical Table 16.1 — FTE by major agency (thousands).
+// Returns { toptier_code: headcount } for agencies that appear individually.
+// HHS/Education/SSA are grouped together in the source, so they are omitted.
+const US_OMB_FTE_URL = 'https://www.whitehouse.gov/wp-content/uploads/2026/04/hist16z1_fy2027.xlsx';
+async function fetchUSEmployeeCounts() {
+  try {
+    const resp    = await axios.get(US_OMB_FTE_URL, { timeout: 30000, responseType: 'arraybuffer', headers: { 'User-Agent': 'Mozilla/5.0' } });
+    const entries = extractZipEntriesFromCD(Buffer.from(resp.data));
+    const strings = parseSharedStrings(entries['xl/sharedStrings.xml'] || '');
+    const rows    = parseSheet(entries['xl/worksheets/sheet1.xml'] || '', strings);
+    // Find the most recent actual year row (col 0 is fiscal year, numeric)
+    const row = rows.slice().reverse().find(r => /^20\d{2}$/.test(String(r[0] || '').trim()));
+    if (!row) return {};
+    const k = 1000; // table values are in thousands
+    return {
+      '012': Math.round((safeNum(row[4])  || 0) * k),  // Agriculture
+      '097': Math.round((safeNum(row[2])  || 0) * k),  // Defense
+      '070': Math.round((safeNum(row[6])  || 0) * k),  // Homeland Security
+      '014': Math.round((safeNum(row[7])  || 0) * k),  // Interior
+      '015': Math.round((safeNum(row[8])  || 0) * k),  // Justice
+      '069': Math.round((safeNum(row[9])  || 0) * k),  // Transportation
+      '020': Math.round((safeNum(row[10]) || 0) * k),  // Treasury
+      '036': Math.round((safeNum(row[11]) || 0) * k),  // Veterans Affairs
+    };
+  } catch (e) { console.warn('[dept-budgets:US] employee counts error:', e.message); return {}; }
+}
+
+// UK: Civil Service Statistics 2024 ODS — table_20 headcount by grade by department.
+// Returns { parent_dept_normalised: headcount }
+const UK_CS_STATS_URL = 'https://assets.publishing.service.gov.uk/media/66e1631138493bbcd79f4706/Statistical_tables_-_Civil_Service_Statistics_2024.ods';
+async function fetchUKEmployeeCounts() {
+  try {
+    const resp = await axios.get(UK_CS_STATS_URL, { timeout: 60000, responseType: 'arraybuffer', headers: { 'User-Agent': 'Mozilla/5.0' } });
+    const rows = parseOdsTable(Buffer.from(resp.data), 'table_20');
+    const counts = {};
+    for (const r of rows) {
+      const org = String(r[1] || '').trim();
+      if (!org.toLowerCase().endsWith(' overall')) continue;
+      const dept = String(r[0] || '').trim();
+      if (!dept) continue;
+      // Columns 2-7 are headcount by grade (SCS, G6/7, SHO/HEO, EO, AA/AO, unreported)
+      let total = 0;
+      for (let c = 2; c <= 7; c++) { const n = safeNum(r[c]); if (n) total += n; }
+      if (total > 0) counts[normName(dept)] = total;
+    }
+    return counts;
+  } catch (e) { console.warn('[dept-budgets:UK] employee counts error:', e.message); return {}; }
+}
+
+// AU: APS Employment Data 31 December 2025 — Table 2, total staff by agency.
+// Returns { normalised_agency_name: headcount }
+const AU_APS_EMP_URL = 'https://data.gov.au/data/dataset/252e144b-b975-4cc7-b7d6-5a4397fc4761/resource/f28f5882-e067-4f95-b3f2-60cc2d9fc076/download/aps-employment-release-tables-31-december-2025.xlsx';
+async function fetchAUEmployeeCounts() {
+  try {
+    const resp  = await axios.get(AU_APS_EMP_URL, { timeout: 60000, responseType: 'arraybuffer', headers: { 'User-Agent': 'Mozilla/5.0' } });
+    const rows  = parseXlsxSheetByName(Buffer.from(resp.data), 'Table 2');
+    const counts = {};
+    for (const r of rows) {
+      const name = String(r[0] || '').trim();
+      // Skip sub-agencies (start with "- "), headers, and blank rows
+      if (!name || name.startsWith('-') || name.startsWith('Table') || name.startsWith('Agency') || name.startsWith('Note')) continue;
+      const total2025 = safeNum(r[6]); // col 6 = Total 2025
+      if (total2025 != null && total2025 > 0) counts[normName(name)] = total2025;
+    }
+    return counts;
+  } catch (e) { console.warn('[dept-budgets:AU] employee counts error:', e.message); return {}; }
 }
 
 // ─── Orchestrator ─────────────────────────────────────────────────────────────
