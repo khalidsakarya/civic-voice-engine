@@ -378,30 +378,45 @@ async function fetchCanadaDepartmentBudgets() {
 
 const US_AGENCIES_URL  = 'https://api.usaspending.gov/api/v2/references/toptier_agencies/?sort=budget_authority_amount&order=desc&limit=200';
 const US_BUD_RES_URL   = (code) => `https://api.usaspending.gov/api/v2/agency/${code}/budgetary_resources/`;
-const US_PROGRAMS_URL  = (code, fy) =>
-  `https://api.usaspending.gov/api/v2/agency/${code}/program_activity/?fiscal_year=${fy}&limit=5`;
+const US_CFDA_URL      = 'https://api.usaspending.gov/api/v2/search/spending_by_category/cfda/';
+// Grants.gov agency codes keyed by USASpending toptier_code.
+// Used to cross-reference open grant opportunities from grants.gov.
+const GRANTS_GOV_CODE  = {
+  '012': 'USDA', '013': 'DOC',  '014': 'DOI',  '015': 'USDOJ', '016': 'DOL',
+  '017': 'DOS',  '019': 'DOS',  '020': 'USDOT','021': 'DOD',   '024': 'OPM',
+  '068': 'EPA',  '069': 'DOT',  '070': 'DHS',  '075': 'HHS',   '080': 'NASA',
+  '086': 'HUD',  '089': 'DOE',  '091': 'ED',   '097': 'DOD',   '036': 'VA',
+};
 
 async function fetchUSDepartmentBudgets() {
   try {
-    const currentFY = 2025;
-    console.log('[dept-budgets:US] Fetching top-tier agency list + employee counts...');
-    const [agencyRes, empCounts] = await Promise.all([
+    const currentFY  = 2025;
+    const FY_START   = '2024-10-01';
+    const FY_END     = '2025-09-30';
+    const CONCUR     = 20;
+
+    console.log('[dept-budgets:US] Fetching agency list, employee counts, and grants.gov open counts...');
+    const [agencyRes, empCounts, grantsGovCounts] = await Promise.all([
       axios.get(US_AGENCIES_URL, { timeout: 30000 }),
       fetchUSEmployeeCounts(),
+      // Fetch grants.gov agency list once — returns pre-computed open opportunity counts per agency code
+      axios.post('https://apply07.grants.gov/grantsws/rest/opportunities/search/',
+        { rows: 1, oppStatuses: 'posted' }, { timeout: 20000 }
+      ).then(r => {
+        const map = {};
+        for (const a of r.data?.agencies || []) map[a.value] = a.count;
+        return map;
+      }).catch(() => ({})),
     ]);
+
     const agencies = agencyRes.data?.results || [];
     console.log(`[dept-budgets:US] Got ${agencies.length} agencies`);
 
-    // The list endpoint uses each agency's "active_fy" — agencies whose active_fy is 2026
-    // have no FY2026 data yet and show budget_authority_amount = 0.  For ALL agencies we
-    // use the per-agency /budgetary_resources/ endpoint to get accurate FY2025 figures.
-    // Run up to 20 requests in parallel to stay well within rate limits.
+    // ── Budgetary resources (per-agency FY2025) ────────────────────────────────
     console.log('[dept-budgets:US] Fetching per-agency budgetary resources for FY2025...');
-    const CONCURRENCY = 20;
-    const budgetMap   = {}; // code → { budget, obligated }
-    for (let i = 0; i < agencies.length; i += CONCURRENCY) {
-      const batch = agencies.slice(i, i + CONCURRENCY);
-      await Promise.all(batch.map(async agency => {
+    const budgetMap = {};
+    for (let i = 0; i < agencies.length; i += CONCUR) {
+      await Promise.all(agencies.slice(i, i + CONCUR).map(async agency => {
         try {
           const res = await axios.get(US_BUD_RES_URL(agency.toptier_code), { timeout: 20000 });
           const fy25 = (res.data?.agency_data_by_year || []).find(y => y.fiscal_year === currentFY);
@@ -413,42 +428,57 @@ async function fetchUSDepartmentBudgets() {
       }));
     }
 
-    console.log(`[dept-budgets:US] Budget data fetched — fetching programs for top 10...`);
+    // ── Top CFDA grant programs (FY2025, all grant award types) ───────────────
+    // Award type codes: 02=Block Grant, 03=Formula Grant, 04=Project Grant,
+    //                   05=Cooperative Agreement, 06=Direct Payment
+    console.log('[dept-budgets:US] Fetching top CFDA grant programs per agency...');
+    const grantsMap = {};
+    for (let i = 0; i < agencies.length; i += CONCUR) {
+      await Promise.all(agencies.slice(i, i + CONCUR).map(async agency => {
+        try {
+          const res = await axios.post(US_CFDA_URL, {
+            filters: {
+              award_type_codes: ['02', '03', '04', '05', '06'],
+              agencies: [{ type: 'awarding', tier: 'toptier', name: agency.agency_name }],
+              time_period: [{ start_date: FY_START, end_date: FY_END }],
+            },
+            limit: 10, page: 1,
+          }, { timeout: 20000 });
+          grantsMap[agency.toptier_code] = (res.data?.results || []).map(r => ({
+            program_name: r.name   || null,
+            cfda_number:  r.code   || null,
+            amount:       r.amount ?? null,
+          }));
+        } catch { grantsMap[agency.toptier_code] = []; }
+      }));
+    }
+
+    console.log('[dept-budgets:US] Building records...');
     const records = [];
-    for (let idx = 0; idx < agencies.length; idx++) {
-      const agency = agencies[idx];
-      const code   = agency.toptier_code;
-      const name   = agency.agency_name;
+    for (const agency of agencies) {
+      const code = agency.toptier_code;
+      const name = agency.agency_name;
       if (!code || !name) continue;
 
-      const bud = budgetMap[code] || {};
-
-      // Fetch top programs only for top 10 agencies (by budget) to limit API calls
-      let programs = [];
-      if (idx < 10) {
-        try {
-          const progRes = await axios.get(US_PROGRAMS_URL(code, currentFY), { timeout: 20000 });
-          programs = (progRes.data?.results || []).slice(0, 5).map(a => ({
-            program_name: a.program_activity_name || null,
-            obligations:  a.obligations?.total_budgetary_resources
-                       ?? (typeof a.obligations === 'number' ? a.obligations : null),
-          }));
-        } catch { /* program fetch is best-effort */ }
-      }
+      const bud     = budgetMap[code]  || {};
+      const grants  = grantsMap[code]  || [];
+      const ggCode  = GRANTS_GOV_CODE[code];
+      const openOps = ggCode != null ? (grantsGovCounts[ggCode] ?? null) : null;
 
       records.push({
-        id:             `us-dept-${slug(code + '-' + name)}`,
-        jurisdiction:   'US',
+        id:                         `us-dept-${slug(code + '-' + name)}`,
+        jurisdiction:               'US',
         name,
-        toptier_code:   code,
-        fiscal_year:    String(currentFY),
-        total_budget:   bud.budget,
-        total_spent:    bud.obligated,
-        currency:       'USD',
-        budget_note:    'USASpending.gov FY2025 — agency budgetary resources (mandatory + discretionary, USD)',
-        key_programs:   programs,
-        employee_count: empCounts[code] ?? null,
-        source_url:     `https://www.usaspending.gov/agency/${code}`,
+        toptier_code:               code,
+        fiscal_year:                String(currentFY),
+        total_budget:               bud.budget,
+        total_spent:                bud.obligated,
+        currency:                   'USD',
+        budget_note:                'USASpending.gov FY2025 — agency budgetary resources (mandatory + discretionary, USD)',
+        key_programs:               grants,
+        open_grant_opportunities:   openOps,
+        employee_count:             empCounts[code] ?? null,
+        source_url:                 `https://www.usaspending.gov/agency/${code}`,
       });
     }
 
