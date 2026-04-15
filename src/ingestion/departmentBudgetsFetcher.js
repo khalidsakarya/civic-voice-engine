@@ -376,34 +376,54 @@ async function fetchCanadaDepartmentBudgets() {
 
 // ─── United States — USASpending.gov ─────────────────────────────────────────
 
-const US_AGENCIES_URL = 'https://api.usaspending.gov/api/v2/references/toptier_agencies/?sort=budget_authority_amount&order=desc&limit=50';
-const US_PROGRAMS_URL = (code, fy) =>
+const US_AGENCIES_URL  = 'https://api.usaspending.gov/api/v2/references/toptier_agencies/?sort=budget_authority_amount&order=desc&limit=200';
+const US_BUD_RES_URL   = (code) => `https://api.usaspending.gov/api/v2/agency/${code}/budgetary_resources/`;
+const US_PROGRAMS_URL  = (code, fy) =>
   `https://api.usaspending.gov/api/v2/agency/${code}/program_activity/?fiscal_year=${fy}&limit=5`;
 
 async function fetchUSDepartmentBudgets() {
   try {
-    console.log('[dept-budgets:US] Fetching top-tier agencies from USASpending...');
+    const currentFY = 2025;
+    console.log('[dept-budgets:US] Fetching top-tier agency list + employee counts...');
     const [agencyRes, empCounts] = await Promise.all([
       axios.get(US_AGENCIES_URL, { timeout: 30000 }),
       fetchUSEmployeeCounts(),
     ]);
-    const agencies  = agencyRes.data?.results || [];
-    console.log(`[dept-budgets:US] Got ${agencies.length} agencies — fetching program activity for top 10...`);
+    const agencies = agencyRes.data?.results || [];
+    console.log(`[dept-budgets:US] Got ${agencies.length} agencies`);
 
-    const currentFY = 2025;
-    const records   = [];
+    // The list endpoint uses each agency's "active_fy" — agencies whose active_fy is 2026
+    // have no FY2026 data yet and show budget_authority_amount = 0.  For ALL agencies we
+    // use the per-agency /budgetary_resources/ endpoint to get accurate FY2025 figures.
+    // Run up to 20 requests in parallel to stay well within rate limits.
+    console.log('[dept-budgets:US] Fetching per-agency budgetary resources for FY2025...');
+    const CONCURRENCY = 20;
+    const budgetMap   = {}; // code → { budget, obligated }
+    for (let i = 0; i < agencies.length; i += CONCURRENCY) {
+      const batch = agencies.slice(i, i + CONCURRENCY);
+      await Promise.all(batch.map(async agency => {
+        try {
+          const res = await axios.get(US_BUD_RES_URL(agency.toptier_code), { timeout: 20000 });
+          const fy25 = (res.data?.agency_data_by_year || []).find(y => y.fiscal_year === currentFY);
+          budgetMap[agency.toptier_code] = {
+            budget:    fy25?.agency_budgetary_resources ?? null,
+            obligated: fy25?.agency_total_obligated     ?? null,
+          };
+        } catch { budgetMap[agency.toptier_code] = { budget: null, obligated: null }; }
+      }));
+    }
 
+    console.log(`[dept-budgets:US] Budget data fetched — fetching programs for top 10...`);
+    const records = [];
     for (let idx = 0; idx < agencies.length; idx++) {
       const agency = agencies[idx];
       const code   = agency.toptier_code;
       const name   = agency.agency_name;
       if (!code || !name) continue;
 
-      // Use aggregated values from the agencies list endpoint
-      const totalBudget = agency.budget_authority_amount ?? null;
-      const totalSpent  = agency.obligated_amount        ?? null;
+      const bud = budgetMap[code] || {};
 
-      // Fetch top programs only for top 10 agencies (by index) to limit API calls
+      // Fetch top programs only for top 10 agencies (by budget) to limit API calls
       let programs = [];
       if (idx < 10) {
         try {
@@ -422,10 +442,10 @@ async function fetchUSDepartmentBudgets() {
         name,
         toptier_code:   code,
         fiscal_year:    String(currentFY),
-        total_budget:   totalBudget,
-        total_spent:    totalSpent,
+        total_budget:   bud.budget,
+        total_spent:    bud.obligated,
         currency:       'USD',
-        budget_note:    'USASpending.gov — budget authority and obligations (USD)',
+        budget_note:    'USASpending.gov FY2025 — agency budgetary resources (mandatory + discretionary, USD)',
         key_programs:   programs,
         employee_count: empCounts[code] ?? null,
         source_url:     `https://www.usaspending.gov/agency/${code}`,
