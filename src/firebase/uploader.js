@@ -1686,6 +1686,23 @@ async function uploadForeignAid() {
   return count;
 }
 
+async function uploadGovernmentContracts() {
+  const dir = path.join(OUTPUT_ROOT, 'government_contracts');
+  const files = loadLatestFiles(dir);
+  const allRecords = [];
+  for (const file of files) {
+    const { records } = JSON.parse(fs.readFileSync(file));
+    allRecords.push(...records.map(withTimestamp));
+  }
+  if (allRecords.length === 0) {
+    console.log('[firebase] ⚠ government_contracts: no records found, skipping');
+    return 0;
+  }
+  const count = await batchWrite('government_contracts', allRecords);
+  console.log(`[firebase] ✓ government_contracts: ${count} documents written`);
+  return count;
+}
+
 function sanitizeId(id) {
   return String(id).replace(/\//g, '-').replace(/[^a-zA-Z0-9_\-]/g, '_').slice(0, 500);
 }
@@ -1734,4 +1751,5 @@ module.exports = {
   uploadElections,
   uploadDepartmentHeads,
   uploadForeignAid,
+  uploadGovernmentContracts,
 };
