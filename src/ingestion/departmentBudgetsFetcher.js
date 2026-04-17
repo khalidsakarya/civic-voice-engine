@@ -573,7 +573,7 @@ async function fetchAUDepartmentBudgets() {
 
     // Fields: Portfolio, Agency Name, Outcome, Program, Expense_type,
     //         Appropriation_type, 2024-25, 2025-26, 2026-27, 2027-28, 2028-29
-    // Amounts are in AUD thousands — aggregate by Agency Name
+    // Amounts are in AUD thousands — aggregate by Agency Name and Program
     const byAgency = {};
     for (const r of rows) {
       const agency    = r['Agency Name'] || '';
@@ -584,15 +584,31 @@ async function fetchAUDepartmentBudgets() {
       if (!agency) continue;
 
       if (!byAgency[agency]) {
-        byAgency[agency] = { portfolio, totalBudget: 0, totalSpent: 0, programs: new Set() };
+        byAgency[agency] = { portfolio, totalBudget: 0, totalSpent: 0, programMap: {} };
       }
       if (bud2526 != null) byAgency[agency].totalBudget += bud2526;
       if (act2425 != null) byAgency[agency].totalSpent  += act2425;
-      if (prog) byAgency[agency].programs.add(prog);
+      if (prog) {
+        if (!byAgency[agency].programMap[prog]) {
+          byAgency[agency].programMap[prog] = { budget: 0, spent: 0 };
+        }
+        if (bud2526 != null) byAgency[agency].programMap[prog].budget += bud2526;
+        if (act2425 != null) byAgency[agency].programMap[prog].spent  += act2425;
+      }
     }
 
     const records = [];
     for (const [agency, data] of Object.entries(byAgency)) {
+      // Sort programs by 2025-26 budget descending, keep top 20
+      const programs = Object.entries(data.programMap)
+        .sort((a, b) => b[1].budget - a[1].budget)
+        .slice(0, 20)
+        .map(([name, amt]) => ({
+          program_name: name,
+          amount:       amt.budget || null,   // 2025-26 budget (AUD thousands)
+          amount_spent: amt.spent  || null,   // 2024-25 actuals (AUD thousands)
+        }));
+
       records.push({
         id:             `au-dept-${slug(agency)}`,
         jurisdiction:   'AU',
@@ -603,7 +619,7 @@ async function fetchAUDepartmentBudgets() {
         total_spent:    data.totalSpent  || null,
         currency:       'AUD',
         budget_note:    'PAES 2025-26 program expenses (AUD thousands; total_spent = 2024-25 actuals)',
-        key_programs:   Array.from(data.programs).slice(0, 20).map(p => ({ program_name: p })),
+        key_programs:   programs,
         employee_count: empCounts[normName(agency)] ?? null,
         source_url:     AU_PAES_URL,
       });
