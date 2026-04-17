@@ -503,26 +503,48 @@ async function fetchUKDepartmentBudgets() {
     const buf  = Buffer.from(resp.data);
     console.log(`[dept-budgets:UK] Downloaded ${buf.length} bytes, parsing XLSX...`);
 
-    const rows = parseXlsx(buf);
-    if (!rows.length) {
+    // Parse 3 named sheets: RDEL (inc. depr.) = Table 1, CDEL = Table 3, Tax adjustment = Table 4
+    // Sheet names in workbook: "RDEL inc" → Resource DEL incl. depr. (£billion)
+    //                          "CDEL"     → Capital DEL (£billion)
+    //                          "Direct impact of tax changes" → Budget 2024 tax adjustment (£million)
+    const rdelRows = parseXlsxSheetByName(buf, 'RDEL inc');
+    if (!rdelRows.length) {
       console.warn('[dept-budgets:UK] XLSX parse returned no rows, skipping');
       return 0;
     }
 
+    // Helper: build dept_name → first numeric value map from a DEL sheet row set
+    const DEL_SKIP = /^total|^of which|^note|^source|^\d{4}|^department|^table|^£|^resource|^capital/i;
+    const buildDelMap = (rows) => {
+      const map = {};
+      for (const r of rows) {
+        const name = safeStr(r[1]);
+        if (!name || name.length < 3 || DEL_SKIP.test(name) || /^\s*$/.test(name)) continue;
+        for (let ci = 2; ci < Math.min((r.length || 0), 15); ci++) {
+          const n = safeNum(r[ci]);
+          if (n !== null && Math.abs(n) > 0) {
+            map[name.replace(/\d+$/, '').trim()] = n;
+            break;
+          }
+        }
+      }
+      return map;
+    };
+
+    const cdelRows   = parseXlsxSheetByName(buf, 'CDEL');
+    const taxAdjRows = parseXlsxSheetByName(buf, 'Direct impact of tax changes');
+    const rdelMap    = buildDelMap(rdelRows);    // £billion
+    const cdelMap    = buildDelMap(cdelRows);    // £billion
+    const taxMap     = buildDelMap(taxAdjRows);  // £million
+
     // The DEL tables have data starting in column B (index 1):
     //   col 1 = department name (shared string)
     //   col 2 = DEL allocation (£ billion)
-    // Rows 0-3 are title/header; data rows start from row 4.
     const records = [];
-    for (const r of rows) {
-      // Name is in column B (index 1), not A (index 0)
+    for (const r of rdelRows) {
       const name = safeStr(r[1]);
-      if (!name || name.length < 3) continue;
-      // Skip header/label/total rows
-      if (/^total|^of which|^note|^source|^\d{4}|^department|^table|^£|^resource del|^capital del/i.test(name)) continue;
-      if (/^\s*$/.test(name)) continue;
+      if (!name || name.length < 3 || DEL_SKIP.test(name) || /^\s*$/.test(name)) continue;
 
-      // Find the first numeric column value starting at col 2
       let totalBudget = null;
       for (let ci = 2; ci < Math.min((r.length || 0), 15); ci++) {
         const n = safeNum(r[ci]);
@@ -530,7 +552,33 @@ async function fetchUKDepartmentBudgets() {
       }
       if (totalBudget === null) continue;
 
-      const cleanName = name.replace(/\d+$/, '').trim(); // strip trailing footnote numbers
+      const cleanName = name.replace(/\d+$/, '').trim();
+
+      // Build key_programs from DEL components: Resource DEL, Capital DEL, tax adjustment
+      // Amounts are in £billion (matching total_budget units), except tax adjustment which is £million
+      const programs = [];
+      if (rdelMap[cleanName] != null) {
+        programs.push({
+          program_name: 'Resource DEL (day-to-day services & grants)',
+          amount: rdelMap[cleanName],
+          unit: '£billion',
+        });
+      }
+      if (cdelMap[cleanName] != null) {
+        programs.push({
+          program_name: 'Capital DEL (infrastructure & investment)',
+          amount: cdelMap[cleanName],
+          unit: '£billion',
+        });
+      }
+      if (taxMap[cleanName] != null && Math.abs(taxMap[cleanName]) > 0) {
+        programs.push({
+          program_name: 'Autumn Budget 2024 tax change adjustment',
+          amount: taxMap[cleanName],
+          unit: '£million',
+        });
+      }
+
       records.push({
         id:             `uk-dept-${slug(cleanName)}`,
         jurisdiction:   'UK',
@@ -539,8 +587,8 @@ async function fetchUKDepartmentBudgets() {
         total_budget:   totalBudget,
         total_spent:    null,
         currency:       'GBP',
-        budget_note:    'HM Treasury Main Supply Estimates 2025-26 — Departmental Expenditure Limit (DEL, £millions)',
-        key_programs:   [],
+        budget_note:    'HM Treasury Main Supply Estimates 2025-26 — Resource DEL (£billion); Capital DEL (£billion)',
+        key_programs:   programs,
         employee_count: empCounts[normName(cleanName)] ?? null,
         source_url:     'https://www.gov.uk/government/publications/main-supply-estimates-2025-to-2026',
       });
