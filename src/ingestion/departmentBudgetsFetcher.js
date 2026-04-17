@@ -273,7 +273,9 @@ function normName(s) {
 
 // ─── Canada — GC InfoBase CSVs (open.canada.ca CKAN) ─────────────────────────
 
-const CA_CKAN_PKG = 'a35cf382-690c-4221-a971-cf0fd189a46f';
+const CA_CKAN_PKG          = 'a35cf382-690c-4221-a971-cf0fd189a46f';
+// Proactive disclosure: transfer payments/grants to external recipients
+const CA_GRANTS_RESOURCE   = '1d15a62f-5656-49ad-8c88-f40ce689d831';
 
 async function fetchCanadaDepartmentBudgets() {
   try {
@@ -343,6 +345,42 @@ async function fetchCanadaDepartmentBudgets() {
       }
     }
 
+    // ── Proactive disclosure grants (top 200 by agreement_value) ────────────
+    // Resource 1d15a62f: fields owner_org_title, recipient_legal_name, prog_name_en, agreement_value
+    const caGrantsMap = {};  // { org: [{ recipient_name, program_name, amount }] }
+    try {
+      console.log('[dept-budgets:CA] Fetching proactive disclosure grants (top 200 by value)...');
+      const gRes = await axios.get('https://open.canada.ca/data/api/3/action/datastore_search', {
+        params: {
+          resource_id: CA_GRANTS_RESOURCE,
+          limit: 200,
+          sort: 'agreement_value desc',
+        },
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+          'Accept': 'application/json',
+          'Referer': 'https://open.canada.ca/',
+        },
+        timeout: 30000,
+      });
+      for (const row of gRes.data?.result?.records || []) {
+        const org = (row.owner_org_title || '').trim();
+        if (!org) continue;
+        if (!caGrantsMap[org]) caGrantsMap[org] = [];
+        if (caGrantsMap[org].length < 10) {
+          caGrantsMap[org].push({
+            recipient_name: (row.recipient_legal_name || '').trim() || null,
+            program_name:   (row.prog_name_en || '').trim()         || null,
+            amount:         safeNum(row.agreement_value),
+            currency:       'CAD',
+          });
+        }
+      }
+      console.log(`[dept-budgets:CA] Got grants for ${Object.keys(caGrantsMap).length} orgs`);
+    } catch (gErr) {
+      console.warn(`[dept-budgets:CA] Grants fetch error: ${gErr.message}`);
+    }
+
     // ── Merge ────────────────────────────────────────────────────────────────
     const orgs    = new Set([...Object.keys(estimatesMap), ...Object.keys(plansMap)]);
     const records = [];
@@ -357,14 +395,20 @@ async function fetchCanadaDepartmentBudgets() {
         id:             `ca-dept-${slug(org)}`,
         jurisdiction:   'CA',
         name:           org,
-        fiscal_year:    est?.fy || '2026-27',
-        total_budget:   est?.total ?? null,
-        total_spent:    totalSpent,
-        currency:       'CAD',
-        budget_note:    'GC InfoBase Estimates — authorities granted by Parliament (thousands CAD)',
-        key_programs:   programs,
-        employee_count: fteTotals ? Math.round(fteTotals.total) : null,
-        source_url:     `https://open.canada.ca/data/dataset/${CA_CKAN_PKG}`,
+        fiscal_year:       est?.fy || '2026-27',
+        total_budget:      est?.total ?? null,
+        total_spent:       totalSpent,
+        currency:          'CAD',
+        budget_note:       'GC InfoBase Estimates — authorities granted by Parliament (thousands CAD)',
+        key_programs:      programs,
+        grants_given:      caGrantsMap[org] || [],
+        internal_spending: programs.map(p => ({
+          category:     p.program_name,
+          amount:       p.planned_spending,
+          amount_spent: p.actual_spending,
+        })),
+        employee_count:    fteTotals ? Math.round(fteTotals.total) : null,
+        source_url:        `https://open.canada.ca/data/dataset/${CA_CKAN_PKG}`,
       });
     }
     return saveRecords('CA', records);
@@ -397,7 +441,7 @@ async function fetchUSDepartmentBudgets() {
 
     console.log('[dept-budgets:US] Fetching agency list, employee counts, and grants.gov open counts...');
     const [agencyRes, empCounts, grantsGovCounts] = await Promise.all([
-      axios.get(US_AGENCIES_URL, { timeout: 30000 }),
+      axios.get(US_AGENCIES_URL, { timeout: 60000 }),
       fetchUSEmployeeCounts(),
       // Fetch grants.gov agency list once — returns pre-computed open opportunity counts per agency code
       axios.post('https://apply07.grants.gov/grantsws/rest/opportunities/search/',
@@ -428,7 +472,7 @@ async function fetchUSDepartmentBudgets() {
       }));
     }
 
-    // ── Top CFDA grant programs (FY2025, all grant award types) ───────────────
+    // ── Top CFDA grant programs (FY2025) → grants_given ──────────────────────
     // Award type codes: 02=Block Grant, 03=Formula Grant, 04=Project Grant,
     //                   05=Cooperative Agreement, 06=Direct Payment
     console.log('[dept-budgets:US] Fetching top CFDA grant programs per agency...');
@@ -445,11 +489,31 @@ async function fetchUSDepartmentBudgets() {
             limit: 10, page: 1,
           }, { timeout: 20000 });
           grantsMap[agency.toptier_code] = (res.data?.results || []).map(r => ({
-            program_name: r.name   || null,
-            cfda_number:  r.code   || null,
-            amount:       r.amount ?? null,
+            program_name:   r.name   || null,
+            cfda_number:    r.code   || null,
+            amount:         r.amount ?? null,
+            recipient_name: null,  // CFDA is program-level, not per-recipient
           }));
         } catch { grantsMap[agency.toptier_code] = []; }
+      }));
+    }
+
+    // ── Object-class breakdown per agency (FY2025) → internal_spending ────────
+    // Excludes grant/transfer/insurance object classes — only operational spend
+    const GRANT_OC = /grants|subsidies|contributions|insurance claims|financial transfers|benefits for former/i;
+    console.log('[dept-budgets:US] Fetching object-class breakdown per agency...');
+    const ocMap = {};
+    const US_OC_URL = (code) => `https://api.usaspending.gov/api/v2/agency/${code}/object_class/?fiscal_year=${currentFY}&limit=20`;
+    for (let i = 0; i < agencies.length; i += CONCUR) {
+      await Promise.all(agencies.slice(i, i + CONCUR).map(async agency => {
+        try {
+          const res = await axios.get(US_OC_URL(agency.toptier_code), { timeout: 20000 });
+          ocMap[agency.toptier_code] = (res.data?.results || [])
+            .filter(oc => !GRANT_OC.test(oc.name))
+            .sort((a, b) => b.obligated_amount - a.obligated_amount)
+            .slice(0, 10)
+            .map(oc => ({ category: oc.name, amount: oc.obligated_amount }));
+        } catch { ocMap[agency.toptier_code] = []; }
       }));
     }
 
@@ -476,6 +540,8 @@ async function fetchUSDepartmentBudgets() {
         currency:                   'USD',
         budget_note:                'USASpending.gov FY2025 — agency budgetary resources (mandatory + discretionary, USD)',
         key_programs:               grants,
+        grants_given:               grants,
+        internal_spending:          ocMap[code] || [],
         open_grant_opportunities:   openOps,
         employee_count:             empCounts[code] ?? null,
         source_url:                 `https://www.usaspending.gov/agency/${code}`,
@@ -580,17 +646,19 @@ async function fetchUKDepartmentBudgets() {
       }
 
       records.push({
-        id:             `uk-dept-${slug(cleanName)}`,
-        jurisdiction:   'UK',
-        name:           cleanName,
-        fiscal_year:    '2025-26',
-        total_budget:   totalBudget,
-        total_spent:    null,
-        currency:       'GBP',
-        budget_note:    'HM Treasury Main Supply Estimates 2025-26 — Resource DEL (£billion); Capital DEL (£billion)',
-        key_programs:   programs,
-        employee_count: empCounts[normName(cleanName)] ?? null,
-        source_url:     'https://www.gov.uk/government/publications/main-supply-estimates-2025-to-2026',
+        id:               `uk-dept-${slug(cleanName)}`,
+        jurisdiction:     'UK',
+        name:             cleanName,
+        fiscal_year:      '2025-26',
+        total_budget:     totalBudget,
+        total_spent:      null,
+        currency:         'GBP',
+        budget_note:      'HM Treasury Main Supply Estimates 2025-26 — Resource DEL (£billion); Capital DEL (£billion)',
+        key_programs:     programs,
+        grants_given:     [],  // No machine-readable per-department grant recipient data available for UK
+        internal_spending: programs.map(p => ({ category: p.program_name, amount: p.amount, unit: p.unit })),
+        employee_count:   empCounts[normName(cleanName)] ?? null,
+        source_url:       'https://www.gov.uk/government/publications/main-supply-estimates-2025-to-2026',
       });
     }
 
@@ -621,55 +689,93 @@ async function fetchAUDepartmentBudgets() {
 
     // Fields: Portfolio, Agency Name, Outcome, Program, Expense_type,
     //         Appropriation_type, 2024-25, 2025-26, 2026-27, 2027-28, 2028-29
-    // Amounts are in AUD thousands — aggregate by Agency Name and Program
+    // Amounts are in AUD thousands.
+    // Expense_type: "Administered Expenses" / "Annual Administered Expenses" → grants_given (external)
+    //               "Departmental Expenses" → internal_spending (operational)
+    const ADMINISTERED_RE = /administered/i;
     const byAgency = {};
     for (const r of rows) {
-      const agency    = r['Agency Name'] || '';
-      const portfolio = r['Portfolio']   || null;
-      const prog      = r['Program']     || null;
-      const bud2526   = safeNum(r['2025-26']);
-      const act2425   = safeNum(r['2024-25']);
+      const agency      = r['Agency Name']  || '';
+      const portfolio   = r['Portfolio']    || null;
+      const prog        = r['Program']      || null;
+      const expType     = r['Expense_type'] || '';
+      const bud2526     = safeNum(r['2025-26']);
+      const act2425     = safeNum(r['2024-25']);
       if (!agency) continue;
 
       if (!byAgency[agency]) {
-        byAgency[agency] = { portfolio, totalBudget: 0, totalSpent: 0, programMap: {} };
+        byAgency[agency] = {
+          portfolio,
+          totalBudget:    0,
+          totalSpent:     0,
+          programMap:     {},   // all programs (for key_programs)
+          administeredMap:{},   // grants_given (administered/external)
+          departmentalMap:{},   // internal_spending (departmental/operational)
+        };
       }
       if (bud2526 != null) byAgency[agency].totalBudget += bud2526;
       if (act2425 != null) byAgency[agency].totalSpent  += act2425;
+
+      const isAdministered = ADMINISTERED_RE.test(expType);
+      const targetMap = isAdministered ? byAgency[agency].administeredMap : byAgency[agency].departmentalMap;
+
       if (prog) {
         if (!byAgency[agency].programMap[prog]) {
           byAgency[agency].programMap[prog] = { budget: 0, spent: 0 };
         }
         if (bud2526 != null) byAgency[agency].programMap[prog].budget += bud2526;
         if (act2425 != null) byAgency[agency].programMap[prog].spent  += act2425;
+
+        if (!targetMap[prog]) targetMap[prog] = { budget: 0, spent: 0 };
+        if (bud2526 != null) targetMap[prog].budget += bud2526;
+        if (act2425 != null) targetMap[prog].spent  += act2425;
       }
     }
 
-    const records = [];
-    for (const [agency, data] of Object.entries(byAgency)) {
-      // Sort programs by 2025-26 budget descending, keep top 20
-      const programs = Object.entries(data.programMap)
+    const mapToPrograms = (map, limit = 20) =>
+      Object.entries(map)
         .sort((a, b) => b[1].budget - a[1].budget)
-        .slice(0, 20)
+        .slice(0, limit)
         .map(([name, amt]) => ({
           program_name: name,
-          amount:       amt.budget || null,   // 2025-26 budget (AUD thousands)
-          amount_spent: amt.spent  || null,   // 2024-25 actuals (AUD thousands)
+          amount:       amt.budget || null,
+          amount_spent: amt.spent  || null,
         }));
 
+    const records = [];
+    for (const [agency, data] of Object.entries(byAgency)) {
+      const programs = mapToPrograms(data.programMap, 20);
+
+      // grants_given: administered programs (transfer payments to external recipients)
+      const grantsGiven = mapToPrograms(data.administeredMap, 15).map(p => ({
+        program_name:   p.program_name,
+        recipient_name: null,  // PAES is program-level, not per-recipient
+        amount:         p.amount,
+        amount_spent:   p.amount_spent,
+      }));
+
+      // internal_spending: departmental expenses (operational costs by program)
+      const internalSpending = mapToPrograms(data.departmentalMap, 15).map(p => ({
+        category:     p.program_name,
+        amount:       p.amount,
+        amount_spent: p.amount_spent,
+      }));
+
       records.push({
-        id:             `au-dept-${slug(agency)}`,
-        jurisdiction:   'AU',
-        name:           agency,
-        portfolio:      data.portfolio,
-        fiscal_year:    '2025-26',
-        total_budget:   data.totalBudget || null,
-        total_spent:    data.totalSpent  || null,
-        currency:       'AUD',
-        budget_note:    'PAES 2025-26 program expenses (AUD thousands; total_spent = 2024-25 actuals)',
-        key_programs:   programs,
-        employee_count: empCounts[normName(agency)] ?? null,
-        source_url:     AU_PAES_URL,
+        id:               `au-dept-${slug(agency)}`,
+        jurisdiction:     'AU',
+        name:             agency,
+        portfolio:        data.portfolio,
+        fiscal_year:      '2025-26',
+        total_budget:     data.totalBudget || null,
+        total_spent:      data.totalSpent  || null,
+        currency:         'AUD',
+        budget_note:      'PAES 2025-26 program expenses (AUD thousands; total_spent = 2024-25 actuals)',
+        key_programs:     programs,
+        grants_given:     grantsGiven,
+        internal_spending: internalSpending,
+        employee_count:   empCounts[normName(agency)] ?? null,
+        source_url:       AU_PAES_URL,
       });
     }
 
