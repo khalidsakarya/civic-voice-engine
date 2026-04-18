@@ -15,7 +15,12 @@ function slug(s) {
 }
 function safeNum(v) {
   if (v == null || v === '') return null;
-  const n = Number(String(v).replace(/[$£€,\s]/g, ''));
+  // Strip all non-numeric chars except decimal point and minus sign.
+  // This handles garbled currency symbols (£ mangled by latin-1/UTF-8 mismatch),
+  // parenthesis-negative format, and any currency prefix.
+  const s = String(v).replace(/[^0-9.\-]/g, '');
+  if (!s || s === '-' || s === '.') return null;
+  const n = Number(s);
   return isNaN(n) ? null : n;
 }
 function saveOutput(jur, records) {
@@ -366,124 +371,272 @@ async function fetchUSExpenses() {
 }
 
 // ─── United Kingdom ───────────────────────────────────────────────────────────
-// Sources:
-//   • data.gov.uk CKAN — departmental spend over £25,000 CSVs (top 12 depts)
-//   • IPSA — Independent Parliamentary Standards Authority MP expenses API
+// Sources: gov.uk transparency spending-over-£25,000 publications for 9 core
+//          Whitehall departments, fetched directly via GOV.UK Content API.
+//
+// Each department publishes monthly CSV (or ODS for MoD) files at:
+//   https://assets.publishing.service.gov.uk/...
+// The Content API for each publication lists all attachments; we take the most
+// recent one by sorting on the date embedded in the filename.
 
-const TRAVEL_RE_UK  = /travel|transport|flights?|accommodation|hotel/i;
-const HOSP_RE_UK    = /hospitality|entertainment|catering|refreshments|meals/i;
+// Note: 'accommodat' excluded — matches building/estate management in HMCTS/MoJ spend.
+// Supplier column excluded from matching — vendor names (e.g. "Network Rail") are not expense categories.
+// 'accommodat' uses negative lookahead to exclude building/facilities management context
+// (MoJ rows like "ACCOMMODATION & BLDNG MANAGEMENT - Building Fees" are estates, not travel).
+const UK_TRAVEL_RE = /\btravel\b|subsistence|\bt\s*&\s*s\b|hotel\b|flight\b|airfare|overseas.{0,10}air\b|uk.{0,10}air\b|train\b|taxi\b|mileage|car\s*hire|vehicle\s*hire|accommodat(?!.{0,40}(building|management|bldng|estate|facilit|property|premises|repair|services))/i;
+const UK_HOSP_RE   = /\bhospitality\b|\bentertainment\b|\bcatering\b|representational|refreshment/i;
+
+// Target departments with their GOV.UK org slug and known publication/collection
+// path. pubSlug = single publication with all monthly CSVs as attachments.
+// collection = collection listing individual month publications.
+const UK_DEPTS = [
+  { name: 'HM Treasury',                                org: 'hm-treasury',                              searchQ: '"25,000"' },
+  { name: 'Home Office',                                org: 'home-office',                               pubSlug: 'home-office-spending-over-25000-2025' },
+  { name: 'Cabinet Office',                             org: 'cabinet-office',                            pubSlug: 'cabinet-office-spend-data' },
+  { name: 'Ministry of Defence',                        org: 'ministry-of-defence',                       pubSlug: 'mod-spending-over-25000-january-to-december-2026' },
+  { name: 'Department of Health and Social Care',       org: 'department-of-health-and-social-care',      searchQ: '"25,000"' },
+  { name: 'Department for Education',                   org: 'department-for-education',                  pubSlug: 'dfe-and-executive-agency-spend-over-25000-2025-to-2026' },
+  { name: 'Ministry of Justice',                        org: 'ministry-of-justice',                       pubSlug: 'hm-courts-and-tribunals-service-spending-over-25000-2025' },
+  { name: 'Department for Transport',                   org: 'department-for-transport',                  collection: 'dft-departmental-spending-over-25000' },
+  { name: 'Foreign Commonwealth and Development Office', org: 'foreign-commonwealth-development-office',  altOrg: 'foreign-commonwealth-office', searchQ: '"25,000"' },
+];
+
+const GOV_UK_API   = 'https://www.gov.uk/api/content';
+const GOV_UK_SRCH  = 'https://www.gov.uk/api/search.json';
+const GOV_HEADERS  = { 'User-Agent': 'CivicVoiceBot/1.0', 'Accept': 'application/json' };
+
+// Extract YYYY-MM from an attachment filename for date-based sorting.
+// Handles "month-year" (February_2026, oct-25) and "year-month" (2025_nov, 2026-02) patterns.
+// Requires year to be in 20xx range to avoid false matches from numbers like "25000".
+function attDate(filename) {
+  const fn = (filename || '').toLowerCase();
+  const mon3 = { jan:'01',feb:'02',mar:'03',apr:'04',may:'05',jun:'06',jul:'07',aug:'08',sep:'09',oct:'10',nov:'11',dec:'12' };
+  const monFull = { january:'01',february:'02',march:'03',april:'04',may:'05',june:'06',
+                    july:'07',august:'08',september:'09',october:'10',november:'11',december:'12' };
+  let m;
+  // Full month name before year: february_2026, october-2025
+  m = fn.match(/(january|february|march|april|may|june|july|august|september|october|november|december)[^a-z0-9]*(20\d{2})/);
+  if (m) return `${m[2]}-${monFull[m[1]]}`;
+  // Full month name after year: 2025_october
+  m = fn.match(/\b(20\d{2})[^a-z]*(january|february|march|april|may|june|july|august|september|october|november|december)\b/);
+  if (m) return `${m[1]}-${monFull[m[2]]}`;
+  // Short month before year: nov_25, jan-2026, feb_26
+  m = fn.match(/\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[^a-z0-9]*(\d{2,4})\b/);
+  if (m) { const yr = m[2].length === 2 ? '20' + m[2] : m[2]; if (yr >= '2015' && yr <= '2035') return `${yr}-${mon3[m[1]]}`; }
+  // Year before short month: 2025_nov, 2026-jan
+  m = fn.match(/(20\d{2})[^a-z]*(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)(?![a-z])/);
+  if (m) return `${m[1]}-${mon3[m[2]]}`;
+  // Year before 2-digit month number: 2025-11, 2026_02, 2025_12
+  m = fn.match(/(20\d{2})[^0-9](0[1-9]|1[0-2])(?![0-9])/);
+  if (m) return `${m[1]}-${m[2]}`;
+  return '0000-00';
+}
+
+// Get the most recent CSV or ODS attachment from a publication's content API JSON.
+function pickLatestAttachment(pubJson) {
+  const atts = (pubJson?.details?.attachments || [])
+    .filter(a => /csv|ods|xlsx/i.test(a.content_type || '') || /\.csv$|\.ods$|\.xlsx$/i.test(a.filename || ''))
+    .filter(a => a.url);
+  if (!atts.length) return null;
+  atts.sort((a, b) => attDate(b.filename).localeCompare(attDate(a.filename)));
+  return atts[0];
+}
+
+// Fetch the most recent attachment URL + metadata for a given department config.
+async function ukFindLatestAttachment(dept) {
+  // Option A: known publication slug
+  if (dept.pubSlug) {
+    const r = await axios.get(`${GOV_UK_API}/government/publications/${dept.pubSlug}`, { headers: GOV_HEADERS, timeout: 15000 });
+    const att = pickLatestAttachment(r.data);
+    if (att) return att;
+  }
+
+  // Option B: known collection slug → pick most recent doc → find attachment
+  if (dept.collection) {
+    const colRes = await axios.get(`${GOV_UK_API}/government/collections/${dept.collection}`, { headers: GOV_HEADERS, timeout: 15000 });
+    const docs = (colRes.data?.links?.documents || []).sort((a, b) => (b.public_updated_at || '').localeCompare(a.public_updated_at || ''));
+    for (const doc of docs.slice(0, 5)) {
+      if (!doc.api_url) continue;
+      const docRes = await axios.get(doc.api_url, { headers: GOV_HEADERS, timeout: 15000 });
+      const att = pickLatestAttachment(docRes.data);
+      if (att) return att;
+    }
+  }
+
+  // Option C: GOV.UK search for most recent spending-over-25k publication
+  for (const org of [dept.org, dept.altOrg].filter(Boolean)) {
+    const srch = await axios.get(GOV_UK_SRCH, {
+      params: { filter_organisations: org, q: dept.searchQ || '"25,000"', count: 10, order: '-public_timestamp', 'fields[]': 'title,link,public_timestamp' },
+      headers: GOV_HEADERS, timeout: 15000,
+    });
+    const hits = (srch.data?.results || []).filter(h => /spend/i.test(h.title || '') && /25/.test(h.title || ''));
+    for (const hit of hits.slice(0, 3)) {
+      const pubRes = await axios.get(`${GOV_UK_API}${hit.link}`, { headers: GOV_HEADERS, timeout: 15000 }).catch(() => null);
+      if (!pubRes) continue;
+      const att = pickLatestAttachment(pubRes.data);
+      if (att) return { ...att, _pubTitle: hit.title, _pubDate: hit.public_timestamp };
+    }
+  }
+
+  return null;
+}
+
+// Parse ODS content.xml — extract first table as row arrays.
+function parseOdsFirstTable(buf) {
+  const entries = extractZipEntries(buf);
+  const xml     = entries['content.xml'] || '';
+  const tStart  = xml.indexOf('<table:table ');
+  const tEnd    = xml.indexOf('</table:table>', tStart);
+  if (tStart === -1 || tEnd === -1) return [];
+  const tXml = xml.substring(tStart, tEnd + 14);
+  const rows = [];
+  const rowRe = /<table:table-row[^>]*>([\s\S]*?)<\/table:table-row>/g;
+  let rowM;
+  while ((rowM = rowRe.exec(tXml)) !== null) {
+    const cells = []; const rowXml = rowM[1];
+    const cellRe = /<table:table-cell([^>]*?)(\/>|>([\s\S]*?)<\/table:table-cell>)/g;
+    let cellM;
+    while ((cellM = cellRe.exec(rowXml)) !== null) {
+      const attrs = cellM[1]; const content = cellM[3] || '';
+      const repM  = attrs.match(/table:number-columns-repeated="(\d+)"/);
+      const rep   = repM ? parseInt(repM[1]) : 1;
+      if (rep > 50) break;
+      const valM  = attrs.match(/office:value="([^"]+)"/);
+      const txtM  = content.match(/<text:p[^>]*>([^<]*)<\/text:p>/);
+      const val   = valM ? parseFloat(valM[1]) : (txtM ? txtM[1].replace(/&amp;/g,'&') : '');
+      for (let r = 0; r < Math.min(rep, 20); r++) cells.push(val);
+    }
+    if (cells.some(c => c !== '' && c !== 0)) rows.push(cells);
+  }
+  return rows;
+}
+
+// Aggregate travel + hospitality from an array of row objects with heuristic column matching.
+// UK spend-over-£25k CSVs have BOTH "Expense type" (broad: resource/capital) and
+// "Expense area" (specific: travel, hospitality, etc.).  We must check all category
+// columns together so we catch the detail regardless of which dept uses which column.
+function aggregateUKSpendRows(objs) {
+  if (!objs.length) return { travel: null, hosp: null, total: null, source: null };
+
+  const first = objs[0];
+  const keys  = Object.keys(first);
+
+  // Amount column — covers: 'Amount', 'Total' (MoD ODS), ' £ ' (DfT CSV), 'Invoice.GBP.Line.AMT' (FCDO)
+  const amtKey = ['Amount', 'TRANSACTION AMOUNT', 'Transaction Amount', 'amount', 'Total', 'total']
+    .find(k => first[k] != null)
+    || keys.find(k => {
+      const kl = k.trim().toLowerCase();
+      return (/amount|value|\btotal\b|\bamt\b/.test(kl) || /^\s*[£$€]\s*$/.test(k))
+          && !/desc|type|area|supp|date|entity|family|ref/.test(kl);
+    });
+
+  // Collect ALL category-like column names; we'll concatenate their values per row.
+  const catKeys = keys.filter(k =>
+    /expense.*(type|area)|type|categ|desc|area|subject|purpose|expenditure/i.test(k) &&
+    !/amount|supplier|date|entity|family|number|ref|transaction/i.test(k)
+  );
+  let travel = 0, hosp = 0, total = 0;
+  for (const row of objs) {
+    const amt = safeNum(amtKey ? row[amtKey] : null);
+    if (!amt) continue;
+    const abs = Math.abs(amt);
+    total += abs;
+    // Build description from all category columns (NOT supplier — vendor names cause false positives)
+    const parts = catKeys.map(k => row[k] || '');
+    const desc = parts.join(' ') || Object.values(row).join(' ');
+    if (UK_TRAVEL_RE.test(desc)) travel += abs;
+    if (UK_HOSP_RE.test(desc))   hosp   += abs;
+  }
+  return {
+    travel: travel ? Math.round(travel) : null,
+    hosp:   hosp   ? Math.round(hosp)   : null,
+    total:  total  ? Math.round(total)  : null,
+  };
+}
 
 async function fetchUKExpenses() {
   try {
+    console.log('[dept-expenses:UK] Fetching spending-over-£25k data for 9 core Whitehall departments...');
     const records = [];
 
-    // ── 1. data.gov.uk CKAN: dept spend-over-£25k transparency CSVs ────────
-    console.log('[dept-expenses:UK] Searching data.gov.uk for dept spend transparency CSVs...');
-    const searchRes = await axios.get('https://data.gov.uk/api/3/action/package_search', {
-      params: {
-        q:    'government spending over 25000 transparency',
-        fq:   'res_format:CSV',
-        rows:  20,
-        sort: 'metadata_modified desc',
-      },
-      timeout: 20000,
-    }).catch(() => ({ data: { result: { results: [] } } }));
-
-    const pkgs = searchRes.data?.result?.results || [];
-    console.log(`[dept-expenses:UK] Found ${pkgs.length} dept spend datasets — processing up to 12...`);
-
-    for (const pkg of pkgs.slice(0, 12)) {
-      const csvRes = (pkg.resources || []).find(r =>
-        /csv/i.test(r.format || '') && r.url && !/sample/i.test(r.name || '')
-      );
-      if (!csvRes) continue;
-
+    for (const dept of UK_DEPTS) {
       try {
-        const resp = await axios.get(csvRes.url, {
-          timeout: 15000, responseType: 'text',
-          headers: { 'User-Agent': 'Mozilla/5.0' },
-          validateStatus: s => s < 400,
-        });
-        const objs = csvToObjects(resp.data || '');
-        if (!objs.length) continue;
-
-        let travelTotal = 0, hospTotal = 0, totalSpend = 0;
-        const flagged = [];
-
-        // UK transparency CSVs vary in column names; find amount column heuristically
-        const amtKey = ['Amount', 'amount', 'Expense Total', 'Rounded Amount', 'Total Value',
-          'Invoiced Amount', 'Gross Amount'].find(k => objs[0]?.[k] != null)
-          || Object.keys(objs[0] || {}).find(k => /amount|value|spend/i.test(k));
-        const descKey = ['Description', 'Expense Area', 'Category', 'Project Description',
-          'Expenditure type', 'Expenditure Category'].find(k => objs[0]?.[k] != null)
-          || Object.keys(objs[0] || {}).find(k => /desc|categ|type|area/i.test(k));
-
-        for (const row of objs) {
-          const amt  = safeNum(amtKey ? row[amtKey] : null);
-          const desc = descKey ? (row[descKey] || '') : Object.values(row).join(' ');
-          if (!amt) continue;
-          const absAmt = Math.abs(amt);
-          totalSpend += absAmt;
-          if (TRAVEL_RE_UK.test(desc))  travelTotal += absAmt;
-          if (HOSP_RE_UK.test(desc))    hospTotal   += absAmt;
-        }
-
-        const deptName = pkg.organization?.title || pkg.title || 'Unknown Department';
-        if (totalSpend > 0) {
+        const att = await ukFindLatestAttachment(dept);
+        if (!att) {
+          console.log(`[dept-expenses:UK] ${dept.name}: no attachment found`);
           records.push({
-            id:                   `uk-expense-${slug(deptName)}`,
+            id:                   `uk-expense-${slug(dept.name)}`,
             jurisdiction:         'UK',
-            department:           deptName,
+            department:           dept.name,
             fiscal_year:          '2024-25',
-            total_spend_over_25k: Math.round(totalSpend),
-            travel_expenses:      travelTotal   ? Math.round(travelTotal)   : null,
-            hospitality_expenses: hospTotal      ? Math.round(hospTotal)     : null,
+            travel_expenses:      null,
+            hospitality_expenses: null,
             credit_card_spending: null,
-            flagged_items:        flagged,
+            flagged_items:        [],
             currency:             'GBP',
-            source_url:           csvRes.url,
+            source_url:           `https://www.gov.uk/government/organisations/${dept.org}`,
+            note:                 'No spend-over-£25k publication accessible via GOV.UK Content API',
           });
+          continue;
         }
-      } catch { /* skip this dept's CSV */ }
-    }
 
-    // ── 2. IPSA MP Expenses (Parliamentary branch) ──────────────────────────
-    console.log('[dept-expenses:UK] Fetching IPSA MP expenses...');
-    try {
-      const ipsaRes = await axios.get('https://www.theipsa.org.uk/api/expense/Claims', {
-        params: { take: 500, scheme: 'IPSA MP Expenses 2024/25' },
-        timeout: 20000,
-        headers: { 'Accept': 'application/json', 'User-Agent': 'Mozilla/5.0' },
-      });
-      const claims = Array.isArray(ipsaRes.data) ? ipsaRes.data
-                   : (ipsaRes.data?.claims || ipsaRes.data?.items || []);
-      if (claims.length > 0) {
-        let travelTotal = 0, hospTotal = 0;
-        for (const c of claims) {
-          const amt  = safeNum(c.amount || c.value) || 0;
-          const cat  = (c.category || c.expenseType || '').toLowerCase();
-          if (TRAVEL_RE_UK.test(cat))  travelTotal += amt;
-          if (HOSP_RE_UK.test(cat))    hospTotal   += amt;
+        console.log(`[dept-expenses:UK] ${dept.name}: downloading ${att.filename?.slice(0,60)}...`);
+        const resp = await axios.get(att.url, {
+          timeout: 30000, responseType: 'arraybuffer',
+          headers: { 'User-Agent': 'CivicVoiceBot/1.0' },
+        });
+        const buf = Buffer.from(resp.data);
+
+        let objs = [];
+        if (/ods/i.test(att.content_type || '') || /\.ods$/i.test(att.filename || '')) {
+          // ODS: parse first table, convert to objects using first row as headers
+          const rows = parseOdsFirstTable(buf);
+          if (rows.length > 1) {
+            const headers = rows[0].map(h => String(h || '').trim());
+            objs = rows.slice(1).map(r => {
+              const obj = {}; headers.forEach((h, i) => { obj[h] = String(r[i] ?? '').trim(); }); return obj;
+            });
+          }
+        } else {
+          // CSV or XLSX-as-CSV — try UTF-8 first, fall back to latin1 for legacy gov.uk files
+          // (some older CSVs are windows-1252/latin-1 encoded; £ byte 0xA3 is invalid in UTF-8)
+          let text = buf.toString('utf8');
+          if (text.includes('\uFFFD')) text = buf.toString('latin1');
+          objs = csvToObjects(text);
         }
+
+        const { travel, hosp, total } = aggregateUKSpendRows(objs);
+        console.log(`[dept-expenses:UK] ${dept.name}: ${objs.length} rows → travel=£${travel?.toLocaleString()||'null'} hosp=£${hosp?.toLocaleString()||'null'}`);
+
         records.push({
-          id:                   'uk-expense-ipsa-parliament',
+          id:                   `uk-expense-${slug(dept.name)}`,
           jurisdiction:         'UK',
-          department:           'Parliament — MP Expenses (IPSA)',
+          department:           dept.name,
           fiscal_year:          '2024-25',
-          travel_expenses:      travelTotal   ? Math.round(travelTotal)   : null,
-          hospitality_expenses: hospTotal     ? Math.round(hospTotal)     : null,
+          total_spend_over_25k: total,
+          travel_expenses:      travel,
+          hospitality_expenses: hosp,
           credit_card_spending: null,
           flagged_items:        [],
           currency:             'GBP',
-          source_url:           'https://www.theipsa.org.uk/mp-costs/the-scheme/',
+          source_url:           att.url,
+          data_file:            att.filename,
         });
-        console.log(`[dept-expenses:UK] IPSA: ${claims.length} claims parsed`);
+      } catch (e) {
+        console.warn(`[dept-expenses:UK] ${dept.name}: ${e.message}`);
+        records.push({
+          id:           `uk-expense-${slug(dept.name)}`,
+          jurisdiction: 'UK',
+          department:   dept.name,
+          fiscal_year:  '2024-25',
+          travel_expenses: null, hospitality_expenses: null, credit_card_spending: null,
+          flagged_items: [], currency: 'GBP',
+          source_url: `https://www.gov.uk/government/organisations/${dept.org}`,
+        });
       }
-    } catch (e) {
-      console.log(`[dept-expenses:UK] IPSA API: ${e.message}`);
     }
 
-    console.log(`[dept-expenses:UK] ${records.length} dept records total`);
+    console.log(`[dept-expenses:UK] ${records.length} dept records`);
     return saveOutput('UK', records);
   } catch (err) {
     console.warn(`[dept-expenses:UK] Error: ${err.message}`);

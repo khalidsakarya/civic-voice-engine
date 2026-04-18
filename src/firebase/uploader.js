@@ -1704,6 +1704,7 @@ async function uploadGovernmentContracts() {
 }
 
 async function uploadDepartmentExpenses() {
+  const db = getDb();
   const dir = path.join(OUTPUT_ROOT, 'department_expenses');
   const files = loadLatestFiles(dir);
   const allRecords = [];
@@ -1715,6 +1716,24 @@ async function uploadDepartmentExpenses() {
     console.log('[firebase] ⚠ department_expenses: no records found, skipping');
     return 0;
   }
+
+  // Delete stale records for any jurisdiction present in the new upload, so outdated
+  // documents (e.g. old NHS trust records from a prior run) are replaced cleanly.
+  const jurisdictions = [...new Set(allRecords.map(r => r.jurisdiction).filter(Boolean))];
+  for (const jur of jurisdictions) {
+    const snap = await db.collection('department_expenses').where('jurisdiction', '==', jur).get();
+    if (!snap.empty) {
+      const newIds = new Set(allRecords.filter(r => r.jurisdiction === jur).map(r => sanitizeId(r.id)));
+      const stale  = snap.docs.filter(d => !newIds.has(d.id));
+      if (stale.length > 0) {
+        const delBatch = db.batch();
+        stale.forEach(d => delBatch.delete(d.ref));
+        await delBatch.commit();
+        console.log(`[firebase] 🗑 department_expenses/${jur}: deleted ${stale.length} stale docs`);
+      }
+    }
+  }
+
   const count = await batchWrite('department_expenses', allRecords);
   console.log(`[firebase] ✓ department_expenses: ${count} documents written`);
   return count;
