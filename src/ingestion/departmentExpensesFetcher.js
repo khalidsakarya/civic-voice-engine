@@ -234,7 +234,7 @@ async function fetchCAExpenses() {
 
 const US_AGENCIES_URL = 'https://api.usaspending.gov/api/v2/references/toptier_agencies/?sort=budget_authority_amount&order=desc&limit=200';
 const TRAVEL_OC_RE    = /travel|transportation of persons/i;
-const ENTERTAIN_OC_RE = /entertain|conference|training|advisory and assistance/i;
+const ENTERTAIN_OC_RE = /^(entertainment|catering|hospitality|representational)/i;
 
 async function fetchUSExpenses() {
   try {
