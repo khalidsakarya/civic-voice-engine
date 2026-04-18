@@ -27,6 +27,7 @@ const { fetchAllElections, hasUpcomingElection } = require('./ingestion/election
 const { fetchAllDeptHeads }                       = require('./ingestion/departmentHeadsFetcher');
 const { fetchAllForeignAid }                      = require('./ingestion/foreignAidFetcher');
 const { fetchAllGovernmentContracts }             = require('./ingestion/governmentContractsFetcher');
+const { fetchAllDepartmentExpenses }              = require('./ingestion/departmentExpensesFetcher');
 const { processGovStats }           = require('./processing/govStatsProcessor');
 const {
   uploadBills, uploadVotes, uploadMembers, uploadEfficiencyScores,
@@ -36,7 +37,7 @@ const {
   uploadFlaggedExpenses, uploadWasteReports, uploadLeaderExpenses, uploadLeaderboard,
   uploadExpenseAnomalies, uploadBudgetData, uploadAnalyticsData, uploadGovStats,
   uploadTargetedStats, uploadDepartmentBudgets, uploadPromiseTracker, uploadElections,
-  uploadDepartmentHeads, uploadForeignAid, uploadGovernmentContracts,
+  uploadDepartmentHeads, uploadForeignAid, uploadGovernmentContracts, uploadDepartmentExpenses,
 } = require('./firebase/uploader');
 const { writeSchedulerStatus } = require('./firebase/statusWriter');
 const fs = require('fs');
@@ -284,58 +285,64 @@ async function runMonthlyCycle() {
   console.log('='.repeat(60));
 
   let efficiencyCount = 0, budgetCount = 0, auditCount = 0, performanceCount = 0, targetedCount = 0;
-  let deptBudgetsCount = 0, foreignAidCount = 0, govContractsCount = 0;
+  let deptBudgetsCount = 0, foreignAidCount = 0, govContractsCount = 0, deptExpensesCount = 0;
 
   try {
-    console.log('\n[scheduler:monthly] Step 1/12 — Ingesting budget, audit & performance data...');
+    console.log('\n[scheduler:monthly] Step 1/14 — Ingesting budget, audit & performance data...');
     await runPipeline(monthlySources);
 
-    console.log('\n[scheduler:monthly] Step 2/12 — Fetching real audit findings (CA OAG / US GAO / UK NAO / AU ANAO)...');
+    console.log('\n[scheduler:monthly] Step 2/14 — Fetching real audit findings (CA OAG / US GAO / UK NAO / AU ANAO)...');
     await fetchAllAuditFindings();
 
-    console.log('\n[scheduler:monthly] Step 3/12 — Recalculating efficiency scores...');
+    console.log('\n[scheduler:monthly] Step 3/14 — Recalculating efficiency scores...');
     delete require.cache[require.resolve('./scoreEfficiency')];
     require('./scoreEfficiency');
 
-    console.log('\n[scheduler:monthly] Step 4/12 — Uploading efficiency/budget/audit to Firebase...');
+    console.log('\n[scheduler:monthly] Step 4/14 — Uploading efficiency/budget/audit to Firebase...');
     efficiencyCount  = await uploadMonthlyEfficiencyScores();
     budgetCount      = await uploadBudgetSpending();
     auditCount       = await uploadAuditFindings();
     performanceCount = await uploadDepartmentPerformance();
 
-    console.log('\n[scheduler:monthly] Step 5/12 — Fetching live targeted stats (CA / US / UK / AU)...');
+    console.log('\n[scheduler:monthly] Step 5/14 — Fetching live targeted stats (CA / US / UK / AU)...');
     await runTargetedFetch();
 
-    console.log('\n[scheduler:monthly] Step 6/12 — Uploading targeted stats to social_stats...');
+    console.log('\n[scheduler:monthly] Step 6/14 — Uploading targeted stats to social_stats...');
     targetedCount = await uploadTargetedStats();
 
-    console.log('\n[scheduler:monthly] Step 7/12 — Fetching department budgets (CA / US / UK / AU)...');
+    console.log('\n[scheduler:monthly] Step 7/14 — Fetching department budgets (CA / US / UK / AU)...');
     await fetchAllDepartmentBudgets();
 
-    console.log('\n[scheduler:monthly] Step 8/12 — Uploading department budgets to Firebase...');
+    console.log('\n[scheduler:monthly] Step 8/14 — Uploading department budgets to Firebase...');
     deptBudgetsCount = await uploadDepartmentBudgets();
 
-    console.log('\n[scheduler:monthly] Step 9/12 — Fetching foreign aid / ODA data (CA / US / UK / AU)...');
+    console.log('\n[scheduler:monthly] Step 9/14 — Fetching foreign aid / ODA data (CA / US / UK / AU)...');
     await fetchAllForeignAid();
 
-    console.log('\n[scheduler:monthly] Step 10/12 — Uploading foreign aid to Firebase...');
+    console.log('\n[scheduler:monthly] Step 10/14 — Uploading foreign aid to Firebase...');
     foreignAidCount = await uploadForeignAid();
 
-    console.log('\n[scheduler:monthly] Step 11/12 — Fetching government contracts (CA / US / UK / AU)...');
+    console.log('\n[scheduler:monthly] Step 11/14 — Fetching government contracts (CA / US / UK / AU)...');
     await fetchAllGovernmentContracts();
 
-    console.log('\n[scheduler:monthly] Step 12/12 — Uploading government contracts to Firebase...');
+    console.log('\n[scheduler:monthly] Step 12/14 — Uploading government contracts to Firebase...');
     govContractsCount = await uploadGovernmentContracts();
 
-    const total = efficiencyCount + budgetCount + auditCount + performanceCount + targetedCount + deptBudgetsCount + foreignAidCount + govContractsCount;
+    console.log('\n[scheduler:monthly] Step 13/14 — Fetching department expenses (CA / US / UK / AU)...');
+    await fetchAllDepartmentExpenses();
+
+    console.log('\n[scheduler:monthly] Step 14/14 — Uploading department expenses to Firebase...');
+    deptExpensesCount = await uploadDepartmentExpenses();
+
+    const total = efficiencyCount + budgetCount + auditCount + performanceCount + targetedCount + deptBudgetsCount + foreignAidCount + govContractsCount + deptExpensesCount;
     console.log(`\n[scheduler:monthly] ✓ Done at ${new Date().toISOString()}`);
     console.log(`[scheduler:monthly]   efficiency_scores_monthly: ${efficiencyCount}  budget_spending: ${budgetCount}  audit_findings: ${auditCount}  department_performance: ${performanceCount}`);
-    console.log(`[scheduler:monthly]   social_stats (targeted): ${targetedCount}  department_budgets: ${deptBudgetsCount}  foreign_aid: ${foreignAidCount}  government_contracts: ${govContractsCount}`);
+    console.log(`[scheduler:monthly]   social_stats (targeted): ${targetedCount}  department_budgets: ${deptBudgetsCount}  foreign_aid: ${foreignAidCount}  government_contracts: ${govContractsCount}  department_expenses: ${deptExpensesCount}`);
 
     await writeSchedulerStatus('monthly', {
       startedAt,
       status:         'success',
-      collections:    ['efficiency_scores_monthly', 'budget_spending', 'audit_findings', 'department_performance', 'social_stats', 'department_budgets', 'foreign_aid', 'government_contracts'],
+      collections:    ['efficiency_scores_monthly', 'budget_spending', 'audit_findings', 'department_performance', 'social_stats', 'department_budgets', 'foreign_aid', 'government_contracts', 'department_expenses'],
       recordsUpdated: total,
       recordsSkipped: 0,
       aiCallsMade:    0,
@@ -347,8 +354,8 @@ async function runMonthlyCycle() {
     await writeSchedulerStatus('monthly', {
       startedAt,
       status:         'error',
-      collections:    ['efficiency_scores_monthly', 'budget_spending', 'audit_findings', 'department_performance', 'social_stats', 'department_budgets', 'foreign_aid', 'government_contracts'],
-      recordsUpdated: efficiencyCount + budgetCount + auditCount + performanceCount + targetedCount + deptBudgetsCount + foreignAidCount + govContractsCount,
+      collections:    ['efficiency_scores_monthly', 'budget_spending', 'audit_findings', 'department_performance', 'social_stats', 'department_budgets', 'foreign_aid', 'government_contracts', 'department_expenses'],
+      recordsUpdated: efficiencyCount + budgetCount + auditCount + performanceCount + targetedCount + deptBudgetsCount + foreignAidCount + govContractsCount + deptExpensesCount,
       recordsSkipped: 0,
       aiCallsMade:    0,
       cronSchedule:   MONTHLY_SCHEDULE,
