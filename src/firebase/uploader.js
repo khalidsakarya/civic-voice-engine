@@ -1800,7 +1800,17 @@ async function uploadSupremeCourtJustices() {
 async function uploadSupremeCourtCases() {
   const db  = getDb();
   const dir = path.join(OUTPUT_ROOT, 'supreme_court');
-  const files = loadLatestFiles(dir).filter(f => path.basename(f).startsWith('cases_'));
+
+  // Prefer the latest enriched file (contains AI-generated fields for all jurisdictions).
+  // Fall back to per-jurisdiction raw files if no enriched file exists.
+  const allInDir = fs.existsSync(dir) ? fs.readdirSync(dir).filter(f => f.endsWith('.json')).sort() : [];
+  const enrichedFiles = allInDir.filter(f => f.startsWith('cases_enriched_'));
+  let files;
+  if (enrichedFiles.length > 0) {
+    files = [path.join(dir, enrichedFiles[enrichedFiles.length - 1])];
+  } else {
+    files = loadLatestFiles(dir).filter(f => path.basename(f).startsWith('cases_'));
+  }
 
   if (files.length === 0) {
     console.log('[firebase] ⚠ supreme_court_cases: no files found, skipping');
