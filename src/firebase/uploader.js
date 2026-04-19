@@ -1761,6 +1761,78 @@ async function uploadDepartmentExpenses() {
   return count;
 }
 
+async function uploadSupremeCourtJustices() {
+  const db  = getDb();
+  const dir = path.join(OUTPUT_ROOT, 'supreme_court');
+  const files = loadLatestFiles(dir).filter(f => path.basename(f).startsWith('justices_'));
+
+  if (files.length === 0) {
+    console.log('[firebase] ⚠ supreme_court_justices: no files found, skipping');
+    return 0;
+  }
+
+  const allRecords = [];
+  for (const file of files) {
+    const { records } = JSON.parse(fs.readFileSync(file));
+    allRecords.push(...records.map(withTimestamp));
+  }
+
+  const jurisdictions = [...new Set(allRecords.map(r => r.jurisdiction).filter(Boolean))];
+  for (const jur of jurisdictions) {
+    const snap = await db.collection('supreme_court_justices').where('jurisdiction', '==', jur).get();
+    if (!snap.empty) {
+      const newIds = new Set(allRecords.filter(r => r.jurisdiction === jur).map(r => sanitizeId(r.id)));
+      const stale  = snap.docs.filter(d => !newIds.has(d.id));
+      if (stale.length > 0) {
+        const delBatch = db.batch();
+        stale.forEach(d => delBatch.delete(d.ref));
+        await delBatch.commit();
+        console.log(`[firebase] 🗑 supreme_court_justices/${jur}: deleted ${stale.length} stale docs`);
+      }
+    }
+  }
+
+  const count = await batchWrite('supreme_court_justices', allRecords);
+  console.log(`[firebase] ✓ supreme_court_justices: ${count} documents written`);
+  return count;
+}
+
+async function uploadSupremeCourtCases() {
+  const db  = getDb();
+  const dir = path.join(OUTPUT_ROOT, 'supreme_court');
+  const files = loadLatestFiles(dir).filter(f => path.basename(f).startsWith('cases_'));
+
+  if (files.length === 0) {
+    console.log('[firebase] ⚠ supreme_court_cases: no files found, skipping');
+    return 0;
+  }
+
+  const allRecords = [];
+  for (const file of files) {
+    const { records } = JSON.parse(fs.readFileSync(file));
+    allRecords.push(...records.map(withTimestamp));
+  }
+
+  const jurisdictions = [...new Set(allRecords.map(r => r.jurisdiction).filter(Boolean))];
+  for (const jur of jurisdictions) {
+    const snap = await db.collection('supreme_court_cases').where('jurisdiction', '==', jur).get();
+    if (!snap.empty) {
+      const newIds = new Set(allRecords.filter(r => r.jurisdiction === jur).map(r => sanitizeId(r.id)));
+      const stale  = snap.docs.filter(d => !newIds.has(d.id));
+      if (stale.length > 0) {
+        const delBatch = db.batch();
+        stale.forEach(d => delBatch.delete(d.ref));
+        await delBatch.commit();
+        console.log(`[firebase] 🗑 supreme_court_cases/${jur}: deleted ${stale.length} stale docs`);
+      }
+    }
+  }
+
+  const count = await batchWrite('supreme_court_cases', allRecords);
+  console.log(`[firebase] ✓ supreme_court_cases: ${count} documents written`);
+  return count;
+}
+
 function sanitizeId(id) {
   return String(id).replace(/\//g, '-').replace(/[^a-zA-Z0-9_\-]/g, '_').slice(0, 500);
 }
@@ -1811,4 +1883,6 @@ module.exports = {
   uploadForeignAid,
   uploadGovernmentContracts,
   uploadDepartmentExpenses,
+  uploadSupremeCourtJustices,
+  uploadSupremeCourtCases,
 };

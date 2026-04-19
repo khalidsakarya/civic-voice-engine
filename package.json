@@ -89,6 +89,9 @@
     "ingest:foreign-aid": "node src/ingestion/foreignAidFetcher.js",
     "upload:foreign-aid": "node src/firebase/uploadForeignAid.js",
     "pipeline:foreign-aid": "npm run ingest:foreign-aid && npm run upload:foreign-aid",
+    "ingest:supreme-court": "node src/ingestion/supremeCourtFetcher.js",
+    "upload:supreme-court": "node src/firebase/uploadSupremeCourt.js",
+    "pipeline:supreme-court": "npm run ingest:supreme-court && npm run upload:supreme-court",
     "pipeline:full": "npm run start && npm run process:bills && npm run score:efficiency && npm run upload:firebase",
     "test": "node --experimental-vm-modules node_modules/.bin/jest"
   },
