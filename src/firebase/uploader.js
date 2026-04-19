@@ -1687,6 +1687,7 @@ async function uploadForeignAid() {
 }
 
 async function uploadGovernmentContracts() {
+  const db  = getDb();
   const dir = path.join(OUTPUT_ROOT, 'government_contracts');
   const files = loadLatestFiles(dir);
   const allRecords = [];
@@ -1698,6 +1699,27 @@ async function uploadGovernmentContracts() {
     console.log('[firebase] ⚠ government_contracts: no records found, skipping');
     return 0;
   }
+
+  // Delete stale records for any jurisdiction present in the new upload so
+  // outdated contracts (e.g. 2007-2016 CA records) are replaced cleanly.
+  const jurisdictions = [...new Set(allRecords.map(r => r.jurisdiction).filter(Boolean))];
+  for (const jur of jurisdictions) {
+    const snap = await db.collection('government_contracts').where('jurisdiction', '==', jur).get();
+    if (!snap.empty) {
+      const newIds = new Set(allRecords.filter(r => r.jurisdiction === jur).map(r => sanitizeId(r.id)));
+      const stale  = snap.docs.filter(d => !newIds.has(d.id));
+      if (stale.length > 0) {
+        // Delete in batches of 400
+        for (let i = 0; i < stale.length; i += 400) {
+          const delBatch = db.batch();
+          stale.slice(i, i + 400).forEach(d => delBatch.delete(d.ref));
+          await delBatch.commit();
+        }
+        console.log(`[firebase] 🗑 government_contracts/${jur}: deleted ${stale.length} stale docs`);
+      }
+    }
+  }
+
   const count = await batchWrite('government_contracts', allRecords);
   console.log(`[firebase] ✓ government_contracts: ${count} documents written`);
   return count;

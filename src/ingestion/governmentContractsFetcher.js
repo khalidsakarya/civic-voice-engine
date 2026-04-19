@@ -19,35 +19,79 @@ function saveOutput(jur, records) {
 // ─── Canada ──────────────────────────────────────────────────────────────────
 // Source: open.canada.ca proactive disclosure contracts (CKAN datastore)
 // Resource: fac950c0-00d5-4ec1-a4d3-9cbebf98a305
+//
+// Strategy: contract_value is stored as TEXT in CKAN so numeric sort is not
+// available server-side. Fetch 2000 records per reporting period (2023 onwards),
+// aggregate all ~20k rows client-side, sort by parseFloat(contract_value) desc,
+// take top 500. Periods fetched in parallel for speed.
+// Headers require X-Requested-With + Chrome UA to pass the open.canada.ca WAF.
+
+const CA_CONTRACTS_RESOURCE = 'fac950c0-00d5-4ec1-a4d3-9cbebf98a305';
+const CA_CONTRACTS_HEADERS  = {
+  'User-Agent':      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+  'Accept':          'application/json, text/javascript, */*; q=0.01',
+  'Accept-Language': 'en-US,en;q=0.9',
+  'Referer':         'https://open.canada.ca/en/proactive-disclosure/contracts',
+  'X-Requested-With':'XMLHttpRequest',
+};
+// All fiscal reporting periods from 2023 onwards (alphabetical string comparison works here)
+const CA_RECENT_PERIODS = [
+  '2025-2026-Q2', '2025-2026-Q1',
+  '2024-2025-Q4', '2024-2025-Q3', '2024-2025-Q2', '2024-2025-Q1',
+  '2023-2024-Q4', '2023-2024-Q3', '2023-2024-Q2', '2023-2024-Q1',
+];
 
 async function fetchCanadaContracts() {
-  const url = 'https://open.canada.ca/data/api/3/action/datastore_search';
-  const params = {
-    resource_id: 'fac950c0-00d5-4ec1-a4d3-9cbebf98a305',
-    limit: 200,
-    sort: 'contract_value desc',
-  };
-  const headers = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
-    'Accept': 'application/json',
-    'Referer': 'https://open.canada.ca/',
-  };
+  console.log('[contracts:CA] Fetching proactive disclosure contracts 2023+ (10 periods × 2000 rows)...');
 
-  console.log('[contracts:CA] Fetching top 200 contracts by value...');
-  const r = await axios.get(url, { params, headers, timeout: 30000 });
-  const rows = r.data?.result?.records || [];
+  // Fetch all periods concurrently
+  const periodResults = await Promise.allSettled(
+    CA_RECENT_PERIODS.map(period =>
+      axios.get('https://open.canada.ca/data/api/3/action/datastore_search', {
+        params: {
+          resource_id: CA_CONTRACTS_RESOURCE,
+          limit: 2000,
+          filters: JSON.stringify({ reporting_period: period }),
+        },
+        headers: CA_CONTRACTS_HEADERS,
+        timeout: 30000,
+      }).then(r => ({ period, rows: r.data?.result?.records || [] }))
+        .catch(e => { console.warn(`[contracts:CA]   ${period} failed: ${e.message}`); return { period, rows: [] }; })
+    )
+  );
 
-  const records = rows.map(row => ({
-    id: `CA-${row.reference_number || row._id}`,
-    jurisdiction: 'CA',
-    contractor_name: (row.vendor_name || '').trim() || null,
-    department: (row.owner_org_title || '').trim() || null,
-    value: parseFloat(row.contract_value) || null,
-    currency: 'CAD',
-    purpose: (row.description_en || '').trim() || null,
-    date_awarded: row.contract_date || null,
-    source_url: 'https://open.canada.ca/en/proactive-disclosure/contracts',
-  })).filter(r => r.contractor_name || r.value);
+  const allRows = [];
+  for (const res of periodResults) {
+    if (res.status === 'fulfilled') {
+      const { period, rows } = res.value;
+      console.log(`[contracts:CA]   ${period}: ${rows.length} rows`);
+      allRows.push(...rows);
+    }
+  }
+
+  console.log(`[contracts:CA] ${allRows.length} raw rows — sorting by contract_value desc, taking top 500...`);
+
+  // Sort client-side by numeric contract_value, take top 500
+  const sorted = allRows
+    .filter(row => parseFloat(row.contract_value) > 0)
+    .sort((a, b) => parseFloat(b.contract_value) - parseFloat(a.contract_value))
+    .slice(0, 500);
+
+  const records = sorted.map(row => ({
+    id:                    `CA-${row.reference_number || row._id}`,
+    jurisdiction:          'CA',
+    contractor_name:       (row.vendor_name || '').trim() || null,
+    department:            (row.owner_org_title || row.buyer_name || '').trim() || null,
+    value:                 parseFloat(row.contract_value) || null,
+    original_value:        parseFloat(row.original_value) || null,
+    currency:              'CAD',
+    purpose:               (row.description_en || '').trim() || null,
+    date_awarded:          row.contract_date || null,
+    reporting_period:      row.reporting_period || null,
+    solicitation_procedure: row.solicitation_procedure || null,
+    instrument_type:       row.instrument_type || null,
+    source_url:            'https://open.canada.ca/en/proactive-disclosure/contracts',
+  }));
 
   saveOutput('CA', records);
   return records.length;
