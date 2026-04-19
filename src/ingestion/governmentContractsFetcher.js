@@ -175,8 +175,7 @@ async function fetchUSContracts() {
   const today = new Date().toISOString().slice(0, 10);
   const US_FIELDS = [
     'Award ID', 'Recipient Name', 'Awarding Agency', 'Award Amount',
-    'Description', 'Action Date',
-    'Period of Performance Start Date', 'Period of Performance Current End Date',
+    'Description', 'Start Date', 'End Date', 'Base Obligation Date',
     'Contract Award Type',
   ];
   const allResults = [];
@@ -207,16 +206,18 @@ async function fetchUSContracts() {
   });
   console.log(`[contracts:US] ${deduped.length} rows after dedup`);
 
-  // Filter: keep if awarded 2022+ OR still active
+  // Filter: keep if start date 2022+ OR still active
   const filtered = deduped.filter(row => {
-    const awarded = row['Action Date'] || '';
-    const endDate = row['Period of Performance Current End Date'] || '';
-    return awarded >= '2022-01-01' || !endDate || endDate >= today;
+    const startDate = (row['Start Date'] || '').slice(0, 10);
+    const endDate   = (row['End Date']   || '').slice(0, 10);
+    return startDate >= '2022-01-01' || !endDate || endDate >= today;
   });
   console.log(`[contracts:US] ${filtered.length} rows after 2022+ / active filter`);
 
   const records = filtered.map(row => {
-    const endDate = row['Period of Performance Current End Date'] || null;
+    const endDate   = (row['End Date']              || '').slice(0, 10) || null;
+    const startDate = (row['Start Date']            || '').slice(0, 10) || null;
+    const baseDate  = (row['Base Obligation Date']  || '').slice(0, 10) || null;
     return {
       id:                    `US-${(row['Award ID'] || '').replace(/\s+/g, '_') || Math.random().toString(36).slice(2)}`,
       jurisdiction:          'US',
@@ -227,8 +228,8 @@ async function fetchUSContracts() {
       currency:              'USD',
       status:                usStatus(endDate),
       purpose:               (row['Description'] || '').trim() || null,
-      date_awarded:          row['Action Date'] || null,
-      contract_period_start: row['Period of Performance Start Date'] || null,
+      date_awarded:          baseDate,
+      contract_period_start: startDate,
       end_date:              endDate,
       award_type:            (row['Contract Award Type'] || '').trim() || null,
       source_url:            'https://www.usaspending.gov/search/?hash=contracts',
