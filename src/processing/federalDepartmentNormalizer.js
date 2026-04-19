@@ -69,14 +69,43 @@ function matchScore(a, b) {
   return intersection / union;
 }
 
-/** Find the best match from a list by normalised name similarity. */
-function bestMatch(targetName, candidates, nameKey, threshold = 0.5) {
-  let best = null, bestScore = 0;
-  for (const c of candidates) {
-    const score = matchScore(targetName, c[nameKey]);
-    if (score > bestScore) { bestScore = score; best = c; }
+/**
+ * Global optimal assignment — avoids the greedy-iteration bug where a
+ * short-named head (e.g. "Health") matches the first budget whose name
+ * contains that token (e.g. "Canadian Centre for Occupational Health and
+ * Safety") before the correct target ("Department of Health") is reached.
+ *
+ * Algorithm:
+ *   1. Score every (budget, candidate) pair.
+ *   2. Sort all pairs by score descending.
+ *   3. Assign greedily: take each pair only if neither side is already used.
+ *
+ * Returns a Map<budgetIndex, candidateObject> for matched pairs.
+ */
+function optimalAssign(budgets, candidates, budgetNameFn, candidateNameFn, threshold) {
+  const pairs = [];
+  budgets.forEach((b, bi) => {
+    candidates.forEach((c, ci) => {
+      const score = matchScore(budgetNameFn(b), candidateNameFn(c));
+      if (score >= threshold) pairs.push({ bi, ci, score });
+    });
+  });
+  pairs.sort((a, b) => b.score - a.score);
+
+  const usedBudgets    = new Set();
+  const usedCandidates = new Set();
+  const budgetMatch    = new Map(); // bi → candidate object
+  const candidateUsed  = new Set(); // ci values consumed
+
+  for (const { bi, ci, score } of pairs) {
+    if (usedBudgets.has(bi) || usedCandidates.has(ci)) continue;
+    usedBudgets.add(bi);
+    usedCandidates.add(ci);
+    budgetMatch.set(bi, candidates[ci]);
+    candidateUsed.add(ci);
   }
-  return bestScore >= threshold ? best : null;
+
+  return { budgetMatch, candidateUsed };
 }
 
 // ─── Load all docs from a collection ─────────────────────────────────────────
@@ -180,32 +209,40 @@ function normalizeJurisdiction(jurisdiction, budgets, heads, expenses) {
   const jHeads    = heads.filter(d => d.jurisdiction   === jurisdiction);
   const jExpenses = expenses.filter(d => d.jurisdiction === jurisdiction);
 
-  const usedHeads    = new Set();
-  const usedExpenses = new Set();
-  const records      = [];
+  const THRESHOLD = 0.45;
 
-  // 1. Start from each budget doc
-  for (const budget of jBudgets) {
-    const head    = bestMatch(budget.name, jHeads.filter((_,i) => !usedHeads.has(i)),    'department', 0.45);
-    const expense = bestMatch(budget.name, jExpenses.filter((_,i) => !usedExpenses.has(i)), 'department', 0.45);
+  // Step 1: optimal global assignment — budgets ↔ heads
+  const { budgetMatch: budgetToHead, candidateUsed: headsUsed } =
+    optimalAssign(jBudgets, jHeads, b => b.name, h => h.department, THRESHOLD);
 
-    if (head)    usedHeads.add(jHeads.indexOf(head));
-    if (expense) usedExpenses.add(jExpenses.indexOf(expense));
+  // Step 2: optimal global assignment — budgets ↔ expenses
+  const { budgetMatch: budgetToExp, candidateUsed: expUsed } =
+    optimalAssign(jBudgets, jExpenses, b => b.name, e => e.department, THRESHOLD);
 
+  const records = [];
+
+  // Step 3: build one record per budget
+  jBudgets.forEach((budget, bi) => {
+    const head    = budgetToHead.get(bi) || null;
+    const expense = budgetToExp.get(bi)  || null;
     records.push(buildRecord(budget, head, expense, jurisdiction));
-  }
+  });
 
-  // 2. Heads that didn't match any budget
-  jHeads.forEach((head, i) => {
-    if (usedHeads.has(i)) return;
-    const expense = bestMatch(head.department, jExpenses.filter((_,j) => !usedExpenses.has(j)), 'department', 0.45);
-    if (expense) usedExpenses.add(jExpenses.indexOf(expense));
+  // Step 4: heads that didn't match any budget — pair with unmatched expenses
+  const unmatchedHeads    = jHeads.filter((_, i) => !headsUsed.has(i));
+  const unmatchedExpenses = jExpenses.filter((_, i) => !expUsed.has(i));
+
+  const { budgetMatch: headToExp, candidateUsed: expUsed2 } =
+    optimalAssign(unmatchedHeads, unmatchedExpenses, h => h.department, e => e.department, THRESHOLD);
+
+  unmatchedHeads.forEach((head, hi) => {
+    const expense = headToExp.get(hi) || null;
     records.push(buildRecord(null, head, expense, jurisdiction));
   });
 
-  // 3. Expenses that didn't match anything
-  jExpenses.forEach((expense, i) => {
-    if (usedExpenses.has(i)) return;
+  // Step 5: expenses matched to neither budget nor head
+  unmatchedExpenses.forEach((expense, i) => {
+    if (expUsed2.has(i)) return;
     records.push(buildRecord(null, null, expense, jurisdiction));
   });
 
