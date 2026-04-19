@@ -93,6 +93,7 @@
     "process:supreme-court": "node src/processing/supremeCourtProcessor.js",
     "upload:supreme-court": "node src/firebase/uploadSupremeCourt.js",
     "pipeline:supreme-court": "npm run ingest:supreme-court && npm run process:supreme-court && npm run upload:supreme-court",
+    "normalize:federal-departments": "node src/processing/federalDepartmentNormalizer.js",
     "pipeline:full": "npm run start && npm run process:bills && npm run score:efficiency && npm run upload:firebase",
     "test": "node --experimental-vm-modules node_modules/.bin/jest"
   },
