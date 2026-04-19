@@ -20,11 +20,25 @@ function saveOutput(jur, records) {
 // Source: open.canada.ca proactive disclosure contracts (CKAN datastore)
 // Resource: fac950c0-00d5-4ec1-a4d3-9cbebf98a305
 //
-// Strategy: contract_value is stored as TEXT in CKAN so numeric sort is not
-// available server-side. Fetch 2000 records per reporting period (2023 onwards),
-// aggregate all ~20k rows client-side, sort by parseFloat(contract_value) desc,
-// take top 500. Periods fetched in parallel for speed.
+// Strategy: contract_value is TEXT in CKAN — numeric sort unavailable server-side.
+// Fetch 2000 rows per reporting period (2023 onwards) in parallel, aggregate
+// client-side, apply status filter, sort by value desc, keep top 500.
 // Headers require X-Requested-With + Chrome UA to pass the open.canada.ca WAF.
+//
+// Filter logic (per user requirement):
+//   KEEP  if contract_date (award date) >= 2023-01-01          → recently awarded
+//   KEEP  if delivery_date (end date) >= today or no end date   → still active
+//   DROP  if contract_date < 2023-01-01 AND delivery_date < today  → pre-2023 + expired
+//
+// Status:
+//   "Active"    — delivery_date in future or absent
+//   "Completed" — delivery_date has passed
+//
+// contract_value_type:
+//   Per the open.canada.ca proactive disclosure schema, contract_value is always
+//   the TOTAL value of the contract (including all amendments). It is not an
+//   annual figure. For Standing Offers / Supply Arrangements (instrument SO/SOSA)
+//   with value 0, the ceiling is not committed — actual spend is via call-ups.
 
 const CA_CONTRACTS_RESOURCE = 'fac950c0-00d5-4ec1-a4d3-9cbebf98a305';
 const CA_CONTRACTS_HEADERS  = {
@@ -34,15 +48,29 @@ const CA_CONTRACTS_HEADERS  = {
   'Referer':         'https://open.canada.ca/en/proactive-disclosure/contracts',
   'X-Requested-With':'XMLHttpRequest',
 };
-// All fiscal reporting periods from 2023 onwards (alphabetical string comparison works here)
+// All fiscal reporting periods from 2023 onwards
 const CA_RECENT_PERIODS = [
   '2025-2026-Q2', '2025-2026-Q1',
   '2024-2025-Q4', '2024-2025-Q3', '2024-2025-Q2', '2024-2025-Q1',
   '2023-2024-Q4', '2023-2024-Q3', '2023-2024-Q2', '2023-2024-Q1',
 ];
 
+function caContractStatus(deliveryDate) {
+  if (!deliveryDate || deliveryDate.trim() === '') return 'Active';
+  return new Date(deliveryDate) >= new Date() ? 'Active' : 'Completed';
+}
+
+function caContractValueType(instrumentType) {
+  const t = (instrumentType || '').toUpperCase();
+  if (t === 'SO' || t === 'SOSA' || t === 'SA') {
+    return 'ceiling (standing offer — actual spend via call-ups)';
+  }
+  return 'total';
+}
+
 async function fetchCanadaContracts() {
-  console.log('[contracts:CA] Fetching proactive disclosure contracts 2023+ (10 periods × 2000 rows)...');
+  const today = new Date().toISOString().slice(0, 10);
+  console.log(`[contracts:CA] Fetching proactive disclosure contracts 2023+ (10 periods × 2000 rows, today=${today})...`);
 
   // Fetch all periods concurrently
   const periodResults = await Promise.allSettled(
@@ -68,11 +96,32 @@ async function fetchCanadaContracts() {
       allRows.push(...rows);
     }
   }
+  console.log(`[contracts:CA] ${allRows.length} raw rows fetched`);
 
-  console.log(`[contracts:CA] ${allRows.length} raw rows — sorting by contract_value desc, taking top 500...`);
+  // Deduplicate by reference_number — same contract can appear in multiple periods
+  const seen = new Set();
+  const deduped = allRows.filter(row => {
+    const key = row.reference_number || String(row._id);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  console.log(`[contracts:CA] ${deduped.length} rows after deduplication`);
 
-  // Sort client-side by numeric contract_value, take top 500
-  const sorted = allRows
+  // Apply filter:
+  //   Keep if awarded 2023+ OR still active (end date in future / absent)
+  //   Drop  if awarded before 2023 AND end date has passed
+  const filtered = deduped.filter(row => {
+    const awardDate    = row.contract_date || '';
+    const endDate      = row.delivery_date || '';
+    const awardedRecently = awardDate >= '2023-01-01';
+    const stillActive     = !endDate || endDate >= today;
+    return awardedRecently || stillActive;
+  });
+  console.log(`[contracts:CA] ${filtered.length} rows after status filter (keeping active or 2023+ awarded)`);
+
+  // Sort by numeric contract_value desc, take top 500
+  const sorted = filtered
     .filter(row => parseFloat(row.contract_value) > 0)
     .sort((a, b) => parseFloat(b.contract_value) - parseFloat(a.contract_value))
     .slice(0, 500);
@@ -84,14 +133,22 @@ async function fetchCanadaContracts() {
     department:            (row.owner_org_title || row.buyer_name || '').trim() || null,
     value:                 parseFloat(row.contract_value) || null,
     original_value:        parseFloat(row.original_value) || null,
+    contract_value_type:   caContractValueType(row.instrument_type),
     currency:              'CAD',
+    status:                caContractStatus(row.delivery_date),
     purpose:               (row.description_en || '').trim() || null,
     date_awarded:          row.contract_date || null,
+    contract_period_start: row.contract_period_start || null,
+    end_date:              row.delivery_date || null,
     reporting_period:      row.reporting_period || null,
     solicitation_procedure: row.solicitation_procedure || null,
     instrument_type:       row.instrument_type || null,
     source_url:            'https://open.canada.ca/en/proactive-disclosure/contracts',
   }));
+
+  const activeCount    = records.filter(r => r.status === 'Active').length;
+  const completedCount = records.filter(r => r.status === 'Completed').length;
+  console.log(`[contracts:CA] ${records.length} records — Active: ${activeCount}, Completed: ${completedCount}`);
 
   saveOutput('CA', records);
   return records.length;
