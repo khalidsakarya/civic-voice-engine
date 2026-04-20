@@ -14,18 +14,17 @@ require('dotenv').config();
 const { getDb }                 = require('../firebase/client');
 const { createDepartmentRecord } = require('../schemas/federalDepartment');
 
-// ─── FX rates to USD (approximate) ───────────────────────────────────────────
-const FX = { USD: 1, CAD: 0.735, GBP: 1.27, AUD: 0.635 };
+// ─── Local currency per jurisdiction ─────────────────────────────────────────
+const JUR_CURRENCY = { CA: 'CAD', US: 'USD', UK: 'GBP', AU: 'AUD' };
 
 // ─── Unit multipliers per jurisdiction ───────────────────────────────────────
 // CA: raw CAD | US: raw USD | UK: GBP billions | AU: AUD thousands
 const BUDGET_MULTIPLIER = { CA: 1, US: 1, UK: 1_000_000_000, AU: 1_000 };
 
-function toUSD(value, currency, jurisdiction) {
+/** Convert a raw source value to the jurisdiction's local currency (no FX). */
+function toLocalAmount(value, jurisdiction) {
   if (value == null) return null;
-  const mult = BUDGET_MULTIPLIER[jurisdiction] || 1;
-  const fx   = FX[currency]                   || 1;
-  return Math.round(value * mult * fx);
+  return Math.round(value * (BUDGET_MULTIPLIER[jurisdiction] || 1));
 }
 
 // ─── Name normalisation for fuzzy matching ────────────────────────────────────
@@ -116,28 +115,27 @@ async function loadCollection(db, collection) {
 
 // ─── Build unified record ─────────────────────────────────────────────────────
 function buildRecord(budget, head, expense, jurisdiction) {
-  const currency = budget?.currency || (jurisdiction === 'US' ? 'USD' : jurisdiction === 'UK' ? 'GBP' : jurisdiction === 'AU' ? 'AUD' : 'CAD');
-  const deptName = budget?.name || head?.department || expense?.department || 'Unknown';
-  const budgetId = budget?.id || null;
+  const currency  = JUR_CURRENCY[jurisdiction] || (budget?.currency ?? 'USD');
+  const deptName  = budget?.name || head?.department || expense?.department || 'Unknown';
+  const budgetId  = budget?.id || null;
 
   // Derive doc ID: prefer budget id, otherwise synthesise from name
   const rawId = budgetId
     || `${jurisdiction.toLowerCase()}-dept-${normalizeName(deptName).replace(/\s+/g, '-').slice(0, 80)}`;
 
-  // Financial figures in USD
-  const budgetAuthority = toUSD(budget?.total_budget, currency, jurisdiction);
-  const outlays         = toUSD(budget?.total_spent,  currency, jurisdiction);
+  // Financial figures in local currency (unit-scaled, no FX)
+  const budgetAuthority = toLocalAmount(budget?.total_budget, jurisdiction);
+  const outlays         = toLocalAmount(budget?.total_spent,  jurisdiction);
   const remaining       = budgetAuthority != null && outlays != null ? budgetAuthority - outlays : null;
 
-  // Expense figures in USD (convert from original currency)
+  // Expense figures: already in local currency, no conversion needed
   const expCurrency = expense?.currency || currency;
-  const expFx       = FX[expCurrency] || 1;
-  const travelExp   = expense?.travel_expenses      != null ? Math.round(expense.travel_expenses      * expFx) : null;
-  const creditExp   = expense?.credit_card_spending  != null ? Math.round(expense.credit_card_spending  * expFx) : null;
-  const hospitality = expense?.hospitality_expenses  != null ? Math.round(expense.hospitality_expenses  * expFx) : null;
-  const over25k     = expense?.total_spend_over_25k  != null ? Math.round(expense.total_spend_over_25k  * expFx) : null;
+  const travelExp   = expense?.travel_expenses     != null ? Math.round(expense.travel_expenses)     : null;
+  const creditExp   = expense?.credit_card_spending != null ? Math.round(expense.credit_card_spending) : null;
+  const hospitality = expense?.hospitality_expenses != null ? Math.round(expense.hospitality_expenses) : null;
+  const over25k     = expense?.total_spend_over_25k != null ? Math.round(expense.total_spend_over_25k) : null;
 
-  // internal_spending: merge budget breakdown + expense line items
+  // internal_spending: budget breakdown + expense line items, each with currency
   const internalSpending = [];
   if (Array.isArray(budget?.internal_spending)) {
     const seen = new Set();
@@ -146,56 +144,58 @@ function buildRecord(budget, head, expense, jurisdiction) {
       if (seen.has(key)) continue;
       seen.add(key);
       internalSpending.push({
-        category:    item.category   || null,
-        amount_usd:  toUSD(item.amount || item.amount_spent, currency, jurisdiction),
+        category:    item.category    || null,
+        amount:      toLocalAmount(item.amount || item.amount_spent, jurisdiction),
+        currency,
         description: item.description || null,
         fiscal_year: budget?.fiscal_year || null,
       });
     }
   }
-  if (travelExp != null)   internalSpending.push({ category: 'Travel Expenses',       amount_usd: travelExp,   description: null, fiscal_year: expense?.fiscal_year || null });
-  if (creditExp != null)   internalSpending.push({ category: 'Credit Card Spending',   amount_usd: creditExp,   description: null, fiscal_year: expense?.fiscal_year || null });
-  if (hospitality != null) internalSpending.push({ category: 'Hospitality Expenses',   amount_usd: hospitality, description: null, fiscal_year: expense?.fiscal_year || null });
-  if (over25k != null)     internalSpending.push({ category: 'Spending Over £25k',     amount_usd: over25k,     description: null, fiscal_year: expense?.fiscal_year || null });
+  if (travelExp   != null) internalSpending.push({ category: 'Travel Expenses',     amount: travelExp,   currency: expCurrency, description: null, fiscal_year: expense?.fiscal_year || null });
+  if (creditExp   != null) internalSpending.push({ category: 'Credit Card Spending', amount: creditExp,   currency: expCurrency, description: null, fiscal_year: expense?.fiscal_year || null });
+  if (hospitality != null) internalSpending.push({ category: 'Hospitality Expenses', amount: hospitality, currency: expCurrency, description: null, fiscal_year: expense?.fiscal_year || null });
+  if (over25k     != null) internalSpending.push({ category: 'Spending Over £25k',   amount: over25k,     currency: expCurrency, description: null, fiscal_year: expense?.fiscal_year || null });
 
-  // grants: from budget grants_given
+  // grants: from budget grants_given, each with currency
   const grants = Array.isArray(budget?.grants_given)
     ? budget.grants_given.map(g => ({
-        recipient:   g.recipient   || g.name        || null,
-        amount_usd:  toUSD(g.amount || g.value, currency, jurisdiction),
-        purpose:     g.purpose     || g.description || null,
+        recipient:   g.recipient_name || g.recipient || g.name || null,
+        amount:      toLocalAmount(g.amount || g.value, jurisdiction),
+        currency,
+        purpose:     g.purpose     || g.description || g.program_name || null,
         fiscal_year: g.fiscal_year || budget?.fiscal_year || null,
         source_url:  g.source_url  || budget?.source_url  || null,
       }))
     : [];
 
-  // source_metadata
+  // source_metadata (no fx_rate — amounts are in local currency)
   const sourceMeta = {
-    source_name:    budget?.budget_note || null,
-    source_url:     budget?.source_url  || expense?.source_url || head?.source_url || null,
-    retrieved_at:   budget?.last_updated || expense?.last_updated || null,
-    fiscal_year:    budget?.fiscal_year || expense?.fiscal_year || null,
+    source_name:  budget?.budget_note || null,
+    source_url:   budget?.source_url  || expense?.source_url || head?.source_url || null,
+    retrieved_at: budget?.last_updated || expense?.last_updated || null,
+    fiscal_year:  budget?.fiscal_year || expense?.fiscal_year || null,
     currency,
-    fx_rate_to_usd: FX[currency] || 1,
   };
 
   return createDepartmentRecord({
     department_id:     rawId,
     department_name:   deptName,
     jurisdiction,
+    currency,
 
-    leader_name:    head?.name         || null,
-    leader_title:   head?.title        || null,
-    political_party: head?.party       || null,
-    start_date:     head?.date_appointed || null,
+    leader_name:     head?.name          || null,
+    leader_title:    head?.title         || null,
+    political_party: head?.party         || null,
+    start_date:      head?.date_appointed || null,
 
     fiscal_year:       budget?.fiscal_year || expense?.fiscal_year || null,
     budget_authority:  budgetAuthority,
-    obligations:       null,   // not available in source data
+    obligations:       null,
     outlays,
     remaining_balance: remaining,
     employees_count:   budget?.employee_count ?? null,
-    responsibilities:  null,   // not in source data
+    responsibilities:  null,
 
     grants,
     internal_spending: internalSpending,
