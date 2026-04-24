@@ -113,6 +113,39 @@ async function loadCollection(db, collection) {
   return snap.docs.map(d => d.data());
 }
 
+// ─── Jurisdiction-specific obligations / outlays mapping ─────────────────────
+function getObligationsOutlays(budget, jurisdiction) {
+  if (!budget) return { obligations: null, outlays: null };
+  switch (jurisdiction) {
+    case 'CA':
+      // GC InfoBase: obligations = planned spending, outlays = actual spending
+      return {
+        obligations: toLocalAmount(budget.total_planned, jurisdiction),
+        outlays:     toLocalAmount(budget.total_spent,   jurisdiction),
+      };
+    case 'US':
+      // USASpending: obligations = obligations_incurred (total_spent), outlays = gross_outlays
+      return {
+        obligations: toLocalAmount(budget.total_spent,    jurisdiction),
+        outlays:     toLocalAmount(budget.gross_outlays,  jurisdiction),
+      };
+    case 'UK':
+      // HM Treasury DEL: obligations = Resource DEL (total_budget), outlays = Capital DEL
+      return {
+        obligations: toLocalAmount(budget.total_budget, jurisdiction),
+        outlays:     toLocalAmount(budget.cdel_budget,  jurisdiction),
+      };
+    case 'AU':
+      // PAES: obligations = administered expenses, outlays = departmental expenses
+      return {
+        obligations: toLocalAmount(budget.total_administered, jurisdiction),
+        outlays:     toLocalAmount(budget.total_departmental, jurisdiction),
+      };
+    default:
+      return { obligations: null, outlays: null };
+  }
+}
+
 // ─── Build unified record ─────────────────────────────────────────────────────
 function buildRecord(budget, head, expense, jurisdiction) {
   const currency  = JUR_CURRENCY[jurisdiction] || (budget?.currency ?? 'USD');
@@ -125,8 +158,8 @@ function buildRecord(budget, head, expense, jurisdiction) {
 
   // Financial figures in local currency (unit-scaled, no FX)
   const budgetAuthority = toLocalAmount(budget?.total_budget, jurisdiction);
-  const outlays         = toLocalAmount(budget?.total_spent,  jurisdiction);
-  const remaining       = budgetAuthority != null && outlays != null ? budgetAuthority - outlays : null;
+  const { obligations, outlays } = getObligationsOutlays(budget, jurisdiction);
+  const remaining       = budgetAuthority != null && obligations != null ? budgetAuthority - obligations : null;
 
   // Expense figures: already in local currency, no conversion needed
   const expCurrency = expense?.currency || currency;
@@ -191,7 +224,7 @@ function buildRecord(budget, head, expense, jurisdiction) {
 
     fiscal_year:       budget?.fiscal_year || expense?.fiscal_year || null,
     budget_authority:  budgetAuthority,
-    obligations:       null,
+    obligations,
     outlays,
     remaining_balance: remaining,
     employees_count:   budget?.employee_count ?? null,

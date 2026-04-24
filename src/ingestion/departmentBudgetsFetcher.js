@@ -390,6 +390,9 @@ async function fetchCanadaDepartmentBudgets() {
       const totalSpent = programs.length
         ? programs.reduce((s, p) => s + (p.actual_spending || 0), 0) || null
         : null;
+      const totalPlanned = programs.length
+        ? programs.reduce((s, p) => s + (p.planned_spending || 0), 0) || null
+        : null;
       const fteTotals = fteByOrg[org];
       records.push({
         id:             `ca-dept-${slug(org)}`,
@@ -397,6 +400,7 @@ async function fetchCanadaDepartmentBudgets() {
         name:           org,
         fiscal_year:       est?.fy || '2026-27',
         total_budget:      est?.total ?? null,
+        total_planned:     totalPlanned,
         total_spent:       totalSpent,
         currency:          'CAD',
         budget_note:       'GC InfoBase Estimates — authorities granted by Parliament (thousands CAD)',
@@ -465,8 +469,9 @@ async function fetchUSDepartmentBudgets() {
           const res = await axios.get(US_BUD_RES_URL(agency.toptier_code), { timeout: 20000 });
           const fy25 = (res.data?.agency_data_by_year || []).find(y => y.fiscal_year === currentFY);
           budgetMap[agency.toptier_code] = {
-            budget:    fy25?.agency_budgetary_resources ?? null,
-            obligated: fy25?.agency_total_obligated     ?? null,
+            budget:        fy25?.agency_budgetary_resources ?? null,
+            obligated:     fy25?.agency_total_obligated     ?? null,
+            gross_outlays: fy25?.agency_total_outlayed      ?? null,
           };
         } catch { budgetMap[agency.toptier_code] = { budget: null, obligated: null }; }
       }));
@@ -537,6 +542,7 @@ async function fetchUSDepartmentBudgets() {
         fiscal_year:                String(currentFY),
         total_budget:               bud.budget,
         total_spent:                bud.obligated,
+        gross_outlays:              bud.gross_outlays ?? null,
         currency:                   'USD',
         budget_note:                'USASpending.gov FY2025 — agency budgetary resources (mandatory + discretionary, USD)',
         key_programs:               grants,
@@ -651,6 +657,7 @@ async function fetchUKDepartmentBudgets() {
         name:             cleanName,
         fiscal_year:      '2025-26',
         total_budget:     totalBudget,
+        cdel_budget:      cdelMap[cleanName] ?? null,
         total_spent:      null,
         currency:         'GBP',
         budget_note:      'HM Treasury Main Supply Estimates 2025-26 — Resource DEL (£billion); Capital DEL (£billion)',
@@ -761,6 +768,8 @@ async function fetchAUDepartmentBudgets() {
         amount_spent: p.amount_spent,
       }));
 
+      const totalAdministered = Object.values(data.administeredMap).reduce((s, p) => s + (p.budget || 0), 0) || null;
+      const totalDepartmental = Object.values(data.departmentalMap).reduce((s, p) => s + (p.budget || 0), 0) || null;
       records.push({
         id:               `au-dept-${slug(agency)}`,
         jurisdiction:     'AU',
@@ -768,6 +777,8 @@ async function fetchAUDepartmentBudgets() {
         portfolio:        data.portfolio,
         fiscal_year:      '2025-26',
         total_budget:     data.totalBudget || null,
+        total_administered: totalAdministered,
+        total_departmental: totalDepartmental,
         total_spent:      data.totalSpent  || null,
         currency:         'AUD',
         budget_note:      'PAES 2025-26 program expenses (AUD thousands; total_spent = 2024-25 actuals)',
