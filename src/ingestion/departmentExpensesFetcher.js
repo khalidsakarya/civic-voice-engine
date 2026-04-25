@@ -4,6 +4,10 @@ const fs   = require('fs');
 const path = require('path');
 const zlib = require('zlib');
 const axios = require('axios');
+const { writeAuditLog } = require('../firebase/auditLog');
+
+const SCHEDULER_TIER  = 'monthly';
+const COLLECTION_NAME = 'department_expenses';
 
 const OUTPUT_DIR = path.resolve(__dirname, '../../output/department_expenses');
 
@@ -189,6 +193,7 @@ async function caDatastoreFetch(resourceId, limit = 5000, sort = 'start_date des
 }
 
 async function fetchCAExpenses() {
+  const _ts = new Date().toISOString();
   try {
     console.log('[dept-expenses:CA] Fetching proactive disclosure travel + hospitality (CKAN)...');
 
@@ -224,9 +229,12 @@ async function fetchCAExpenses() {
       source_url:           'https://open.canada.ca/en/proactive-disclosure',
     }));
 
-    return saveOutput('CA', records);
+    const count = saveOutput('CA', records);
+    await writeAuditLog({ collection_name: COLLECTION_NAME, jurisdiction: 'CA', data_pull_timestamp: _ts, source_endpoint: CA_CKAN, record_count: count, import_status: 'success', scheduler_tier: SCHEDULER_TIER });
+    return count;
   } catch (err) {
     console.warn(`[dept-expenses:CA] Error: ${err.message}`);
+    await writeAuditLog({ collection_name: COLLECTION_NAME, jurisdiction: 'CA', data_pull_timestamp: _ts, source_endpoint: CA_CKAN, record_count: 0, import_status: 'failed', error_message: err.message, scheduler_tier: SCHEDULER_TIER });
     return 0;
   }
 }
@@ -242,6 +250,7 @@ const TRAVEL_OC_RE    = /travel|transportation of persons/i;
 const ENTERTAIN_OC_RE = /^(entertainment|catering|hospitality|representational)/i;
 
 async function fetchUSExpenses() {
+  const _ts = new Date().toISOString();
   try {
     const FY = 2025; const CONCUR = 20;
 
@@ -363,9 +372,12 @@ async function fetchUSExpenses() {
       });
     }
 
-    return saveOutput('US', records);
+    const count = saveOutput('US', records);
+    await writeAuditLog({ collection_name: COLLECTION_NAME, jurisdiction: 'US', data_pull_timestamp: _ts, source_endpoint: US_AGENCIES_URL, record_count: count, import_status: 'success', scheduler_tier: SCHEDULER_TIER });
+    return count;
   } catch (err) {
     console.warn(`[dept-expenses:US] Error: ${err.message}`);
+    await writeAuditLog({ collection_name: COLLECTION_NAME, jurisdiction: 'US', data_pull_timestamp: _ts, source_endpoint: US_AGENCIES_URL, record_count: 0, import_status: 'failed', error_message: err.message, scheduler_tier: SCHEDULER_TIER });
     return 0;
   }
 }
@@ -555,6 +567,7 @@ function aggregateUKSpendRows(objs) {
 }
 
 async function fetchUKExpenses() {
+  const _ts = new Date().toISOString();
   try {
     console.log('[dept-expenses:UK] Fetching spending-over-£25k data for 9 core Whitehall departments...');
     const records = [];
@@ -637,9 +650,12 @@ async function fetchUKExpenses() {
     }
 
     console.log(`[dept-expenses:UK] ${records.length} dept records`);
-    return saveOutput('UK', records);
+    const count = saveOutput('UK', records);
+    await writeAuditLog({ collection_name: COLLECTION_NAME, jurisdiction: 'UK', data_pull_timestamp: _ts, source_endpoint: GOV_UK_API, record_count: count, import_status: 'success', scheduler_tier: SCHEDULER_TIER });
+    return count;
   } catch (err) {
     console.warn(`[dept-expenses:UK] Error: ${err.message}`);
+    await writeAuditLog({ collection_name: COLLECTION_NAME, jurisdiction: 'UK', data_pull_timestamp: _ts, source_endpoint: GOV_UK_API, record_count: 0, import_status: 'failed', error_message: err.message, scheduler_tier: SCHEDULER_TIER });
     return 0;
   }
 }
@@ -680,6 +696,7 @@ async function fetchAUXlsx(type) {
 }
 
 async function fetchAUExpenses() {
+  const _ts = new Date().toISOString();
   try {
     console.log('[dept-expenses:AU] Downloading finance.gov.au XLSX files (travel / hosp / credit card)...');
 
@@ -768,9 +785,12 @@ async function fetchAUExpenses() {
       }));
 
     console.log(`[dept-expenses:AU] ${records.length} entity records built`);
-    return saveOutput('AU', records);
+    const count = saveOutput('AU', records);
+    await writeAuditLog({ collection_name: COLLECTION_NAME, jurisdiction: 'AU', data_pull_timestamp: _ts, source_endpoint: 'https://www.finance.gov.au/government/managing-commonwealth-resources/accountability-transparency-and-reporting', record_count: count, import_status: 'success', scheduler_tier: SCHEDULER_TIER });
+    return count;
   } catch (err) {
     console.warn(`[dept-expenses:AU] Error: ${err.message}`);
+    await writeAuditLog({ collection_name: COLLECTION_NAME, jurisdiction: 'AU', data_pull_timestamp: _ts, source_endpoint: 'https://www.finance.gov.au/government/managing-commonwealth-resources/accountability-transparency-and-reporting', record_count: 0, import_status: 'failed', error_message: err.message, scheduler_tier: SCHEDULER_TIER });
     return 0;
   }
 }

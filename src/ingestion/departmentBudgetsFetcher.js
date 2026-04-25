@@ -4,6 +4,10 @@ const fs   = require('fs');
 const path = require('path');
 const zlib = require('zlib');
 const axios = require('axios');
+const { writeAuditLog } = require('../firebase/auditLog');
+
+const SCHEDULER_TIER  = 'monthly';
+const COLLECTION_NAME = 'department_budgets';
 
 const OUTPUT_DIR = path.resolve(__dirname, '../../output/department_budgets');
 
@@ -278,6 +282,7 @@ const CA_CKAN_PKG          = 'a35cf382-690c-4221-a971-cf0fd189a46f';
 const CA_GRANTS_RESOURCE   = '1d15a62f-5656-49ad-8c88-f40ce689d831';
 
 async function fetchCanadaDepartmentBudgets() {
+  const _ts = new Date().toISOString();
   try {
     console.log('[dept-budgets:CA] Fetching GC InfoBase package resource list...');
     const pkgRes = await axios.get(
@@ -415,9 +420,12 @@ async function fetchCanadaDepartmentBudgets() {
         source_url:        `https://open.canada.ca/data/dataset/${CA_CKAN_PKG}`,
       });
     }
-    return saveRecords('CA', records);
+    const count = saveRecords('CA', records);
+    await writeAuditLog({ collection_name: COLLECTION_NAME, jurisdiction: 'CA', data_pull_timestamp: _ts, source_endpoint: `https://open.canada.ca/data/api/3/action/package_show?id=${CA_CKAN_PKG}`, record_count: count, import_status: 'success', scheduler_tier: SCHEDULER_TIER });
+    return count;
   } catch (err) {
     console.warn(`[dept-budgets:CA] Error: ${err.message}`);
+    await writeAuditLog({ collection_name: COLLECTION_NAME, jurisdiction: 'CA', data_pull_timestamp: _ts, source_endpoint: `https://open.canada.ca/data/api/3/action/package_show?id=${CA_CKAN_PKG}`, record_count: 0, import_status: 'failed', error_message: err.message, scheduler_tier: SCHEDULER_TIER });
     return 0;
   }
 }
@@ -437,6 +445,7 @@ const GRANTS_GOV_CODE  = {
 };
 
 async function fetchUSDepartmentBudgets() {
+  const _ts = new Date().toISOString();
   try {
     const currentFY  = 2025;
     const FY_START   = '2024-10-01';
@@ -554,9 +563,12 @@ async function fetchUSDepartmentBudgets() {
       });
     }
 
-    return saveRecords('US', records);
+    const count = saveRecords('US', records);
+    await writeAuditLog({ collection_name: COLLECTION_NAME, jurisdiction: 'US', data_pull_timestamp: _ts, source_endpoint: US_AGENCIES_URL, record_count: count, import_status: 'success', scheduler_tier: SCHEDULER_TIER });
+    return count;
   } catch (err) {
     console.warn(`[dept-budgets:US] Error: ${err.message}`);
+    await writeAuditLog({ collection_name: COLLECTION_NAME, jurisdiction: 'US', data_pull_timestamp: _ts, source_endpoint: US_AGENCIES_URL, record_count: 0, import_status: 'failed', error_message: err.message, scheduler_tier: SCHEDULER_TIER });
     return 0;
   }
 }
@@ -566,6 +578,7 @@ async function fetchUSDepartmentBudgets() {
 const UK_DEL_URL = 'https://assets.publishing.service.gov.uk/media/6827211850dbd3ce8372ab24/2025-26_Mains_DEL_tables_for_publication.xlsx';
 
 async function fetchUKDepartmentBudgets() {
+  const _ts = new Date().toISOString();
   try {
     console.log('[dept-budgets:UK] Downloading HM Treasury DEL tables XLSX + Civil Service employee counts...');
     const [resp, empCounts] = await Promise.all([
@@ -671,11 +684,15 @@ async function fetchUKDepartmentBudgets() {
 
     if (!records.length) {
       console.warn('[dept-budgets:UK] No department rows extracted from XLSX');
+      await writeAuditLog({ collection_name: COLLECTION_NAME, jurisdiction: 'UK', data_pull_timestamp: _ts, source_endpoint: UK_DEL_URL, record_count: 0, import_status: 'failed', error_message: 'No department rows extracted from XLSX', scheduler_tier: SCHEDULER_TIER });
       return 0;
     }
-    return saveRecords('UK', records);
+    const count = saveRecords('UK', records);
+    await writeAuditLog({ collection_name: COLLECTION_NAME, jurisdiction: 'UK', data_pull_timestamp: _ts, source_endpoint: UK_DEL_URL, record_count: count, import_status: 'success', scheduler_tier: SCHEDULER_TIER });
+    return count;
   } catch (err) {
     console.warn(`[dept-budgets:UK] Error: ${err.message}`);
+    await writeAuditLog({ collection_name: COLLECTION_NAME, jurisdiction: 'UK', data_pull_timestamp: _ts, source_endpoint: UK_DEL_URL, record_count: 0, import_status: 'failed', error_message: err.message, scheduler_tier: SCHEDULER_TIER });
     return 0;
   }
 }
@@ -685,6 +702,7 @@ async function fetchUKDepartmentBudgets() {
 const AU_PAES_URL = 'https://data.gov.au/data/dataset/f84698ea-c749-4ff2-a5c5-e4b5a4d819e1/resource/8b7149fa-5882-4feb-8b20-89a25e6abac2/download/2025-26-paes-program-expenses-line-items.csv';
 
 async function fetchAUDepartmentBudgets() {
+  const _ts = new Date().toISOString();
   try {
     console.log('[dept-budgets:AU] Fetching PAES 2025-26 CSV + APS employee counts...');
     const [resp, empCounts] = await Promise.all([
@@ -790,9 +808,12 @@ async function fetchAUDepartmentBudgets() {
       });
     }
 
-    return saveRecords('AU', records);
+    const count = saveRecords('AU', records);
+    await writeAuditLog({ collection_name: COLLECTION_NAME, jurisdiction: 'AU', data_pull_timestamp: _ts, source_endpoint: AU_PAES_URL, record_count: count, import_status: 'success', scheduler_tier: SCHEDULER_TIER });
+    return count;
   } catch (err) {
     console.warn(`[dept-budgets:AU] Error: ${err.message}`);
+    await writeAuditLog({ collection_name: COLLECTION_NAME, jurisdiction: 'AU', data_pull_timestamp: _ts, source_endpoint: AU_PAES_URL, record_count: 0, import_status: 'failed', error_message: err.message, scheduler_tier: SCHEDULER_TIER });
     return 0;
   }
 }

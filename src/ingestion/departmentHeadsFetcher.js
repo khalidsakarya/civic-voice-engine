@@ -4,6 +4,10 @@ const fs    = require('fs');
 const path  = require('path');
 const https = require('https');
 const axios = require('axios');
+const { writeAuditLog } = require('../firebase/auditLog');
+
+const SCHEDULER_TIER  = 'weekly';
+const COLLECTION_NAME = 'department_heads';
 
 const OUTPUT_DIR = path.resolve(__dirname, '../../output/department_heads');
 
@@ -128,6 +132,7 @@ function inferDept(title, jurisdiction) {
 //   <dd>TITLE</dd>
 
 async function fetchCanadaDeptHeads() {
+  const _ts = new Date().toISOString();
   const records = [];
 
   try {
@@ -165,9 +170,13 @@ async function fetchCanadaDeptHeads() {
     console.log(`[dept-heads:CA] Extracted ${records.length} ministers`);
   } catch (err) {
     console.warn(`[dept-heads:CA] Skipped — ${err.message}`);
+    await writeAuditLog({ collection_name: COLLECTION_NAME, jurisdiction: 'CA', data_pull_timestamp: _ts, source_endpoint: 'https://www.canada.ca/en/government/ministers.html', record_count: 0, import_status: 'failed', error_message: err.message, scheduler_tier: SCHEDULER_TIER });
+    return saveRecords('CA', records);
   }
 
-  return saveRecords('CA', records);
+  const count = saveRecords('CA', records);
+  await writeAuditLog({ collection_name: COLLECTION_NAME, jurisdiction: 'CA', data_pull_timestamp: _ts, source_endpoint: 'https://www.canada.ca/en/government/ministers.html', record_count: count, import_status: count > 0 ? 'success' : 'partial', scheduler_tier: SCHEDULER_TIER });
+  return count;
 }
 
 // ─── US — whitehouse.gov/administration/cabinet ───────────────────────────────
@@ -182,6 +191,7 @@ const WH_CABINET_URL = 'https://www.whitehouse.gov/administration/cabinet/';
 const WH_SKIP = new Set(['About', 'Media', 'Initiatives', 'Contact Us', 'News', 'Videos', 'Issues', 'The Administration']);
 
 async function fetchUSDeptHeads() {
+  const _ts = new Date().toISOString();
   const records = [];
 
   try {
@@ -221,9 +231,13 @@ async function fetchUSDeptHeads() {
     console.log(`[dept-heads:US] Extracted ${records.length} cabinet members`);
   } catch (err) {
     console.warn(`[dept-heads:US] Skipped — ${err.message}`);
+    await writeAuditLog({ collection_name: COLLECTION_NAME, jurisdiction: 'US', data_pull_timestamp: _ts, source_endpoint: WH_CABINET_URL, record_count: 0, import_status: 'failed', error_message: err.message, scheduler_tier: SCHEDULER_TIER });
+    return saveRecords('US', records);
   }
 
-  return saveRecords('US', records);
+  const count = saveRecords('US', records);
+  await writeAuditLog({ collection_name: COLLECTION_NAME, jurisdiction: 'US', data_pull_timestamp: _ts, source_endpoint: WH_CABINET_URL, record_count: count, import_status: count > 0 ? 'success' : 'partial', scheduler_tier: SCHEDULER_TIER });
+  return count;
 }
 
 // ─── UK — gov.uk/government/ministers ────────────────────────────────────────
@@ -248,6 +262,7 @@ function inferUKTier(title) {
 }
 
 async function fetchUKDeptHeads() {
+  const _ts = new Date().toISOString();
   const records = [];
 
   try {
@@ -299,9 +314,13 @@ async function fetchUKDeptHeads() {
     console.log(`[dept-heads:UK] Extracted ${records.length} ministers`);
   } catch (err) {
     console.warn(`[dept-heads:UK] Skipped — ${err.message}`);
+    await writeAuditLog({ collection_name: COLLECTION_NAME, jurisdiction: 'UK', data_pull_timestamp: _ts, source_endpoint: UK_MINISTERS_URL, record_count: 0, import_status: 'failed', error_message: err.message, scheduler_tier: SCHEDULER_TIER });
+    return saveRecords('UK', records);
   }
 
-  return saveRecords('UK', records);
+  const count = saveRecords('UK', records);
+  await writeAuditLog({ collection_name: COLLECTION_NAME, jurisdiction: 'UK', data_pull_timestamp: _ts, source_endpoint: UK_MINISTERS_URL, record_count: count, import_status: count > 0 ? 'success' : 'partial', scheduler_tier: SCHEDULER_TIER });
+  return count;
 }
 
 // ─── Australia — directory.gov.au ────────────────────────────────────────────
@@ -320,6 +339,7 @@ const AU_TIERS = [
 const AU_HONORS_RE = /^(The Hon\.?|The Rt Hon\.?|Senator the Hon\.?|Senator|Mr\.|Ms\.|Dr\.|Prof\.|The Honourable)\s*/i;
 
 async function fetchAUDeptHeads() {
+  const _ts = new Date().toISOString();
   const records = [];
 
   try {
@@ -373,9 +393,13 @@ async function fetchAUDeptHeads() {
     console.log(`[dept-heads:AU] Total: ${records.length} ministers`);
   } catch (err) {
     console.warn(`[dept-heads:AU] Skipped — ${err.message}`);
+    await writeAuditLog({ collection_name: COLLECTION_NAME, jurisdiction: 'AU', data_pull_timestamp: _ts, source_endpoint: AU_TIERS[0]?.url || 'https://www.directory.gov.au/ministers', record_count: 0, import_status: 'failed', error_message: err.message, scheduler_tier: SCHEDULER_TIER });
+    return saveRecords('AU', records);
   }
 
-  return saveRecords('AU', records);
+  const count = saveRecords('AU', records);
+  await writeAuditLog({ collection_name: COLLECTION_NAME, jurisdiction: 'AU', data_pull_timestamp: _ts, source_endpoint: AU_TIERS[0]?.url || 'https://www.directory.gov.au/ministers', record_count: count, import_status: count > 0 ? 'success' : 'partial', scheduler_tier: SCHEDULER_TIER });
+  return count;
 }
 
 // ─── Orchestrator ─────────────────────────────────────────────────────────────
