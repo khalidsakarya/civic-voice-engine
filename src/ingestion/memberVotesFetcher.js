@@ -37,7 +37,10 @@ require('dotenv').config();
 const axios = require('axios');
 const fs    = require('fs');
 const path  = require('path');
+const { writeAuditLog } = require('../firebase/auditLog');
 
+const SCHEDULER_TIER = 'weekly';
+const COLLECTION_NAME = 'member_votes';
 const OUTPUT_DIR  = path.resolve(__dirname, '../../output/member_votes');
 const TIMEOUT_MS  = 45_000;
 const CURRENT_YEAR = new Date().getFullYear();
@@ -79,6 +82,8 @@ const CA_VOTE_LIMIT = 10;   // recent votes to fetch
 const CA_BALLOT_LIMIT = 300; // ballots per vote (typically 300-330 MPs total)
 
 async function fetchCanadaVotes() {
+  const _ts = new Date().toISOString();
+  try {
   console.log(`[votes:CA] Fetching ${CA_VOTE_LIMIT} most recent parliamentary votes…`);
 
   const listResp = await axios.get(`${CA_API}/votes/`, {
@@ -153,10 +158,16 @@ async function fetchCanadaVotes() {
   const voteIds = [...new Set(records.map(r => r.vote_id))].length;
   console.log(`[votes:CA] ${records.length} ballot records across ${voteIds} votes`);
 
-  return saveRecords('ca_parliament_votes', records, {
+  const result = saveRecords('ca_parliament_votes', records, {
     votesProcessed:  votes.length,
     sourceApi:       `${CA_API}/votes/`,
   });
+  await writeAuditLog({ collection_name: COLLECTION_NAME, jurisdiction: 'CA', data_pull_timestamp: _ts, source_endpoint: 'https://api.openparliament.ca/votes/', record_count: result.count, import_status: 'success', scheduler_tier: SCHEDULER_TIER });
+  return result;
+  } catch (err) {
+    await writeAuditLog({ collection_name: COLLECTION_NAME, jurisdiction: 'CA', data_pull_timestamp: _ts, source_endpoint: 'https://api.openparliament.ca/votes/', record_count: 0, import_status: 'failed', error_message: err.message, scheduler_tier: SCHEDULER_TIER });
+    throw err;
+  }
 }
 
 // ─── US — House Clerk Roll-Call XML ──────────────────────────────────────────
@@ -224,6 +235,8 @@ function parseRecordedVotes(xml) {
 }
 
 async function fetchUSHouseVotes() {
+  const _ts = new Date().toISOString();
+  try {
   // Step 1 — discover the most recent roll-call numbers from the index page
   console.log(`[votes:US] Fetching House Clerk index for ${CURRENT_YEAR}…`);
 
@@ -315,11 +328,17 @@ async function fetchUSHouseVotes() {
   const rollsGot = [...new Set(records.map(r => r.roll_call_number))].length;
   console.log(`[votes:US] ${records.length} ballot records across ${rollsGot} roll calls`);
 
-  return saveRecords('us_house_rollcall_votes', records, {
+  const result = saveRecords('us_house_rollcall_votes', records, {
     rollCallsFetched: rollsGot,
     year:             CURRENT_YEAR,
     sourceBase:       `${CLERK_BASE}/evs/${CURRENT_YEAR}/`,
   });
+  await writeAuditLog({ collection_name: COLLECTION_NAME, jurisdiction: 'US', data_pull_timestamp: _ts, source_endpoint: 'https://clerk.house.gov/evs/', record_count: result.count, import_status: 'success', scheduler_tier: SCHEDULER_TIER });
+  return result;
+  } catch (err) {
+    await writeAuditLog({ collection_name: COLLECTION_NAME, jurisdiction: 'US', data_pull_timestamp: _ts, source_endpoint: 'https://clerk.house.gov/evs/', record_count: 0, import_status: 'failed', error_message: err.message, scheduler_tier: SCHEDULER_TIER });
+    throw err;
+  }
 }
 
 // ─── UK — commonsvotes-api.parliament.uk ─────────────────────────────────────
@@ -339,6 +358,8 @@ const UK_VOTES_API      = 'https://commonsvotes-api.parliament.uk';
 const UK_DIVISIONS_LIMIT = 10;  // recent divisions per run
 
 async function fetchUKDivisions() {
+  const _ts = new Date().toISOString();
+  try {
   console.log(`[votes:UK] Fetching ${UK_DIVISIONS_LIMIT} most recent Commons divisions…`);
 
   const listResp = await axios.get(`${UK_VOTES_API}/data/divisions.json/search`, {
@@ -436,10 +457,16 @@ async function fetchUKDivisions() {
   const divisionsGot = [...new Set(records.map(r => r.division_id))].length;
   console.log(`[votes:UK] ${records.length} ballot records across ${divisionsGot} divisions`);
 
-  return saveRecords('uk_commons_divisions', records, {
+  const result = saveRecords('uk_commons_divisions', records, {
     divisionsFetched: divisionsGot,
     sourceApi:        `${UK_VOTES_API}/data/divisions.json/search`,
   });
+  await writeAuditLog({ collection_name: COLLECTION_NAME, jurisdiction: 'UK', data_pull_timestamp: _ts, source_endpoint: 'https://commonsvotes-api.parliament.uk', record_count: result.count, import_status: 'success', scheduler_tier: SCHEDULER_TIER });
+  return result;
+  } catch (err) {
+    await writeAuditLog({ collection_name: COLLECTION_NAME, jurisdiction: 'UK', data_pull_timestamp: _ts, source_endpoint: 'https://commonsvotes-api.parliament.uk', record_count: 0, import_status: 'failed', error_message: err.message, scheduler_tier: SCHEDULER_TIER });
+    throw err;
+  }
 }
 
 // ─── Main ─────────────────────────────────────────────────────────────────────

@@ -42,7 +42,10 @@ require('dotenv').config();
 const axios = require('axios');
 const fs    = require('fs');
 const path  = require('path');
+const { writeAuditLog } = require('../firebase/auditLog');
 
+const SCHEDULER_TIER = 'weekly';
+const COLLECTION_NAME = 'member_committees';
 const OUTPUT_DIR = path.resolve(__dirname, '../../output/member_committees');
 const TIMEOUT_MS = 45_000;
 
@@ -167,6 +170,7 @@ async function fetchCACommitteeMembers(acronym) {
 }
 
 async function fetchCanadaCommittees() {
+  const _ts = new Date().toISOString();
   console.log('[ca-cmte] Fetching committee acronyms...');
   const acronyms = await fetchCACommitteeAcronyms();
   console.log(`[ca-cmte] ${acronyms.length} committees found`);
@@ -210,6 +214,7 @@ async function fetchCanadaCommittees() {
   const records = Object.values(memberMap);
   const result  = saveRecords('canada', records);
   console.log(`[ca-cmte] ✓ ${result.count} members → ${result.filepath}`);
+  await writeAuditLog({ collection_name: COLLECTION_NAME, jurisdiction: 'CA', data_pull_timestamp: _ts, source_endpoint: 'https://www.ourcommons.ca/Committees/en/', record_count: result.count, import_status: 'success', scheduler_tier: SCHEDULER_TIER });
   return result;
 }
 
@@ -234,6 +239,7 @@ async function buildUSComcodeMap() {
 }
 
 async function fetchUSCommittees() {
+  const _ts = new Date().toISOString();
   console.log('[us-cmte] Building committee code map from clerk.house.gov...');
   const comcodeMap = await buildUSComcodeMap();
   console.log(`[us-cmte] ${Object.keys(comcodeMap).length} committee codes mapped`);
@@ -315,6 +321,7 @@ async function fetchUSCommittees() {
 
   const result = saveRecords('usa', records);
   console.log(`[us-cmte] ✓ ${result.count} members → ${result.filepath}`);
+  await writeAuditLog({ collection_name: COLLECTION_NAME, jurisdiction: 'US', data_pull_timestamp: _ts, source_endpoint: 'https://clerk.house.gov/xml/lists/MemberData.xml', record_count: result.count, import_status: 'success', scheduler_tier: SCHEDULER_TIER });
   return result;
 }
 
@@ -325,6 +332,7 @@ const UK_CMTE_TARGET = parseInt(process.env.UK_CMTE_TARGET || '150', 10);
 const CURRENT_YEAR  = new Date().getFullYear();
 
 async function fetchUKCommittees() {
+  const _ts = new Date().toISOString();
   console.log('[uk-cmte] Fetching current Commons MPs...');
   const mpList = [];
   let skip     = 0;
@@ -393,6 +401,7 @@ async function fetchUKCommittees() {
 
   const result = saveRecords('uk', records);
   console.log(`[uk-cmte] ✓ ${result.count} records → ${result.filepath}`);
+  await writeAuditLog({ collection_name: COLLECTION_NAME, jurisdiction: 'UK', data_pull_timestamp: _ts, source_endpoint: 'https://members-api.parliament.uk/api', record_count: result.count, import_status: 'success', scheduler_tier: SCHEDULER_TIER });
   return result;
 }
 
@@ -483,6 +492,7 @@ async function fetchAUCommitteeMembers(slug) {
 }
 
 async function fetchAUCommittees() {
+  const _ts = new Date().toISOString();
   console.log('[au-cmte] Fetching AU committee slugs...');
   const slugs = await fetchAUCommitteeSlugs();
   console.log(`[au-cmte] ${slugs.length} committees found`);
@@ -524,6 +534,7 @@ async function fetchAUCommittees() {
   const records = Object.values(memberMap);
   const result  = saveRecords('australia', records);
   console.log(`[au-cmte] ✓ ${result.count} members → ${result.filepath}`);
+  await writeAuditLog({ collection_name: COLLECTION_NAME, jurisdiction: 'AU', data_pull_timestamp: _ts, source_endpoint: 'https://www.aph.gov.au/Parliamentary_Business/Committees', record_count: result.count, import_status: 'success', scheduler_tier: SCHEDULER_TIER });
   return result;
 }
 
@@ -537,6 +548,7 @@ async function fetchAllMemberCommittees() {
     results.canada = await fetchCanadaCommittees();
   } catch (err) {
     console.error('[member-committees] CA failed:', err.message);
+    await writeAuditLog({ collection_name: COLLECTION_NAME, jurisdiction: 'CA', data_pull_timestamp: new Date().toISOString(), source_endpoint: 'https://www.ourcommons.ca/Committees/en/', record_count: 0, import_status: 'failed', error_message: err.message, scheduler_tier: SCHEDULER_TIER });
     results.canada = { count: 0, error: err.message };
   }
 
@@ -544,6 +556,7 @@ async function fetchAllMemberCommittees() {
     results.usa = await fetchUSCommittees();
   } catch (err) {
     console.error('[member-committees] US failed:', err.message);
+    await writeAuditLog({ collection_name: COLLECTION_NAME, jurisdiction: 'US', data_pull_timestamp: new Date().toISOString(), source_endpoint: 'https://clerk.house.gov/xml/lists/MemberData.xml', record_count: 0, import_status: 'failed', error_message: err.message, scheduler_tier: SCHEDULER_TIER });
     results.usa = { count: 0, error: err.message };
   }
 
@@ -551,6 +564,7 @@ async function fetchAllMemberCommittees() {
     results.uk = await fetchUKCommittees();
   } catch (err) {
     console.error('[member-committees] UK failed:', err.message);
+    await writeAuditLog({ collection_name: COLLECTION_NAME, jurisdiction: 'UK', data_pull_timestamp: new Date().toISOString(), source_endpoint: 'https://members-api.parliament.uk/api', record_count: 0, import_status: 'failed', error_message: err.message, scheduler_tier: SCHEDULER_TIER });
     results.uk = { count: 0, error: err.message };
   }
 
@@ -558,6 +572,7 @@ async function fetchAllMemberCommittees() {
     results.australia = await fetchAUCommittees();
   } catch (err) {
     console.error('[member-committees] AU failed:', err.message);
+    await writeAuditLog({ collection_name: COLLECTION_NAME, jurisdiction: 'AU', data_pull_timestamp: new Date().toISOString(), source_endpoint: 'https://www.aph.gov.au/Parliamentary_Business/Committees', record_count: 0, import_status: 'failed', error_message: err.message, scheduler_tier: SCHEDULER_TIER });
     results.australia = { count: 0, error: err.message };
   }
 

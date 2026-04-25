@@ -39,6 +39,10 @@ require('dotenv').config();
 const axios = require('axios');
 const fs    = require('fs');
 const path  = require('path');
+const { writeAuditLog } = require('../firebase/auditLog');
+
+const SCHEDULER_TIER = 'budget_analytics';
+const COLLECTION_NAME = 'budget_data';
 
 const OUTPUT_DIR   = path.resolve(__dirname, '../../output/budget_analytics');
 const TIMEOUT_MS   = 30000;
@@ -600,6 +604,7 @@ async function fetchAllBudgetAnalytics() {
   const deptDataByJur = { CA: caAllocations, US: usAgencySpending, UK: ukBudget, AU: auBudget };
 
   const budgetAll = {};
+  const _ts = new Date().toISOString();
   for (const jur of ['CA', 'US', 'UK', 'AU']) {
     const doc = buildBudgetDoc(
       jur,
@@ -614,6 +619,7 @@ async function fetchAllBudgetAnalytics() {
       jurisdiction: jur,
       ...doc,
     });
+    await writeAuditLog({ collection_name: COLLECTION_NAME, jurisdiction: jur, data_pull_timestamp: _ts, source_endpoint: 'https://api.worldbank.org/v2/country', record_count: 1, import_status: 'success', scheduler_tier: SCHEDULER_TIER });
   }
 
   // ── 7. Assemble and save analytics docs (crime from World Bank) ───────────

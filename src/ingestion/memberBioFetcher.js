@@ -40,7 +40,10 @@ require('dotenv').config();
 const axios = require('axios');
 const fs    = require('fs');
 const path  = require('path');
+const { writeAuditLog } = require('../firebase/auditLog');
 
+const SCHEDULER_TIER = 'weekly';
+const COLLECTION_NAME = 'member_bios';
 const OUTPUT_DIR   = path.resolve(__dirname, '../../output/member_bios');
 const TIMEOUT_MS   = 45_000;
 const CONGRESS_KEY = process.env.CONGRESS_API_KEY || 'DEMO_KEY';
@@ -75,6 +78,7 @@ function stripHtml(html) {
 const CA_API = 'https://api.openparliament.ca';
 
 async function fetchCanadaBios() {
+  const _ts = new Date().toISOString();
   console.log('[ca-bios] Fetching current MP list from openparliament.ca...');
   const slugs = [];
   let offset  = 0;
@@ -148,6 +152,7 @@ async function fetchCanadaBios() {
 
   const result = saveRecords('canada', records);
   console.log(`[ca-bios] ✓ ${result.count} records → ${result.filepath}`);
+  await writeAuditLog({ collection_name: COLLECTION_NAME, jurisdiction: 'CA', data_pull_timestamp: _ts, source_endpoint: 'https://api.openparliament.ca', record_count: result.count, import_status: 'success', scheduler_tier: SCHEDULER_TIER });
   return result;
 }
 
@@ -156,6 +161,7 @@ async function fetchCanadaBios() {
 const US_API = 'https://api.congress.gov';
 
 async function fetchUSBios() {
+  const _ts = new Date().toISOString();
   console.log('[us-bios] Fetching current members from api.congress.gov...');
   const members = [];
   let offset    = 0;
@@ -234,6 +240,7 @@ async function fetchUSBios() {
 
   const result = saveRecords('usa', records);
   console.log(`[us-bios] ✓ ${result.count} records → ${result.filepath}`);
+  await writeAuditLog({ collection_name: COLLECTION_NAME, jurisdiction: 'US', data_pull_timestamp: _ts, source_endpoint: 'https://api.congress.gov/v3/member', record_count: result.count, import_status: 'success', scheduler_tier: SCHEDULER_TIER });
   return result;
 }
 
@@ -243,6 +250,7 @@ const UK_API        = 'https://members-api.parliament.uk/api';
 const UK_TARGET_MPs = parseInt(process.env.UK_BIO_TARGET || '100', 10);
 
 async function fetchUKBios() {
+  const _ts = new Date().toISOString();
   console.log('[uk-bios] Fetching current Commons MPs...');
   const mpList = [];
   let skip     = 0;
@@ -326,6 +334,7 @@ async function fetchUKBios() {
 
   const result = saveRecords('uk', records);
   console.log(`[uk-bios] ✓ ${result.count} records → ${result.filepath}`);
+  await writeAuditLog({ collection_name: COLLECTION_NAME, jurisdiction: 'UK', data_pull_timestamp: _ts, source_endpoint: 'https://members-api.parliament.uk/api', record_count: result.count, import_status: 'success', scheduler_tier: SCHEDULER_TIER });
   return result;
 }
 
@@ -336,6 +345,7 @@ const AU_MEMBERS_URL = 'https://www.aph.gov.au/Senators_and_Members/Members';
 // Individual profile: https://www.aph.gov.au{href}
 
 async function fetchAUBios() {
+  const _ts = new Date().toISOString();
   console.log('[au-bios] Fetching AU member listing from aph.gov.au...');
 
   const listR = await axios.get(AU_MEMBERS_URL, {
@@ -455,6 +465,7 @@ async function fetchAUBios() {
 
   const result = saveRecords('australia', records);
   console.log(`[au-bios] ✓ ${result.count} records → ${result.filepath}`);
+  await writeAuditLog({ collection_name: COLLECTION_NAME, jurisdiction: 'AU', data_pull_timestamp: _ts, source_endpoint: 'https://www.aph.gov.au/Senators_and_Members/Members', record_count: result.count, import_status: 'success', scheduler_tier: SCHEDULER_TIER });
   return result;
 }
 
@@ -468,6 +479,7 @@ async function fetchAllMemberBios() {
     results.canada = await fetchCanadaBios();
   } catch (err) {
     console.error('[member-bios] CA failed:', err.message);
+    await writeAuditLog({ collection_name: COLLECTION_NAME, jurisdiction: 'CA', data_pull_timestamp: new Date().toISOString(), source_endpoint: 'https://api.openparliament.ca', record_count: 0, import_status: 'failed', error_message: err.message, scheduler_tier: SCHEDULER_TIER });
     results.canada = { count: 0, error: err.message };
   }
 
@@ -475,6 +487,7 @@ async function fetchAllMemberBios() {
     results.usa = await fetchUSBios();
   } catch (err) {
     console.error('[member-bios] US failed:', err.message);
+    await writeAuditLog({ collection_name: COLLECTION_NAME, jurisdiction: 'US', data_pull_timestamp: new Date().toISOString(), source_endpoint: 'https://api.congress.gov/v3/member', record_count: 0, import_status: 'failed', error_message: err.message, scheduler_tier: SCHEDULER_TIER });
     results.usa = { count: 0, error: err.message };
   }
 
@@ -482,6 +495,7 @@ async function fetchAllMemberBios() {
     results.uk = await fetchUKBios();
   } catch (err) {
     console.error('[member-bios] UK failed:', err.message);
+    await writeAuditLog({ collection_name: COLLECTION_NAME, jurisdiction: 'UK', data_pull_timestamp: new Date().toISOString(), source_endpoint: 'https://members-api.parliament.uk/api', record_count: 0, import_status: 'failed', error_message: err.message, scheduler_tier: SCHEDULER_TIER });
     results.uk = { count: 0, error: err.message };
   }
 
@@ -489,6 +503,7 @@ async function fetchAllMemberBios() {
     results.australia = await fetchAUBios();
   } catch (err) {
     console.error('[member-bios] AU failed:', err.message);
+    await writeAuditLog({ collection_name: COLLECTION_NAME, jurisdiction: 'AU', data_pull_timestamp: new Date().toISOString(), source_endpoint: 'https://www.aph.gov.au/Senators_and_Members/Members', record_count: 0, import_status: 'failed', error_message: err.message, scheduler_tier: SCHEDULER_TIER });
     results.australia = { count: 0, error: err.message };
   }
 

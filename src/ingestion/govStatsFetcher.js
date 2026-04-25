@@ -30,6 +30,10 @@ require('dotenv').config();
 const axios = require('axios');
 const fs    = require('fs');
 const path  = require('path');
+const { writeAuditLog } = require('../firebase/auditLog');
+
+const SCHEDULER_TIER = 'gov_stats_quarterly';
+const COLLECTION_NAME = 'government_stats';
 
 const OUTPUT_DIR   = path.resolve(__dirname, '../../output/govstats');
 const TIMEOUT_MS   = 30000;
@@ -710,6 +714,7 @@ async function fetchAllGovStats() {
   };
 
   const results = {};
+  const _ts = new Date().toISOString();
   for (const jur of ['CA', 'US', 'UK', 'AU']) {
     const doc = buildGovStatsDoc(jur, wbData[jur], supplementsByJur[jur]);
     results[jur] = doc;
@@ -717,6 +722,7 @@ async function fetchAllGovStats() {
       generatedAt: new Date().toISOString(),
       ...doc,
     });
+    await writeAuditLog({ collection_name: COLLECTION_NAME, jurisdiction: jur, data_pull_timestamp: _ts, source_endpoint: 'https://api.worldbank.org/v2/country', record_count: 1, import_status: 'success', scheduler_tier: SCHEDULER_TIER });
   }
 
   console.log('[govstats] ✓ All government stats saved to output/govstats/');

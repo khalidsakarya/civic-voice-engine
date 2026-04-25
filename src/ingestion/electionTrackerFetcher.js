@@ -3,7 +3,10 @@
 const fs   = require('fs');
 const path = require('path');
 const axios = require('axios');
+const { writeAuditLog } = require('../firebase/auditLog');
 
+const SCHEDULER_TIER = 'weekly';
+const COLLECTION_NAME = 'elections';
 const OUTPUT_DIR = path.resolve(__dirname, '../../output/elections');
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -549,6 +552,7 @@ function hasUpcomingElection() {
 // ─── Orchestrator ─────────────────────────────────────────────────────────────
 
 async function fetchAllElections() {
+  const _ts = new Date().toISOString();
   console.log('\n[elections] Starting election tracker fetch (CA / US / UK / AU)...');
   const results = await Promise.allSettled([
     fetchCanadaElections(),
@@ -557,7 +561,24 @@ async function fetchAllElections() {
     fetchAUElections(),
   ]);
 
-  const [ca, us, uk, au] = results.map(r => r.status === 'fulfilled' ? r.value : 0);
+  const jurisdictions = ['CA', 'US', 'UK', 'AU'];
+  const sources = [
+    'https://elections.ca',
+    'https://fec.gov',
+    'https://electoralcommission.org.uk',
+    'https://aec.gov.au',
+  ];
+  const counts = results.map(r => r.status === 'fulfilled' ? r.value : 0);
+  for (let i = 0; i < results.length; i++) {
+    const r = results[i];
+    if (r.status === 'fulfilled') {
+      await writeAuditLog({ collection_name: COLLECTION_NAME, jurisdiction: jurisdictions[i], data_pull_timestamp: _ts, source_endpoint: sources[i], record_count: counts[i], import_status: 'success', scheduler_tier: SCHEDULER_TIER });
+    } else {
+      await writeAuditLog({ collection_name: COLLECTION_NAME, jurisdiction: jurisdictions[i], data_pull_timestamp: _ts, source_endpoint: sources[i], record_count: 0, import_status: 'failed', error_message: r.reason?.message || String(r.reason), scheduler_tier: SCHEDULER_TIER });
+    }
+  }
+
+  const [ca, us, uk, au] = counts;
   const total = ca + us + uk + au;
   console.log(`\n[elections] Done — CA:${ca} US:${us} UK:${uk} AU:${au} (total: ${total})`);
   return total;

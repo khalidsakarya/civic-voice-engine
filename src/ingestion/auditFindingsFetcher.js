@@ -43,7 +43,10 @@ require('dotenv').config();
 const axios = require('axios');
 const fs    = require('fs');
 const path  = require('path');
+const { writeAuditLog } = require('../firebase/auditLog');
 
+const SCHEDULER_TIER = 'monthly';
+const COLLECTION_NAME = 'audit_findings';
 const OUTPUT_DIR = path.resolve(__dirname, '../../output/audit_findings');
 const TIMEOUT_MS = 30_000;
 
@@ -213,6 +216,8 @@ const CKAN_CA_BASE = 'https://open.canada.ca/data/api/3/action';
 const CA_OAG_ORG   = 'oag-bvg';
 
 async function fetchCanadaAuditFindings() {
+  const _ts = new Date().toISOString();
+  try {
   console.log(`[audit-findings:CA] Querying open.canada.ca CKAN (org: ${CA_OAG_ORG}, rows: ${CA_ROWS})…`);
 
   const resp = await axios.get(`${CKAN_CA_BASE}/package_search`, {
@@ -263,12 +268,18 @@ async function fetchCanadaAuditFindings() {
     };
   });
 
-  return saveRecords('ca_oag_reports', records, {
+  const result = saveRecords('ca_oag_reports', records, {
     ckanOrg:        CA_OAG_ORG,
     totalAvailable: total,
     rowsFetched:    packages.length,
     sourceApi:      `${CKAN_CA_BASE}/package_search`,
   });
+  await writeAuditLog({ collection_name: COLLECTION_NAME, jurisdiction: 'CA', data_pull_timestamp: _ts, source_endpoint: 'https://open.canada.ca/data/api/3/action/package_search', record_count: result.count, import_status: 'success', scheduler_tier: SCHEDULER_TIER });
+  return result;
+  } catch (err) {
+    await writeAuditLog({ collection_name: COLLECTION_NAME, jurisdiction: 'CA', data_pull_timestamp: _ts, source_endpoint: 'https://open.canada.ca/data/api/3/action/package_search', record_count: 0, import_status: 'failed', error_message: err.message, scheduler_tier: SCHEDULER_TIER });
+    throw err;
+  }
 }
 
 // ─── US: Government Accountability Office (RSS feed) ─────────────────────────
@@ -284,6 +295,8 @@ const GAO_RSS_URL = 'https://www.gao.gov/rss/reports.xml';
 const GAO_BASE    = 'https://www.gao.gov';
 
 async function fetchUSAuditFindings() {
+  const _ts = new Date().toISOString();
+  try {
   console.log(`[audit-findings:US] Fetching GAO RSS feed (up to ${US_ITEMS} items)…`);
 
   const resp = await axios.get(GAO_RSS_URL, {
@@ -346,10 +359,16 @@ async function fetchUSAuditFindings() {
     };
   });
 
-  return saveRecords('us_gao_reports', records, {
+  const result = saveRecords('us_gao_reports', records, {
     feedUrl:     GAO_RSS_URL,
     itemsFetched: records.length,
   });
+  await writeAuditLog({ collection_name: COLLECTION_NAME, jurisdiction: 'US', data_pull_timestamp: _ts, source_endpoint: 'https://www.gao.gov/rss/reports.xml', record_count: result.count, import_status: 'success', scheduler_tier: SCHEDULER_TIER });
+  return result;
+  } catch (err) {
+    await writeAuditLog({ collection_name: COLLECTION_NAME, jurisdiction: 'US', data_pull_timestamp: _ts, source_endpoint: 'https://www.gao.gov/rss/reports.xml', record_count: 0, import_status: 'failed', error_message: err.message, scheduler_tier: SCHEDULER_TIER });
+    throw err;
+  }
 }
 
 // ─── UK: National Audit Office (WordPress REST API) ───────────────────────────
@@ -365,6 +384,8 @@ const NAO_API_BASE = 'https://www.nao.org.uk/wp-json/wp/v2';
 const NAO_PAGE_SIZE = Math.min(UK_ITEMS, 100); // WP max is 100
 
 async function fetchUKAuditFindings() {
+  const _ts = new Date().toISOString();
+  try {
   console.log(`[audit-findings:UK] Querying NAO WordPress REST API (up to ${UK_ITEMS} reports)…`);
 
   let allPosts = [];
@@ -440,10 +461,16 @@ async function fetchUKAuditFindings() {
     };
   });
 
-  return saveRecords('uk_nao_reports', records, {
+  const result = saveRecords('uk_nao_reports', records, {
     reportsFetched: records.length,
     sourceApi:      `${NAO_API_BASE}/report`,
   });
+  await writeAuditLog({ collection_name: COLLECTION_NAME, jurisdiction: 'UK', data_pull_timestamp: _ts, source_endpoint: 'https://www.nao.org.uk/wp-json/wp/v2/report', record_count: result.count, import_status: 'success', scheduler_tier: SCHEDULER_TIER });
+  return result;
+  } catch (err) {
+    await writeAuditLog({ collection_name: COLLECTION_NAME, jurisdiction: 'UK', data_pull_timestamp: _ts, source_endpoint: 'https://www.nao.org.uk/wp-json/wp/v2/report', record_count: 0, import_status: 'failed', error_message: err.message, scheduler_tier: SCHEDULER_TIER });
+    throw err;
+  }
 }
 
 // ─── AU: Australian National Audit Office (HTML scrape) ───────────────────────
@@ -465,6 +492,8 @@ const ANAO_DATA_NOTE =
   'ANAO performance audit listing page. Full report details are at the linked URL.';
 
 async function fetchAUAuditFindings() {
+  const _ts = new Date().toISOString();
+  try {
   console.log(`[audit-findings:AU] Fetching ANAO performance audit listing from ${ANAO_URL}…`);
 
   const resp = await axios.get(ANAO_URL, {
@@ -591,11 +620,17 @@ async function fetchAUAuditFindings() {
 
   console.log(`[audit-findings:AU] Parsed ${records.length} audit entries`);
 
-  return saveRecords('au_anao_reports', records, {
+  const result = saveRecords('au_anao_reports', records, {
     sourceUrl:    ANAO_URL,
     parseMethod:  'html-scrape',
     itemsFetched: records.length,
   });
+  await writeAuditLog({ collection_name: COLLECTION_NAME, jurisdiction: 'AU', data_pull_timestamp: _ts, source_endpoint: 'https://www.anao.gov.au/work/performance-audit', record_count: result.count, import_status: 'success', scheduler_tier: SCHEDULER_TIER });
+  return result;
+  } catch (err) {
+    await writeAuditLog({ collection_name: COLLECTION_NAME, jurisdiction: 'AU', data_pull_timestamp: _ts, source_endpoint: 'https://www.anao.gov.au/work/performance-audit', record_count: 0, import_status: 'failed', error_message: err.message, scheduler_tier: SCHEDULER_TIER });
+    throw err;
+  }
 }
 
 // ─── Main export ───────────────────────────────────────────────────────────────

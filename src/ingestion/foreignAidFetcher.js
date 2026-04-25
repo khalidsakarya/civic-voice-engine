@@ -4,6 +4,10 @@ const fs    = require('fs');
 const path  = require('path');
 const https = require('https');
 const axios = require('axios');
+const { writeAuditLog } = require('../firebase/auditLog');
+
+const SCHEDULER_TIER = 'monthly';
+const COLLECTION_NAME = 'foreign_aid';
 
 const OUTPUT_DIR = path.resolve(__dirname, '../../output/foreign_aid');
 
@@ -530,6 +534,7 @@ async function fetchAUForeignAid() {
 async function fetchAllForeignAid() {
   console.log('\n[foreign-aid] Starting foreign aid ingestion (CA / US / UK / AU)...');
 
+  const _ts = new Date().toISOString();
   const results = await Promise.allSettled([
     fetchCanadaForeignAid(),
     fetchUSForeignAid(),
@@ -538,6 +543,12 @@ async function fetchAllForeignAid() {
   ]);
 
   const jurisdictions = ['CA', 'US', 'UK', 'AU'];
+  const sources = [
+    'https://www.international.gc.ca/transparency-transparence/international-assistance-report-rapport-aide-internationale/2023-2024.aspx',
+    'https://api.usaspending.gov/api/v2/spending/',
+    'https://www.gov.uk/government/statistics/statistics-on-international-development-final-uk-oda-spend-2024',
+    'https://www.dfat.gov.au/about-us/corporate/portfolio-budget-statements/australias-official-development-assistance-budget-summary-2025-26',
+  ];
   let total = 0;
 
   for (let i = 0; i < results.length; i++) {
@@ -551,8 +562,10 @@ async function fetchAllForeignAid() {
       } else {
         console.warn(`[foreign-aid:${jur}] No records fetched`);
       }
+      await writeAuditLog({ collection_name: COLLECTION_NAME, jurisdiction: jur, data_pull_timestamp: _ts, source_endpoint: sources[i], record_count: res.value.length, import_status: 'success', scheduler_tier: SCHEDULER_TIER });
     } else {
       console.error(`[foreign-aid:${jur}] Failed: ${res.reason?.message}`);
+      await writeAuditLog({ collection_name: COLLECTION_NAME, jurisdiction: jur, data_pull_timestamp: _ts, source_endpoint: sources[i], record_count: 0, import_status: 'failed', error_message: res.reason?.message || String(res.reason), scheduler_tier: SCHEDULER_TIER });
     }
   }
 

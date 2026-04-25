@@ -45,7 +45,10 @@ require('dotenv').config();
 const axios = require('axios');
 const fs    = require('fs');
 const path  = require('path');
+const { writeAuditLog } = require('../firebase/auditLog');
 
+const SCHEDULER_TIER = 'bimonthly';
+const COLLECTION_NAME = 'member_expenses';
 const OUTPUT_DIR = path.resolve(__dirname, '../../output/member_expenses');
 const TIMEOUT_MS = 60_000;   // large CSV downloads need more time
 const CA_QUARTERS_TO_FETCH = parseInt(process.env.CA_EXPENSE_QUARTERS || '2', 10);
@@ -195,6 +198,7 @@ async function fetchCAQuarter(year, q) {
 }
 
 async function fetchCanadaExpenses() {
+  const _ts = new Date().toISOString();
   console.log('[ca-expenses] Fetching CA MP quarterly expense disclosures...');
   const allRecords = [];
   let fetched = 0;
@@ -218,6 +222,7 @@ async function fetchCanadaExpenses() {
 
   const result = saveRecords('canada', allRecords, { quartersLoaded: fetched });
   console.log(`[ca-expenses] ✓ ${result.count} records → ${result.filepath}`);
+  await writeAuditLog({ collection_name: COLLECTION_NAME, jurisdiction: 'CA', data_pull_timestamp: _ts, source_endpoint: 'https://www.ourcommons.ca/ProactiveDisclosure/', record_count: result.count, import_status: 'success', scheduler_tier: SCHEDULER_TIER });
   return result;
 }
 
@@ -238,6 +243,7 @@ function xmlTag(xml, tag) {
 }
 
 async function fetchUSExpenses() {
+  const _ts = new Date().toISOString();
   console.log('[us-expenses] Fetching member list from clerk.house.gov MemberData.xml...');
   const r = await axios.get(CLERK_XML, { timeout: TIMEOUT_MS });
   const xml = r.data;
@@ -281,6 +287,7 @@ async function fetchUSExpenses() {
 
   const result = saveRecords('usa', records, { dataNote: US_DATA_NOTE });
   console.log(`[us-expenses] ✓ ${result.count} records (identity only) → ${result.filepath}`);
+  await writeAuditLog({ collection_name: COLLECTION_NAME, jurisdiction: 'US', data_pull_timestamp: _ts, source_endpoint: 'https://clerk.house.gov/xml/lists/MemberData.xml', record_count: result.count, import_status: 'success', scheduler_tier: SCHEDULER_TIER });
   return result;
 }
 
@@ -290,6 +297,7 @@ const IPSA_BASE = 'https://www.theipsa.org.uk/api/download';
 const IPSA_YEAR = process.env.IPSA_EXPENSE_YEAR || '24_25';
 
 async function fetchUKExpenses() {
+  const _ts = new Date().toISOString();
   console.log(`[uk-expenses] Downloading IPSA individualBusinessCosts CSV (year=${IPSA_YEAR})...`);
 
   // Download the individual claims CSV (~21 MB)
@@ -402,6 +410,7 @@ async function fetchUKExpenses() {
 
   const result = saveRecords('uk', records, { ipsaYear: IPSA_YEAR });
   console.log(`[uk-expenses] ✓ ${result.count} MP records → ${result.filepath}`);
+  await writeAuditLog({ collection_name: COLLECTION_NAME, jurisdiction: 'UK', data_pull_timestamp: _ts, source_endpoint: 'https://www.theipsa.org.uk/api/download', record_count: result.count, import_status: 'success', scheduler_tier: SCHEDULER_TIER });
   return result;
 }
 
@@ -410,6 +419,7 @@ async function fetchUKExpenses() {
 const AU_CKAN = 'https://data.gov.au/data/api/3/action';
 
 async function fetchAUExpenses() {
+  const _ts = new Date().toISOString();
   console.log('[au-expenses] Searching for latest IPEA quarterly package on data.gov.au...');
 
   const searchResp = await axios.get(`${AU_CKAN}/package_search`, {
@@ -526,6 +536,7 @@ async function fetchAUExpenses() {
 
   const result = saveRecords('australia', records, { reportingPeriod: period, packageId: pkg.id });
   console.log(`[au-expenses] ✓ ${result.count} member records → ${result.filepath}`);
+  await writeAuditLog({ collection_name: COLLECTION_NAME, jurisdiction: 'AU', data_pull_timestamp: _ts, source_endpoint: 'https://data.gov.au/data/api/3/action/datastore_search', record_count: result.count, import_status: 'success', scheduler_tier: SCHEDULER_TIER });
   return result;
 }
 
@@ -539,6 +550,7 @@ async function fetchAllMemberExpenses() {
     results.canada = await fetchCanadaExpenses();
   } catch (err) {
     console.error('[member-expenses] CA failed:', err.message);
+    await writeAuditLog({ collection_name: COLLECTION_NAME, jurisdiction: 'CA', data_pull_timestamp: new Date().toISOString(), source_endpoint: 'https://www.ourcommons.ca/ProactiveDisclosure/', record_count: 0, import_status: 'failed', error_message: err.message, scheduler_tier: SCHEDULER_TIER });
     results.canada = { count: 0, error: err.message };
   }
 
@@ -546,6 +558,7 @@ async function fetchAllMemberExpenses() {
     results.usa = await fetchUSExpenses();
   } catch (err) {
     console.error('[member-expenses] US failed:', err.message);
+    await writeAuditLog({ collection_name: COLLECTION_NAME, jurisdiction: 'US', data_pull_timestamp: new Date().toISOString(), source_endpoint: 'https://clerk.house.gov/xml/lists/MemberData.xml', record_count: 0, import_status: 'failed', error_message: err.message, scheduler_tier: SCHEDULER_TIER });
     results.usa = { count: 0, error: err.message };
   }
 
@@ -553,6 +566,7 @@ async function fetchAllMemberExpenses() {
     results.uk = await fetchUKExpenses();
   } catch (err) {
     console.error('[member-expenses] UK failed:', err.message);
+    await writeAuditLog({ collection_name: COLLECTION_NAME, jurisdiction: 'UK', data_pull_timestamp: new Date().toISOString(), source_endpoint: 'https://www.theipsa.org.uk/api/download', record_count: 0, import_status: 'failed', error_message: err.message, scheduler_tier: SCHEDULER_TIER });
     results.uk = { count: 0, error: err.message };
   }
 
@@ -560,6 +574,7 @@ async function fetchAllMemberExpenses() {
     results.australia = await fetchAUExpenses();
   } catch (err) {
     console.error('[member-expenses] AU failed:', err.message);
+    await writeAuditLog({ collection_name: COLLECTION_NAME, jurisdiction: 'AU', data_pull_timestamp: new Date().toISOString(), source_endpoint: 'https://data.gov.au/data/api/3/action/datastore_search', record_count: 0, import_status: 'failed', error_message: err.message, scheduler_tier: SCHEDULER_TIER });
     results.australia = { count: 0, error: err.message };
   }
 

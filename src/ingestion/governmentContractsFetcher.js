@@ -3,6 +3,10 @@
 const fs    = require('fs');
 const path  = require('path');
 const axios = require('axios');
+const { writeAuditLog } = require('../firebase/auditLog');
+
+const SCHEDULER_TIER = 'monthly';
+const COLLECTION_NAME = 'government_contracts';
 
 const OUTPUT_DIR = path.resolve(__dirname, '../../output/government_contracts');
 
@@ -441,6 +445,7 @@ async function fetchAUContracts() {
 
 async function fetchAllGovernmentContracts() {
   console.log('[contracts] Fetching government contracts for CA / US / UK / AU...');
+  const _ts = new Date().toISOString();
   const results = await Promise.allSettled([
     fetchCanadaContracts(),
     fetchUSContracts(),
@@ -449,14 +454,23 @@ async function fetchAllGovernmentContracts() {
   ]);
 
   const labels = ['CA', 'US', 'UK', 'AU'];
+  const sources = [
+    'https://open.canada.ca/data/api/3/action/datastore_search',
+    'https://api.usaspending.gov/api/v2/search/spending_by_award/',
+    'https://www.find-tender.service.gov.uk/api/1.0/ocdsReleasePackages',
+    'https://data.gov.au/data/api/3/action/datastore_search',
+  ];
   let total = 0;
-  results.forEach((r, i) => {
+  for (let i = 0; i < results.length; i++) {
+    const r = results[i];
     if (r.status === 'fulfilled') {
       total += r.value;
+      await writeAuditLog({ collection_name: COLLECTION_NAME, jurisdiction: labels[i], data_pull_timestamp: _ts, source_endpoint: sources[i], record_count: r.value, import_status: 'success', scheduler_tier: SCHEDULER_TIER });
     } else {
       console.error(`[contracts:${labels[i]}] Failed: ${r.reason?.message || r.reason}`);
+      await writeAuditLog({ collection_name: COLLECTION_NAME, jurisdiction: labels[i], data_pull_timestamp: _ts, source_endpoint: sources[i], record_count: 0, import_status: 'failed', error_message: r.reason?.message || String(r.reason), scheduler_tier: SCHEDULER_TIER });
     }
-  });
+  }
 
   console.log(`[contracts] Done — ${total} total contract records saved.`);
   return total;

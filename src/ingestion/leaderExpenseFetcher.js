@@ -37,7 +37,10 @@ require('dotenv').config();
 const axios = require('axios');
 const fs    = require('fs');
 const path  = require('path');
+const { writeAuditLog } = require('../firebase/auditLog');
 
+const SCHEDULER_TIER = 'leader_expense_weekly';
+const COLLECTION_NAME = 'leader_expenses';
 const OUTPUT_DIR = path.resolve(__dirname, '../../output/expenses/leaders');
 const TIMEOUT_MS = 45_000;
 
@@ -78,6 +81,8 @@ const CA_TRAVEL_RESOURCE = '8282db2a-878f-475c-af10-ad56aa8fa72c';
 const CA_HOSP_RESOURCE   = '7b301f1a-2a7a-48bd-9ea9-e0ac4a5313ed';
 
 async function fetchCanadaLeaderExpenses() {
+  const _ts = new Date().toISOString();
+  try {
   console.log('[expense:CA-leaders] Fetching travel & hospitality proactive disclosure…');
 
   const ckanSearch = async (resourceId, extraFilters = {}) => {
@@ -148,11 +153,17 @@ async function fetchCanadaLeaderExpenses() {
   const allRecords = [...travelRecords, ...hospRecords];
   console.log(`[expense:CA-leaders]   travel: ${travelRecords.length}  hospitality: ${hospRecords.length}`);
 
-  return saveLeaderExpenses('canada_minister_expenses', 'CA', allRecords, {
+  const result = saveLeaderExpenses('canada_minister_expenses', 'CA', allRecords, {
     travelResourceId:      CA_TRAVEL_RESOURCE,
     hospitalityResourceId: CA_HOSP_RESOURCE,
     disclosureGroup:       'MPSES',
   });
+  await writeAuditLog({ collection_name: COLLECTION_NAME, jurisdiction: 'CA', data_pull_timestamp: _ts, source_endpoint: 'https://open.canada.ca/data/api/3/action/datastore_search', record_count: result.count, import_status: 'success', scheduler_tier: SCHEDULER_TIER });
+  return result;
+  } catch (err) {
+    await writeAuditLog({ collection_name: COLLECTION_NAME, jurisdiction: 'CA', data_pull_timestamp: _ts, source_endpoint: 'https://open.canada.ca/data/api/3/action/datastore_search', record_count: 0, import_status: 'failed', error_message: err.message, scheduler_tier: SCHEDULER_TIER });
+    throw err;
+  }
 }
 
 // ─── USA: Cabinet Agency Travel Spending + Travel Contracts ──────────────────
@@ -186,6 +197,8 @@ const US_CABINET_AGENCIES = [
 ];
 
 async function fetchUSLeaderExpenses() {
+  const _ts = new Date().toISOString();
+  try {
   console.log('[expense:US-leaders] Fetching agency travel spending from USASpending…');
 
   // Current fiscal year (US FY starts Oct)
@@ -273,10 +286,16 @@ async function fetchUSLeaderExpenses() {
     await sleep(200); // gentle rate limiting
   }
 
-  return saveLeaderExpenses('us_cabinet_travel', 'US', records, {
+  const result = saveLeaderExpenses('us_cabinet_travel', 'US', records, {
     fiscalYear: fy,
     dataLimitation: 'Individual person-level travel expense records are not publicly available via USASpending.gov. Records represent aggregate fiscal-year travel obligations per cabinet department.',
   });
+  await writeAuditLog({ collection_name: COLLECTION_NAME, jurisdiction: 'US', data_pull_timestamp: _ts, source_endpoint: 'https://api.usaspending.gov/api/v2/agency/', record_count: result.count, import_status: 'success', scheduler_tier: SCHEDULER_TIER });
+  return result;
+  } catch (err) {
+    await writeAuditLog({ collection_name: COLLECTION_NAME, jurisdiction: 'US', data_pull_timestamp: _ts, source_endpoint: 'https://api.usaspending.gov/api/v2/agency/', record_count: 0, import_status: 'failed', error_message: err.message, scheduler_tier: SCHEDULER_TIER });
+    throw err;
+  }
 }
 
 // ─── UK: Parliament Posts API → current ministers + IPSA bulk CSV ─────────────
@@ -291,6 +310,8 @@ async function fetchUSLeaderExpenses() {
 const PARLIAMENT_BASE = 'https://members-api.parliament.uk/api';
 
 async function fetchUKLeaderExpenses() {
+  const _ts = new Date().toISOString();
+  try {
   console.log('[expense:UK-leaders] Fetching current ministers from Parliament API…');
 
   // ── Step 1: Fetch all government posts ────────────────────────────────────
@@ -383,10 +404,16 @@ async function fetchUKLeaderExpenses() {
 
   console.log(`[expense:UK-leaders] ${ministerRecords.length} minister records assembled`);
 
-  return saveLeaderExpenses('uk_minister_list', 'UK', ministerRecords, {
+  const result = saveLeaderExpenses('uk_minister_list', 'UK', ministerRecords, {
     dataLimitation: 'IPSA expense amounts unavailable via public API. Minister identities sourced from Parliament Members API.',
     ipsaManualDataUrl: 'https://www.theipsa.org.uk/mp-costs/',
   });
+  await writeAuditLog({ collection_name: COLLECTION_NAME, jurisdiction: 'UK', data_pull_timestamp: _ts, source_endpoint: 'https://members-api.parliament.uk/api', record_count: result.count, import_status: 'success', scheduler_tier: SCHEDULER_TIER });
+  return result;
+  } catch (err) {
+    await writeAuditLog({ collection_name: COLLECTION_NAME, jurisdiction: 'UK', data_pull_timestamp: _ts, source_endpoint: 'https://members-api.parliament.uk/api', record_count: 0, import_status: 'failed', error_message: err.message, scheduler_tier: SCHEDULER_TIER });
+    throw err;
+  }
 }
 
 // ─── Australia: IPEA Quarterly Expense Data ───────────────────────────────────
@@ -398,6 +425,8 @@ async function fetchUKLeaderExpenses() {
 //  always have this prefix in FullNameWithTitle.
 
 async function fetchAULeaderExpenses() {
+  const _ts = new Date().toISOString();
+  try {
   console.log('[expense:AU-leaders] Finding latest IPEA quarterly package…');
 
   // ── Find latest IPEA package ───────────────────────────────────────────────
@@ -519,7 +548,7 @@ async function fetchAULeaderExpenses() {
     }
   }
 
-  return saveLeaderExpenses('au_minister_expenses', 'AU', records, {
+  const result = saveLeaderExpenses('au_minister_expenses', 'AU', records, {
     packageId:         pkg.id,
     packageTitle:      pkg.title,
     resourceId:        mainResource.id,
@@ -527,6 +556,12 @@ async function fetchAULeaderExpenses() {
     totalAvailable,
     ministerFilter:    '"the Hon" in FullNameWithTitle',
   });
+  await writeAuditLog({ collection_name: COLLECTION_NAME, jurisdiction: 'AU', data_pull_timestamp: _ts, source_endpoint: 'https://data.gov.au/data/api/3/action/datastore_search', record_count: result.count, import_status: 'success', scheduler_tier: SCHEDULER_TIER });
+  return result;
+  } catch (err) {
+    await writeAuditLog({ collection_name: COLLECTION_NAME, jurisdiction: 'AU', data_pull_timestamp: _ts, source_endpoint: 'https://data.gov.au/data/api/3/action/datastore_search', record_count: 0, import_status: 'failed', error_message: err.message, scheduler_tier: SCHEDULER_TIER });
+    throw err;
+  }
 }
 
 // ─── Main ─────────────────────────────────────────────────────────────────────

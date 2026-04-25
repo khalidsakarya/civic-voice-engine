@@ -22,7 +22,10 @@ require('dotenv').config();
 const axios  = require('axios');
 const fs     = require('fs');
 const path   = require('path');
+const { writeAuditLog } = require('../firebase/auditLog');
 
+const SCHEDULER_TIER = 'expense_weekly';
+const COLLECTION_NAME = 'flagged_expenses';
 const OUTPUT_DIR   = path.resolve(__dirname, '../../output/expenses');
 const TIMEOUT_MS   = 45000;
 const CURRENT_YEAR = new Date().getFullYear();
@@ -65,47 +68,55 @@ const safeNum = (v) => { const n = parseFloat(v); return isNaN(n) ? null : n; };
 //             vote_type, authorities
 
 async function fetchCanadaExpenses() {
+  const _ts = new Date().toISOString();
   const PACKAGE_ID  = 'a35cf382-690c-4221-a971-cf0fd189a46f';
   const RESOURCE_ID = 'f87c5f47-dd85-4c6f-b85e-2c59ccf8d84c'; // Expenditure Budgetary Authorities (active)
 
-  console.log('[expense:CA] Step 1/2 — resolving package metadata...');
-  const pkgResp = await axios.get('https://open.canada.ca/data/api/3/action/package_show', {
-    params:  { id: PACKAGE_ID },
-    timeout: TIMEOUT_MS,
-  });
+  try {
+    console.log('[expense:CA] Step 1/2 — resolving package metadata...');
+    const pkgResp = await axios.get('https://open.canada.ca/data/api/3/action/package_show', {
+      params:  { id: PACKAGE_ID },
+      timeout: TIMEOUT_MS,
+    });
 
-  const pkg       = pkgResp.data?.result || {};
-  const resources = pkg.resources || [];
-  const resource  = resources.find(r => r.id === RESOURCE_ID) || resources.find(r => r.datastore_active) || resources[0];
+    const pkg       = pkgResp.data?.result || {};
+    const resources = pkg.resources || [];
+    const resource  = resources.find(r => r.id === RESOURCE_ID) || resources.find(r => r.datastore_active) || resources[0];
 
-  if (!resource) throw new Error('No usable resource found in CA package');
+    if (!resource) throw new Error('No usable resource found in CA package');
 
-  console.log(`[expense:CA] Step 2/2 — querying datastore (resource: ${resource.id})...`);
-  const dataResp = await axios.get('https://open.canada.ca/data/api/3/action/datastore_search', {
-    params:  { resource_id: resource.id, limit: 20, sort: '_id desc' },
-    timeout: TIMEOUT_MS,
-  });
+    console.log(`[expense:CA] Step 2/2 — querying datastore (resource: ${resource.id})...`);
+    const dataResp = await axios.get('https://open.canada.ca/data/api/3/action/datastore_search', {
+      params:  { resource_id: resource.id, limit: 20, sort: '_id desc' },
+      timeout: TIMEOUT_MS,
+    });
 
-  const rows    = dataResp.data?.result?.records || [];
-  const records = rows.map((r, i) => ({
-    id:          safeStr(r._id || `ca-${i}`),
-    title:       safeStr(r.estimates_document || r.vote_type),
-    date:        safeStr(r.fy_ef),
-    amount:      safeNum(r.authorities),
-    recipient:   null,
-    category:    safeStr(r.vote_type || 'budgetary_authority'),
-    department:  safeStr(r.organization),
-    vote_number: safeStr(r.vote_number),
-    jurisdiction: 'CA',
-    sourceUrl:   `https://open.canada.ca/data/en/dataset/${PACKAGE_ID}`,
-  }));
+    const rows    = dataResp.data?.result?.records || [];
+    const records = rows.map((r, i) => ({
+      id:          safeStr(r._id || `ca-${i}`),
+      title:       safeStr(r.estimates_document || r.vote_type),
+      date:        safeStr(r.fy_ef),
+      amount:      safeNum(r.authorities),
+      recipient:   null,
+      category:    safeStr(r.vote_type || 'budgetary_authority'),
+      department:  safeStr(r.organization),
+      vote_number: safeStr(r.vote_number),
+      jurisdiction: 'CA',
+      sourceUrl:   `https://open.canada.ca/data/en/dataset/${PACKAGE_ID}`,
+    }));
 
-  return saveExpenses('canada_budgetary_authorities', 'CA', records, {
-    packageId:      PACKAGE_ID,
-    resourceId:     resource.id,
-    resourceName:   safeStr(resource.name),
-    totalAvailable: dataResp.data?.result?.total,
-  });
+    const result = saveExpenses('canada_budgetary_authorities', 'CA', records, {
+      packageId:      PACKAGE_ID,
+      resourceId:     resource.id,
+      resourceName:   safeStr(resource.name),
+      totalAvailable: dataResp.data?.result?.total,
+    });
+    await writeAuditLog({ collection_name: COLLECTION_NAME, jurisdiction: 'CA', data_pull_timestamp: _ts, source_endpoint: 'https://open.canada.ca/data/api/3/action/package_show', record_count: result.count, import_status: 'success', scheduler_tier: SCHEDULER_TIER });
+    return result;
+  } catch (err) {
+    await writeAuditLog({ collection_name: COLLECTION_NAME, jurisdiction: 'CA', data_pull_timestamp: _ts, source_endpoint: 'https://open.canada.ca/data/api/3/action/package_show', record_count: 0, import_status: 'failed', error_message: err.message, scheduler_tier: SCHEDULER_TIER });
+    throw err;
+  }
 }
 
 // ─── USA: USASpending.gov — Federal Account Spending ─────────────────────────
@@ -117,53 +128,61 @@ async function fetchCanadaExpenses() {
 //  fiscal_period: Oct=1 … Sep=12; current FY starts Oct of previous calendar year.
 
 async function fetchUSExpenses() {
-  // USASpending typically lags 1-2 months — try periods backwards from the
-  // most recently completed one until the API accepts the submission window.
-  const now       = new Date();
-  const month     = now.getMonth() + 1;
-  const rawPeriod = month >= 10 ? month - 9 : month + 3; // Oct→1 … Sep→12
-  const fy        = month >= 10 ? now.getFullYear() + 1 : now.getFullYear();
+  const _ts = new Date().toISOString();
+  try {
+    // USASpending typically lags 1-2 months — try periods backwards from the
+    // most recently completed one until the API accepts the submission window.
+    const now       = new Date();
+    const month     = now.getMonth() + 1;
+    const rawPeriod = month >= 10 ? month - 9 : month + 3; // Oct→1 … Sep→12
+    const fy        = month >= 10 ? now.getFullYear() + 1 : now.getFullYear();
 
-  let resp = null;
-  let period = rawPeriod - 1 || 12; // start one period back
-  for (let attempt = 0; attempt < 6; attempt++, period--) {
-    if (period < 1) period = 12;
-    console.log(`[expense:US] Trying FY${fy} period ${period}...`);
-    try {
-      resp = await axios.post(
-        'https://api.usaspending.gov/api/v2/spending/',
-        { type: 'federal_account', filters: { fy: String(fy), period } },
-        { headers: { 'Content-Type': 'application/json' }, timeout: TIMEOUT_MS }
-      );
-      break; // found a valid period
-    } catch (err) {
-      if (err.response?.status === 400) continue; // period not yet available
-      throw err; // unexpected error
+    let resp = null;
+    let period = rawPeriod - 1 || 12; // start one period back
+    for (let attempt = 0; attempt < 6; attempt++, period--) {
+      if (period < 1) period = 12;
+      console.log(`[expense:US] Trying FY${fy} period ${period}...`);
+      try {
+        resp = await axios.post(
+          'https://api.usaspending.gov/api/v2/spending/',
+          { type: 'federal_account', filters: { fy: String(fy), period } },
+          { headers: { 'Content-Type': 'application/json' }, timeout: TIMEOUT_MS }
+        );
+        break; // found a valid period
+      } catch (err) {
+        if (err.response?.status === 400) continue; // period not yet available
+        throw err; // unexpected error
+      }
     }
+    if (!resp) throw new Error(`No available submission period found for FY${fy}`);
+
+    const results = resp.data?.results || [];
+    const records = results.map((r, i) => ({
+      id:           safeStr(r.id || r.account_number || `us-${i}`),
+      title:        safeStr(r.name),
+      date:         safeStr(resp.data?.end_date || String(fy)),
+      amount:       safeNum(r.amount),
+      recipient:    null,
+      category:     'federal_account',
+      department:   safeStr(r.name),
+      account_code: safeStr(r.account_number || r.code),
+      jurisdiction: 'US',
+      sourceUrl:    'https://api.usaspending.gov',
+    }));
+
+    const result = saveExpenses('us_federal_spending', 'US', records, {
+      fiscalYear:    fy,
+      fiscalPeriod:  period,
+      endDate:       resp.data?.end_date,
+      totalSpending: resp.data?.total,
+      totalResults:  resp.data?.page_metadata?.count || results.length,
+    });
+    await writeAuditLog({ collection_name: COLLECTION_NAME, jurisdiction: 'US', data_pull_timestamp: _ts, source_endpoint: 'https://api.usaspending.gov/api/v2/spending/', record_count: result.count, import_status: 'success', scheduler_tier: SCHEDULER_TIER });
+    return result;
+  } catch (err) {
+    await writeAuditLog({ collection_name: COLLECTION_NAME, jurisdiction: 'US', data_pull_timestamp: _ts, source_endpoint: 'https://api.usaspending.gov/api/v2/spending/', record_count: 0, import_status: 'failed', error_message: err.message, scheduler_tier: SCHEDULER_TIER });
+    throw err;
   }
-  if (!resp) throw new Error(`No available submission period found for FY${fy}`);
-
-  const results = resp.data?.results || [];
-  const records = results.map((r, i) => ({
-    id:           safeStr(r.id || r.account_number || `us-${i}`),
-    title:        safeStr(r.name),
-    date:         safeStr(resp.data?.end_date || String(fy)),
-    amount:       safeNum(r.amount),
-    recipient:    null,
-    category:     'federal_account',
-    department:   safeStr(r.name),
-    account_code: safeStr(r.account_number || r.code),
-    jurisdiction: 'US',
-    sourceUrl:    'https://api.usaspending.gov',
-  }));
-
-  return saveExpenses('us_federal_spending', 'US', records, {
-    fiscalYear:    fy,
-    fiscalPeriod:  period,
-    endDate:       resp.data?.end_date,
-    totalSpending: resp.data?.total,
-    totalResults:  resp.data?.page_metadata?.count || results.length,
-  });
 }
 
 // ─── UK: Contracts Finder — Contract Award Notices ───────────────────────────
@@ -173,35 +192,43 @@ async function fetchUSExpenses() {
 //  Note:      User's URL was /PublicSearch/api — the working REST path is /api/rest/2/…
 
 async function fetchUKExpenses() {
-  console.log('[expense:UK] Fetching contract award notices...');
-  const resp = await axios.post(
-    'https://www.contractsfinder.service.gov.uk/api/rest/2/search_notices/json',
-    { searchCriteria: { size: 20, startIndex: 0 } },
-    { headers: { 'Content-Type': 'application/json' }, timeout: TIMEOUT_MS }
-  );
+  const _ts = new Date().toISOString();
+  try {
+    console.log('[expense:UK] Fetching contract award notices...');
+    const resp = await axios.post(
+      'https://www.contractsfinder.service.gov.uk/api/rest/2/search_notices/json',
+      { searchCriteria: { size: 20, startIndex: 0 } },
+      { headers: { 'Content-Type': 'application/json' }, timeout: TIMEOUT_MS }
+    );
 
-  // Each entry is { score, item: { id, title, awardedValue, awardedSupplier, … } }
-  const entries = resp.data?.noticeList || [];
-  const records = entries.map((entry, i) => {
-    const n = entry.item || entry;
-    return {
-      id:          safeStr(n.id || n.noticeIdentifier || `uk-${i}`),
-      title:       safeStr(n.title),
-      date:        safeStr(n.awardedDate || n.publishedDate),
-      amount:      safeNum(n.awardedValue || n.valueLow),
-      recipient:   safeStr(n.awardedSupplier),
-      category:    safeStr(n.cpvDescription || n.noticeType || 'government_contract'),
-      department:  safeStr(n.organisationName),
-      notice_id:   safeStr(n.noticeIdentifier),
-      jurisdiction: 'UK',
-      sourceUrl:   `https://www.contractsfinder.service.gov.uk/Notice/${n.id || ''}`,
-    };
-  });
+    // Each entry is { score, item: { id, title, awardedValue, awardedSupplier, … } }
+    const entries = resp.data?.noticeList || [];
+    const records = entries.map((entry, i) => {
+      const n = entry.item || entry;
+      return {
+        id:          safeStr(n.id || n.noticeIdentifier || `uk-${i}`),
+        title:       safeStr(n.title),
+        date:        safeStr(n.awardedDate || n.publishedDate),
+        amount:      safeNum(n.awardedValue || n.valueLow),
+        recipient:   safeStr(n.awardedSupplier),
+        category:    safeStr(n.cpvDescription || n.noticeType || 'government_contract'),
+        department:  safeStr(n.organisationName),
+        notice_id:   safeStr(n.noticeIdentifier),
+        jurisdiction: 'UK',
+        sourceUrl:   `https://www.contractsfinder.service.gov.uk/Notice/${n.id || ''}`,
+      };
+    });
 
-  return saveExpenses('uk_contracts_finder', 'UK', records, {
-    hitCount:   resp.data?.hitCount,
-    maxHits:    resp.data?.maxHits,
-  });
+    const result = saveExpenses('uk_contracts_finder', 'UK', records, {
+      hitCount:   resp.data?.hitCount,
+      maxHits:    resp.data?.maxHits,
+    });
+    await writeAuditLog({ collection_name: COLLECTION_NAME, jurisdiction: 'UK', data_pull_timestamp: _ts, source_endpoint: 'https://www.contractsfinder.service.gov.uk/api/rest/2/search_notices/json', record_count: result.count, import_status: 'success', scheduler_tier: SCHEDULER_TIER });
+    return result;
+  } catch (err) {
+    await writeAuditLog({ collection_name: COLLECTION_NAME, jurisdiction: 'UK', data_pull_timestamp: _ts, source_endpoint: 'https://www.contractsfinder.service.gov.uk/api/rest/2/search_notices/json', record_count: 0, import_status: 'failed', error_message: err.message, scheduler_tier: SCHEDULER_TIER });
+    throw err;
+  }
 }
 
 // ─── Australia: AusTender Government Contracts ───────────────────────────────
@@ -213,32 +240,40 @@ async function fetchUKExpenses() {
 //             Supplier Name, Procurement Method, Applicable FY Year
 
 async function fetchAUExpenses() {
+  const _ts = new Date().toISOString();
   const RESOURCE_ID = '06439664-bbcf-4118-a604-164006bffcaa';
-  console.log('[expense:AU] Fetching AusTender contract data...');
-  const resp = await axios.get('https://data.gov.au/data/api/3/action/datastore_search', {
-    params:  { resource_id: RESOURCE_ID, limit: 20, sort: '_id desc' },
-    timeout: TIMEOUT_MS,
-  });
+  try {
+    console.log('[expense:AU] Fetching AusTender contract data...');
+    const resp = await axios.get('https://data.gov.au/data/api/3/action/datastore_search', {
+      params:  { resource_id: RESOURCE_ID, limit: 20, sort: '_id desc' },
+      timeout: TIMEOUT_MS,
+    });
 
-  const rows    = resp.data?.result?.records || [];
-  const records = rows.map((r, i) => ({
-    id:                safeStr(r['Contract ID'] || r._id || `au-${i}`),
-    title:             safeStr(r['Description']),
-    date:              safeStr(r['Publish Date'] || r['Start Date']),
-    amount:            safeNum(r['Value'] || r['Applicable Value']),
-    recipient:         safeStr(r['Supplier Name']),
-    category:          safeStr(r['Procurement Method'] || 'government_contract'),
-    department:        safeStr(r['Agency Name']),
-    fiscal_year:       safeStr(r['Applicable FY Year']),
-    supplier_country:  safeStr(r['Supplier Country']),
-    jurisdiction:      'AU',
-    sourceUrl:         'https://www.tenders.gov.au',
-  }));
+    const rows    = resp.data?.result?.records || [];
+    const records = rows.map((r, i) => ({
+      id:                safeStr(r['Contract ID'] || r._id || `au-${i}`),
+      title:             safeStr(r['Description']),
+      date:              safeStr(r['Publish Date'] || r['Start Date']),
+      amount:            safeNum(r['Value'] || r['Applicable Value']),
+      recipient:         safeStr(r['Supplier Name']),
+      category:          safeStr(r['Procurement Method'] || 'government_contract'),
+      department:        safeStr(r['Agency Name']),
+      fiscal_year:       safeStr(r['Applicable FY Year']),
+      supplier_country:  safeStr(r['Supplier Country']),
+      jurisdiction:      'AU',
+      sourceUrl:         'https://www.tenders.gov.au',
+    }));
 
-  return saveExpenses('au_austender_contracts', 'AU', records, {
-    resourceId:     RESOURCE_ID,
-    totalAvailable: resp.data?.result?.total,
-  });
+    const result = saveExpenses('au_austender_contracts', 'AU', records, {
+      resourceId:     RESOURCE_ID,
+      totalAvailable: resp.data?.result?.total,
+    });
+    await writeAuditLog({ collection_name: COLLECTION_NAME, jurisdiction: 'AU', data_pull_timestamp: _ts, source_endpoint: 'https://data.gov.au/data/api/3/action/datastore_search', record_count: result.count, import_status: 'success', scheduler_tier: SCHEDULER_TIER });
+    return result;
+  } catch (err) {
+    await writeAuditLog({ collection_name: COLLECTION_NAME, jurisdiction: 'AU', data_pull_timestamp: _ts, source_endpoint: 'https://data.gov.au/data/api/3/action/datastore_search', record_count: 0, import_status: 'failed', error_message: err.message, scheduler_tier: SCHEDULER_TIER });
+    throw err;
+  }
 }
 
 // ─── Main: run all four sources ───────────────────────────────────────────────

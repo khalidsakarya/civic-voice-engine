@@ -3,7 +3,10 @@
 const fs   = require('fs');
 const path = require('path');
 const axios = require('axios');
+const { writeAuditLog } = require('../firebase/auditLog');
 
+const SCHEDULER_TIER = 'weekly';
+const COLLECTION_NAME = 'promise_tracker';
 const OUTPUT_DIR = path.resolve(__dirname, '../../output/promises');
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -475,6 +478,7 @@ async function fetchAUPromises() {
 // ─── Orchestrator ─────────────────────────────────────────────────────────────
 
 async function fetchAllPromises() {
+  const _ts = new Date().toISOString();
   console.log('\n[promises] Starting promise tracker fetch (CA / US / UK / AU)...');
   const results = await Promise.allSettled([
     fetchCanadaPromises(),
@@ -483,7 +487,24 @@ async function fetchAllPromises() {
     fetchAUPromises(),
   ]);
 
-  const [ca, us, uk, au] = results.map(r => r.status === 'fulfilled' ? r.value : 0);
+  const jurisdictions = ['CA', 'US', 'UK', 'AU'];
+  const sources = [
+    'https://liberal.ca',
+    'https://whitehouse.gov',
+    'https://labour.org.uk',
+    'https://alp.org.au',
+  ];
+  const counts = results.map(r => r.status === 'fulfilled' ? r.value : 0);
+  for (let i = 0; i < results.length; i++) {
+    const r = results[i];
+    if (r.status === 'fulfilled') {
+      await writeAuditLog({ collection_name: COLLECTION_NAME, jurisdiction: jurisdictions[i], data_pull_timestamp: _ts, source_endpoint: sources[i], record_count: counts[i], import_status: 'success', scheduler_tier: SCHEDULER_TIER });
+    } else {
+      await writeAuditLog({ collection_name: COLLECTION_NAME, jurisdiction: jurisdictions[i], data_pull_timestamp: _ts, source_endpoint: sources[i], record_count: 0, import_status: 'failed', error_message: r.reason?.message || String(r.reason), scheduler_tier: SCHEDULER_TIER });
+    }
+  }
+
+  const [ca, us, uk, au] = counts;
   const total = ca + us + uk + au;
   console.log(`\n[promises] Done — CA:${ca} US:${us} UK:${uk} AU:${au} (total: ${total})`);
   return total;

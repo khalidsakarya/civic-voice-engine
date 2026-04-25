@@ -29,7 +29,11 @@ require('dotenv').config();
 const axios = require('axios');
 const fs    = require('fs');
 const path  = require('path');
+const { writeAuditLog } = require('../firebase/auditLog');
 
+const SCHEDULER_TIER          = 'bimonthly';
+const COLLECTION_NAME_DISC    = 'member_disclosures';
+const COLLECTION_NAME_LOBBY   = 'member_lobbying';
 const OUTPUT_DISCLOSURES = path.resolve(__dirname, '../../output/member_disclosures');
 const OUTPUT_LOBBYING    = path.resolve(__dirname, '../../output/member_lobbying');
 const TIMEOUT_MS         = 45_000;
@@ -80,10 +84,12 @@ const safeNum = v => { const n = parseFloat(v); return isNaN(n) ? null : n; };
 //  the year; FD (annual) filings cluster Jan–May following the disclosure year.
 
 async function fetchUSHouseDisclosures() {
+  const _ts = new Date().toISOString();
   const year      = CURRENT_YEAR - 1; // most recent completed year
   const fromDate  = `${year}-01-01`;
   const toDate    = `${year}-12-31`;
 
+  try {
   console.log(`[disclosures:US] Querying EFTS for House disclosures filed in ${year}…`);
 
   const resp = await axios.get('https://efts.house.gov/EFTS-Public/query', {
@@ -139,11 +145,17 @@ async function fetchUSHouseDisclosures() {
   });
 
   const total = resp.data?.hits?.total?.value ?? hits.length;
-  return saveRecords(OUTPUT_DISCLOSURES, 'us_house_disclosures', records, {
+  const result = saveRecords(OUTPUT_DISCLOSURES, 'us_house_disclosures', records, {
     filingYear:     year,
     totalAvailable: total,
     sourceApi:      'https://efts.house.gov/EFTS-Public/query',
   });
+  await writeAuditLog({ collection_name: COLLECTION_NAME_DISC, jurisdiction: 'US', data_pull_timestamp: _ts, source_endpoint: 'https://efts.house.gov/EFTS-Public/query', record_count: result.count, import_status: 'success', scheduler_tier: SCHEDULER_TIER });
+  return result;
+  } catch (err) {
+    await writeAuditLog({ collection_name: COLLECTION_NAME_DISC, jurisdiction: 'US', data_pull_timestamp: _ts, source_endpoint: 'https://efts.house.gov/EFTS-Public/query', record_count: 0, import_status: 'failed', error_message: err.message, scheduler_tier: SCHEDULER_TIER });
+    throw err;
+  }
 }
 
 // ─── Canada: Lobbying Communication Reports ───────────────────────────────────
@@ -164,6 +176,8 @@ const CKAN_BASE      = 'https://open.canada.ca/data/api/3/action';
 const CA_LOBBY_PKG   = '04b97c75-82a7-4716-8231-56e1ebd64e28'; // Lobbying Communications
 
 async function fetchCanadaLobbying() {
+  const _ts = new Date().toISOString();
+  try {
   console.log('[lobbying:CA] Resolving lobbyist registry package…');
 
   // Step 1 — resolve resource IDs from the package
@@ -207,13 +221,19 @@ async function fetchCanadaLobbying() {
     sourceUrl:            `https://lobbycanada.gc.ca`,
   }));
 
-  return saveRecords(OUTPUT_LOBBYING, 'ca_lobbying_communications', records, {
+  const result = saveRecords(OUTPUT_LOBBYING, 'ca_lobbying_communications', records, {
     packageId:      CA_LOBBY_PKG,
     resourceId:     resource.id,
     resourceName:   safeStr(resource.name),
     totalAvailable: total,
     sourceApi:      `${CKAN_BASE}/datastore_search`,
   });
+  await writeAuditLog({ collection_name: COLLECTION_NAME_LOBBY, jurisdiction: 'CA', data_pull_timestamp: _ts, source_endpoint: 'https://open.canada.ca/data/api/3/action/datastore_search', record_count: result.count, import_status: 'success', scheduler_tier: SCHEDULER_TIER });
+  return result;
+  } catch (err) {
+    await writeAuditLog({ collection_name: COLLECTION_NAME_LOBBY, jurisdiction: 'CA', data_pull_timestamp: _ts, source_endpoint: 'https://open.canada.ca/data/api/3/action/datastore_search', record_count: 0, import_status: 'failed', error_message: err.message, scheduler_tier: SCHEDULER_TIER });
+    throw err;
+  }
 }
 
 // ─── US: Lobby Disclosure Act filings (Senate Office of Public Records) ───────
@@ -229,7 +249,9 @@ async function fetchCanadaLobbying() {
 //               lobbying_activities, income, expenses, filing_year, … } ] }
 
 async function fetchUSFederalLobbying() {
+  const _ts = new Date().toISOString();
   const year = CURRENT_YEAR - 1;
+  try {
   console.log(`[lobbying:US] Querying Senate LDA API for filings in ${year}…`);
 
   const resp = await axios.get('https://lda.senate.gov/api/v1/filings/', {
@@ -269,12 +291,18 @@ async function fetchUSFederalLobbying() {
     };
   });
 
-  return saveRecords(OUTPUT_LOBBYING, 'us_senate_lda_filings', records, {
+  const result = saveRecords(OUTPUT_LOBBYING, 'us_senate_lda_filings', records, {
     filingYear:     year,
     filingType:     'MR',
     totalAvailable: resp.data?.count,
     sourceApi:      'https://lda.senate.gov/api/v1/filings/',
   });
+  await writeAuditLog({ collection_name: COLLECTION_NAME_LOBBY, jurisdiction: 'US', data_pull_timestamp: _ts, source_endpoint: 'https://lda.senate.gov/api/v1/filings/', record_count: result.count, import_status: 'success', scheduler_tier: SCHEDULER_TIER });
+  return result;
+  } catch (err) {
+    await writeAuditLog({ collection_name: COLLECTION_NAME_LOBBY, jurisdiction: 'US', data_pull_timestamp: _ts, source_endpoint: 'https://lda.senate.gov/api/v1/filings/', record_count: 0, import_status: 'failed', error_message: err.message, scheduler_tier: SCHEDULER_TIER });
+    throw err;
+  }
 }
 
 // ─── UK Parliament: MPs' Registered Financial Interests ──────────────────────
@@ -301,6 +329,8 @@ const INTER_PAGE_MS  = 300;  // delay between member-search pages
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 async function fetchUKMPsRegisteredInterests() {
+  const _ts = new Date().toISOString();
+  try {
   console.log(`[disclosures:UK] Fetching up to ${TARGET_MPs} current Commons MPs (paginating ${PAGE_SIZE}/page)…`);
 
   // Step 1 — paginate the Members Search to collect TARGET_MPs members
@@ -390,12 +420,18 @@ async function fetchUKMPsRegisteredInterests() {
   const totalInterests = records.reduce((s, r) => s + r.interests_count, 0);
   console.log(`[disclosures:UK] ${records.length} MPs, ${totalInterests} interest entries`);
 
-  return saveRecords(OUTPUT_DISCLOSURES, 'uk_mp_registered_interests', records, {
+  const result = saveRecords(OUTPUT_DISCLOSURES, 'uk_mp_registered_interests', records, {
     mpsReturned:      records.length,
     totalInterests,
     sourceApi:        `${UK_MEMBERS_API}/Members/{id}/RegisteredInterests`,
     parliamentaryHouse: 'Commons',
   });
+  await writeAuditLog({ collection_name: COLLECTION_NAME_DISC, jurisdiction: 'UK', data_pull_timestamp: _ts, source_endpoint: 'https://members-api.parliament.uk/api', record_count: result.count, import_status: 'success', scheduler_tier: SCHEDULER_TIER });
+  return result;
+  } catch (err) {
+    await writeAuditLog({ collection_name: COLLECTION_NAME_DISC, jurisdiction: 'UK', data_pull_timestamp: _ts, source_endpoint: 'https://members-api.parliament.uk/api', record_count: 0, import_status: 'failed', error_message: err.message, scheduler_tier: SCHEDULER_TIER });
+    throw err;
+  }
 }
 
 // ─── Australia: Members' Register of Interests (HTML index) ──────────────────
@@ -442,6 +478,8 @@ const AU_BASE_URL     = 'https://www.aph.gov.au';
 // We split on ", Member for " to isolate the name and electorate+state parts.
 
 async function fetchAUMembersRegister() {
+  const _ts = new Date().toISOString();
+  try {
   console.log('[disclosures:AU] Fetching Members Register of Interests index page…');
 
   const resp = await axios.get(AU_REGISTER_URL, {
@@ -562,12 +600,18 @@ async function fetchAUMembersRegister() {
 
   console.log(`[disclosures:AU] Parsed ${records.length} member entries`);
 
-  return saveRecords(OUTPUT_DISCLOSURES, 'au_members_register_of_interests', records, {
+  const result = saveRecords(OUTPUT_DISCLOSURES, 'au_members_register_of_interests', records, {
     sourceUrl:    AU_REGISTER_URL,
     parseMethod:  'html-table-scrape',
     parliament:   '48th Parliament',
     note:         'Full interest details are in individual PDFs per member — this index captures member list, electorate, state, and disclosure PDF links.',
   });
+  await writeAuditLog({ collection_name: COLLECTION_NAME_DISC, jurisdiction: 'AU', data_pull_timestamp: _ts, source_endpoint: 'https://www.aph.gov.au/Senators_and_Members/Members/Register', record_count: result.count, import_status: 'success', scheduler_tier: SCHEDULER_TIER });
+  return result;
+  } catch (err) {
+    await writeAuditLog({ collection_name: COLLECTION_NAME_DISC, jurisdiction: 'AU', data_pull_timestamp: _ts, source_endpoint: 'https://www.aph.gov.au/Senators_and_Members/Members/Register', record_count: 0, import_status: 'failed', error_message: err.message, scheduler_tier: SCHEDULER_TIER });
+    throw err;
+  }
 }
 
 // ─── Main ─────────────────────────────────────────────────────────────────────

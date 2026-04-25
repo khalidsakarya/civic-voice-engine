@@ -38,7 +38,10 @@ require('dotenv').config();
 const axios = require('axios');
 const fs    = require('fs');
 const path  = require('path');
+const { writeAuditLog } = require('../firebase/auditLog');
 
+const SCHEDULER_TIER = 'weekly';
+const COLLECTION_NAME = 'member_attendance';
 const OUTPUT_DIR    = path.resolve(__dirname, '../../output/member_attendance');
 const TIMEOUT_MS    = 45_000;
 const CURRENT_YEAR  = new Date().getFullYear();
@@ -103,6 +106,8 @@ async function buildCAMpMap() {
 }
 
 async function fetchCanadaAttendance() {
+  const _ts = new Date().toISOString();
+  try {
   // Step 1 — build MP metadata lookup
   console.log('[attendance:CA] Building current MP map…');
   const mpMap = await buildCAMpMap();
@@ -201,12 +206,18 @@ async function fetchCanadaAttendance() {
   records.sort((a, b) => b.attendance_pct - a.attendance_pct);
   console.log(`[attendance:CA] ${records.length} MP attendance records built`);
 
-  return saveRecords('ca_parliament_attendance', records, {
+  const result = saveRecords('ca_parliament_attendance', records, {
     session:    CA_SESSION,
     totalVotes,
     mpsInData:  Object.keys(acc).length,
     sourceApi:  `${CA_API}/votes/`,
   });
+  await writeAuditLog({ collection_name: COLLECTION_NAME, jurisdiction: 'CA', data_pull_timestamp: _ts, source_endpoint: 'https://api.openparliament.ca/votes/', record_count: result.count, import_status: 'success', scheduler_tier: SCHEDULER_TIER });
+  return result;
+  } catch (err) {
+    await writeAuditLog({ collection_name: COLLECTION_NAME, jurisdiction: 'CA', data_pull_timestamp: _ts, source_endpoint: 'https://api.openparliament.ca/votes/', record_count: 0, import_status: 'failed', error_message: err.message, scheduler_tier: SCHEDULER_TIER });
+    throw err;
+  }
 }
 
 // ─── US — House Clerk roll-call XML ──────────────────────────────────────────
@@ -253,6 +264,8 @@ function parseRecordedVotes(xml) {
 }
 
 async function fetchUSAttendance() {
+  const _ts = new Date().toISOString();
+  try {
   // Step 1 — discover roll-call count from the Clerk index page
   console.log(`[attendance:US] Fetching House Clerk index for ${CURRENT_YEAR}…`);
   const idxResp = await axios.get(`${CLERK_BASE}/evs/${CURRENT_YEAR}/index.asp`, {
@@ -343,12 +356,18 @@ async function fetchUSAttendance() {
   records.sort((a, b) => b.attendance_pct - a.attendance_pct);
   console.log(`[attendance:US] ${records.length} member attendance records`);
 
-  return saveRecords('us_house_attendance', records, {
+  const result = saveRecords('us_house_attendance', records, {
     year:            CURRENT_YEAR,
     sampleSize,
     totalRollsInYear,
     sourceBase:      `${CLERK_BASE}/evs/${CURRENT_YEAR}/`,
   });
+  await writeAuditLog({ collection_name: COLLECTION_NAME, jurisdiction: 'US', data_pull_timestamp: _ts, source_endpoint: 'https://clerk.house.gov/evs/', record_count: result.count, import_status: 'success', scheduler_tier: SCHEDULER_TIER });
+  return result;
+  } catch (err) {
+    await writeAuditLog({ collection_name: COLLECTION_NAME, jurisdiction: 'US', data_pull_timestamp: _ts, source_endpoint: 'https://clerk.house.gov/evs/', record_count: 0, import_status: 'failed', error_message: err.message, scheduler_tier: SCHEDULER_TIER });
+    throw err;
+  }
 }
 
 // ─── UK — members-api.parliament.uk ──────────────────────────────────────────
@@ -415,6 +434,8 @@ async function countUKMpVotesThisYear(memberId) {
 }
 
 async function fetchUKAttendance() {
+  const _ts = new Date().toISOString();
+  try {
   // Step 1 — count total divisions in current year
   console.log(`[attendance:UK] Counting Commons divisions in ${CURRENT_YEAR}…`);
   const totalDivisions = await countUKDivisionsThisYear();
@@ -481,12 +502,18 @@ async function fetchUKAttendance() {
   records.sort((a, b) => b.attendance_pct - a.attendance_pct);
   console.log(`[attendance:UK] ${records.length} MP attendance records built`);
 
-  return saveRecords('uk_commons_attendance', records, {
+  const result = saveRecords('uk_commons_attendance', records, {
     year:             CURRENT_YEAR,
     totalDivisions,
     mpsProcessed:     records.length,
     sourceApi:        `${UK_MEMBERS_API}/Members/{id}/Voting`,
   });
+  await writeAuditLog({ collection_name: COLLECTION_NAME, jurisdiction: 'UK', data_pull_timestamp: _ts, source_endpoint: 'https://members-api.parliament.uk/api', record_count: result.count, import_status: 'success', scheduler_tier: SCHEDULER_TIER });
+  return result;
+  } catch (err) {
+    await writeAuditLog({ collection_name: COLLECTION_NAME, jurisdiction: 'UK', data_pull_timestamp: _ts, source_endpoint: 'https://members-api.parliament.uk/api', record_count: 0, import_status: 'failed', error_message: err.message, scheduler_tier: SCHEDULER_TIER });
+    throw err;
+  }
 }
 
 // ─── Main ─────────────────────────────────────────────────────────────────────

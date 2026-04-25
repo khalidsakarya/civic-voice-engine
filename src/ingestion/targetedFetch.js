@@ -97,6 +97,10 @@ const path       = require('path');
 const zlib       = require('zlib');
 const { promisify } = require('util');
 const inflateRaw = promisify(zlib.inflateRaw);
+const { writeAuditLog } = require('../firebase/auditLog');
+
+const SCHEDULER_TIER = 'monthly';
+const COLLECTION_NAME = 'social_stats';
 
 const OUTPUT_DIR  = path.resolve(__dirname, '../../output/targeted');
 const TIMEOUT_MS  = 25000;
@@ -3771,6 +3775,8 @@ async function main() {
     failed.forEach(r => console.log(`    • ${r.stat ?? r.country}: ${r.error}`));
     console.log();
   }
+
+  await writeAuditLog({ collection_name: COLLECTION_NAME, jurisdiction: 'ALL', data_pull_timestamp: FETCHED_AT, source_endpoint: 'multiple', record_count: results.length, import_status: 'success', scheduler_tier: SCHEDULER_TIER });
 
   return results;
 }

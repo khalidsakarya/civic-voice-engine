@@ -29,7 +29,10 @@ require('dotenv').config();
 const axios = require('axios');
 const fs    = require('fs');
 const path  = require('path');
+const { writeAuditLog } = require('../firebase/auditLog');
 
+const SCHEDULER_TIER = 'bimonthly';
+const COLLECTION_NAME = 'member_stock_trades';
 const OUTPUT_DIR = path.resolve(__dirname, '../../output/stock_trades');
 const TIMEOUT_MS = 45_000;
 
@@ -95,6 +98,8 @@ const HOUSE_DOC_BASE  = 'https://disclosures.house.gov';
 const HOUSE_PAGE_SIZE = 100;
 
 async function fetchUSHouseTrades() {
+  const _ts = new Date().toISOString();
+  try {
   const { fromDate, toDate } = dateRange(LOOKBACK_MONTHS);
   console.log(`[stock-trades:US-House] Querying EFTS PTR filings from ${fromDate} to ${toDate}…`);
 
@@ -155,12 +160,18 @@ async function fetchUSHouseTrades() {
     };
   });
 
-  return saveRecords('us_house_ptr', records, {
+  const result = saveRecords('us_house_ptr', records, {
     fromDate,
     toDate,
     totalAvailable: total,
     sourceApi: HOUSE_EFTS_BASE,
   });
+  await writeAuditLog({ collection_name: COLLECTION_NAME, jurisdiction: 'US-House', data_pull_timestamp: _ts, source_endpoint: 'https://efts.house.gov/EFTS-Public/query', record_count: result.count, import_status: 'success', scheduler_tier: SCHEDULER_TIER });
+  return result;
+  } catch (err) {
+    await writeAuditLog({ collection_name: COLLECTION_NAME, jurisdiction: 'US-House', data_pull_timestamp: _ts, source_endpoint: 'https://efts.house.gov/EFTS-Public/query', record_count: 0, import_status: 'failed', error_message: err.message, scheduler_tier: SCHEDULER_TIER });
+    throw err;
+  }
 }
 
 // ─── US Senate ETRS — PTR filings ─────────────────────────────────────────────
@@ -185,6 +196,8 @@ const SENATE_DOC_BASE  = 'https://disclosures.senate.gov';
 const SENATE_PAGE_SIZE = 100;
 
 async function fetchUSSenatorTrades() {
+  const _ts = new Date().toISOString();
+  try {
   const { fromDate, toDate } = dateRange(LOOKBACK_MONTHS);
   console.log(`[stock-trades:US-Senate] Querying Senate ETRS PTR filings from ${fromDate} to ${toDate}…`);
 
@@ -243,12 +256,18 @@ async function fetchUSSenatorTrades() {
     };
   });
 
-  return saveRecords('us_senate_ptr', records, {
+  const result = saveRecords('us_senate_ptr', records, {
     fromDate,
     toDate,
     totalAvailable: total,
     sourceApi: SENATE_ETRS_BASE,
   });
+  await writeAuditLog({ collection_name: COLLECTION_NAME, jurisdiction: 'US-Senate', data_pull_timestamp: _ts, source_endpoint: 'https://efts.senate.gov/ETRS/query', record_count: result.count, import_status: 'success', scheduler_tier: SCHEDULER_TIER });
+  return result;
+  } catch (err) {
+    await writeAuditLog({ collection_name: COLLECTION_NAME, jurisdiction: 'US-Senate', data_pull_timestamp: _ts, source_endpoint: 'https://efts.senate.gov/ETRS/query', record_count: 0, import_status: 'failed', error_message: err.message, scheduler_tier: SCHEDULER_TIER });
+    throw err;
+  }
 }
 
 // ─── Main export ───────────────────────────────────────────────────────────────
@@ -263,6 +282,7 @@ async function fetchAllStockTrades() {
   } catch (err) {
     // DNS failures in Windows dev env — domain resolves fine in production
     console.warn(`[stock-trades:US-House] ⚠ Skipped: ${err.message}`);
+    await writeAuditLog({ collection_name: COLLECTION_NAME, jurisdiction: 'US-House', data_pull_timestamp: new Date().toISOString(), source_endpoint: 'https://efts.house.gov/EFTS-Public/query', record_count: 0, import_status: 'failed', error_message: err.message, scheduler_tier: SCHEDULER_TIER });
     results.usHouse = { count: 0, skipped: true, reason: err.message };
   }
 
@@ -271,6 +291,7 @@ async function fetchAllStockTrades() {
     results.usSenate = await fetchUSSenatorTrades();
   } catch (err) {
     console.warn(`[stock-trades:US-Senate] ⚠ Skipped: ${err.message}`);
+    await writeAuditLog({ collection_name: COLLECTION_NAME, jurisdiction: 'US-Senate', data_pull_timestamp: new Date().toISOString(), source_endpoint: 'https://efts.senate.gov/ETRS/query', record_count: 0, import_status: 'failed', error_message: err.message, scheduler_tier: SCHEDULER_TIER });
     results.usSenate = { count: 0, skipped: true, reason: err.message };
   }
 
