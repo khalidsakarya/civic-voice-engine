@@ -6,6 +6,13 @@ const axios = require('axios');
 const zlib  = require('zlib');
 const { getDb } = require('../firebase/client');
 
+// ─── Browser headers (AU data.gov.au requires them) ───────────────────────────
+
+const BROWSER_HEADERS = {
+  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+  'Accept':     'text/html,application/xhtml+xml,text/csv,*/*',
+};
+
 // ─── Fuzzy name matching ──────────────────────────────────────────────────────
 
 const STRIP_PREFIXES = [
@@ -96,7 +103,7 @@ function csvToObjects(text) {
   });
 }
 
-// ─── Minimal XLSX parser (for UK DEL tables) ──────────────────────────────────
+// ─── XLSX parser ──────────────────────────────────────────────────────────────
 
 function colIndex(col) {
   let n = 0;
@@ -175,6 +182,14 @@ function parseXlsxSheetByName(buf, sheetName) {
   return parseSheet(entries[`xl/${sheetFile}`] || '', strings);
 }
 
+function listXlsxSheets(buf) {
+  const entries = extractZipEntries(buf);
+  const wbXml   = entries['xl/workbook.xml'] || '';
+  return [...wbXml.matchAll(/<sheet\s[^>]*/g)]
+    .map(m => (m[0].match(/name="([^"]+)"/) || [])[1])
+    .filter(Boolean);
+}
+
 // ─── CA: GC InfoBase Estimates CSV ───────────────────────────────────────────
 
 const CA_CKAN_PKG   = 'a35cf382-690c-4221-a971-cf0fd189a46f';
@@ -218,9 +233,9 @@ async function fetchCAOfficial() {
 
 // ─── US: USASpending.gov agency budgetary resources ──────────────────────────
 
-const US_AGENCIES_URL  = 'https://api.usaspending.gov/api/v2/references/toptier_agencies/?sort=budget_authority_amount&order=desc&limit=200';
-const US_BUD_RES_URL   = code => `https://api.usaspending.gov/api/v2/agency/${code}/budgetary_resources/`;
-const CURRENT_FY       = 2025;
+const US_AGENCIES_URL = 'https://api.usaspending.gov/api/v2/references/toptier_agencies/?sort=budget_authority_amount&order=desc&limit=200';
+const US_BUD_RES_URL  = code => `https://api.usaspending.gov/api/v2/agency/${code}/budgetary_resources/`;
+const CURRENT_FY      = 2025;
 
 async function fetchUSOfficial() {
   console.log('[validator:US] Fetching USASpending agency budgetary resources (FY2025)...');
@@ -252,69 +267,162 @@ async function fetchUSOfficial() {
   return result;
 }
 
-// ─── UK: HM Treasury Main Supply Estimates DEL tables XLSX ───────────────────
+// ─── UK: HM Treasury Main Supply Estimates — all DEL/AME sheets ──────────────
 
 const UK_DEL_URL    = 'https://assets.publishing.service.gov.uk/media/6827211850dbd3ce8372ab24/2025-26_Mains_DEL_tables_for_publication.xlsx';
 const UK_MULTIPLIER = 1_000_000_000; // £billion → GBP
 const UK_DEL_SKIP   = /^total|^of which|^note|^source|^\d{4}|^department|^table|^£|^resource|^capital/i;
+// Sheets in this file: 'RDEL inc', 'RDEL ex', 'CDEL', 'Direct impact of tax changes'
+const UK_BUDGET_SHEETS = ['RDEL inc', 'RDEL ex', 'CDEL'];
 
 async function fetchUKOfficial() {
   console.log('[validator:UK] Downloading HM Treasury Main Supply Estimates XLSX...');
   const resp = await axios.get(UK_DEL_URL, { timeout: 60000, responseType: 'arraybuffer', maxRedirects: 5 });
   const buf  = Buffer.from(resp.data);
 
-  const rdelRows = parseXlsxSheetByName(buf, 'RDEL inc');
-  if (!rdelRows.length) throw new Error('RDEL inc sheet returned no rows');
+  const availableSheets = listXlsxSheets(buf);
+  const sheetsToTry = UK_BUDGET_SHEETS.filter(s => availableSheets.includes(s));
+  console.log(`[validator:UK] Parsing sheets: ${sheetsToTry.join(', ')}`);
 
   const result = {};
-  for (const r of rdelRows) {
-    const name = String(r[1] || '').trim();
-    if (!name || name.length < 3 || UK_DEL_SKIP.test(name)) continue;
-
-    let totalBudget = null;
-    for (let ci = 2; ci < Math.min((r.length || 0), 15); ci++) {
-      const n = safeNum(r[ci]);
-      if (n !== null && Math.abs(n) > 0) { totalBudget = n; break; }
+  for (const sheetName of sheetsToTry) {
+    try {
+      const rows = parseXlsxSheetByName(buf, sheetName);
+      let added = 0;
+      for (const r of rows) {
+        const name = String(r[1] || '').trim();
+        if (!name || name.length < 3 || UK_DEL_SKIP.test(name)) continue;
+        let totalBudget = null;
+        for (let ci = 2; ci < Math.min((r.length || 0), 20); ci++) {
+          const n = safeNum(r[ci]);
+          if (n !== null && Math.abs(n) > 0) { totalBudget = n; break; }
+        }
+        if (totalBudget === null) continue;
+        const cleanName = name.replace(/\d+$/, '').trim();
+        const key = normalizeName(cleanName);
+        if (!result[key]) {
+          result[key] = { original: cleanName, value: Math.round(totalBudget * UK_MULTIPLIER) };
+          added++;
+        }
+      }
+      console.log(`[validator:UK]   "${sheetName}": +${added} new entries`);
+    } catch (e) {
+      console.warn(`[validator:UK]   "${sheetName}" failed: ${e.message}`);
     }
-    if (totalBudget === null) continue;
-
-    const cleanName = name.replace(/\d+$/, '').trim();
-    result[normalizeName(cleanName)] = {
-      original: cleanName,
-      value:    Math.round(totalBudget * UK_MULTIPLIER),
-    };
   }
-  console.log(`[validator:UK] ${Object.keys(result).length} departments from HM Treasury XLSX`);
+
+  console.log(`[validator:UK] ${Object.keys(result).length} total departments from HM Treasury XLSX`);
   return result;
 }
 
-// ─── AU: PAES 2025-26 program expenses CSV ───────────────────────────────────
+// ─── UK: gov.uk org lookup for unverified agencies ───────────────────────────
 
-const AU_PAES_URL   = 'https://data.gov.au/data/dataset/f84698ea-c749-4ff2-a5c5-e4b5a4d819e1/resource/8b7149fa-5882-4feb-8b20-89a25e6abac2/download/2025-26-paes-program-expenses-line-items.csv';
+const GOVUK_ORG_API  = slug => `https://www.gov.uk/api/content/government/organisations/${slug}`;
+const GOVUK_ORG_PAGE = slug => `https://www.gov.uk/government/organisations/${slug}`;
+const STOP_WORDS     = new Set(['and', 'of', 'the', 'for', 'a', 'an', 'in', 'to', 'at', 'by', 'on']);
+
+function govukSlugCandidates(name) {
+  const base = normalizeName(name);
+  const full  = base.replace(/\s+/g, '-');
+  const short = base.split(' ').filter(w => !STOP_WORDS.has(w)).join('-');
+  const candidates = [short, full];
+  // dedupe while preserving order
+  return [...new Set(candidates)].filter(s => s.length >= 3);
+}
+
+async function tryGovukOrgUrl(deptName) {
+  for (const slug of govukSlugCandidates(deptName)) {
+    try {
+      const res = await axios.get(GOVUK_ORG_API(slug), {
+        timeout: 8000,
+        validateStatus: s => s < 500,
+      });
+      if (res.status === 200 && res.data?.title) {
+        return GOVUK_ORG_PAGE(slug);
+      }
+    } catch { /* try next candidate */ }
+  }
+  return null;
+}
+
+// ─── AU: PAES 2025-26 program expenses — multi-source with browser headers ───
+
+const AU_CKAN_PKG   = 'f84698ea-c749-4ff2-a5c5-e4b5a4d819e1';
+const AU_CKAN_RES   = '8b7149fa-5882-4feb-8b20-89a25e6abac2';
+const AU_CKAN_API   = 'https://data.gov.au/data/api/3/action';
+const AU_PAES_URL   = `https://data.gov.au/data/dataset/${AU_CKAN_PKG}/resource/${AU_CKAN_RES}/download/2025-26-paes-program-expenses-line-items.csv`;
+const AU_SOURCE_URL = `https://data.gov.au/data/dataset/${AU_CKAN_PKG}`;
 const AU_MULTIPLIER = 1_000; // AUD thousands → AUD
 
-async function fetchAUOfficial() {
-  console.log('[validator:AU] Fetching PAES 2025-26 program expenses CSV...');
-  const resp = await axios.get(AU_PAES_URL, { timeout: 60000, responseType: 'arraybuffer', maxRedirects: 5 });
-  const rows = csvToObjects(Buffer.from(resp.data).toString('utf8'));
-
-  const byAgency = {};
-  for (const r of rows) {
-    const agency  = r['Agency Name'] || '';
-    const bud2526 = safeNum(r['2025-26']);
-    if (!agency || bud2526 == null) continue;
-    byAgency[agency] = (byAgency[agency] || 0) + bud2526;
-  }
-
+function buildAUMap(byAgency) {
   const result = {};
   for (const [agency, total] of Object.entries(byAgency)) {
-    result[normalizeName(agency)] = {
-      original: agency,
-      value:    Math.round(total * AU_MULTIPLIER),
-    };
+    result[normalizeName(agency)] = { original: agency, value: Math.round(total * AU_MULTIPLIER) };
   }
-  console.log(`[validator:AU] ${Object.keys(result).length} agencies from PAES CSV`);
+  console.log(`[validator:AU] ${Object.keys(result).length} agencies from PAES data`);
   return result;
+}
+
+function parseAUCsv(buf) {
+  const rows = csvToObjects(buf.toString('utf8'));
+  const byAgency = {};
+  for (const r of rows) {
+    const agency = r['Agency Name'] || '';
+    const val    = safeNum(r['2025-26']);
+    if (!agency || val == null) continue;
+    byAgency[agency] = (byAgency[agency] || 0) + val;
+  }
+  return byAgency;
+}
+
+async function fetchAUOfficial() {
+  // Attempt 1: CKAN package_show → fresh download URL (browser headers bypass 403)
+  try {
+    console.log('[validator:AU] Fetching PAES CSV via CKAN package_show...');
+    const pkgRes = await axios.get(`${AU_CKAN_API}/package_show?id=${AU_CKAN_PKG}`,
+      { timeout: 30000, headers: BROWSER_HEADERS });
+    const resources = pkgRes.data?.result?.resources || [];
+    const target = resources.find(r => r.id === AU_CKAN_RES) || resources.find(r => /paes.*program.*expense/i.test(r.name || ''));
+    if (target?.url) {
+      const resp = await axios.get(target.url, {
+        timeout: 60000, responseType: 'arraybuffer', maxRedirects: 10,
+        headers: { ...BROWSER_HEADERS, Referer: 'https://data.gov.au/' },
+      });
+      return buildAUMap(parseAUCsv(Buffer.from(resp.data)));
+    }
+  } catch (e) { console.warn(`[validator:AU] CKAN package_show failed: ${e.message}`); }
+
+  // Attempt 2: direct PAES URL with browser headers
+  try {
+    console.log('[validator:AU] Trying direct PAES URL with browser headers...');
+    const resp = await axios.get(AU_PAES_URL, {
+      timeout: 60000, responseType: 'arraybuffer', maxRedirects: 5,
+      headers: { ...BROWSER_HEADERS, Referer: 'https://data.gov.au/' },
+    });
+    return buildAUMap(parseAUCsv(Buffer.from(resp.data)));
+  } catch (e) { console.warn(`[validator:AU] Direct PAES URL failed: ${e.message}`); }
+
+  // Attempt 3: CKAN datastore_search (JSON — some installs allow this when download is blocked)
+  try {
+    console.log('[validator:AU] Trying CKAN datastore API...');
+    const res = await axios.get(
+      `${AU_CKAN_API}/datastore_search?resource_id=${AU_CKAN_RES}&limit=5000`,
+      { timeout: 60000, headers: BROWSER_HEADERS }
+    );
+    if (res.data?.success && Array.isArray(res.data.result?.records) && res.data.result.records.length > 0) {
+      const byAgency = {};
+      for (const r of res.data.result.records) {
+        const agency = r['Agency Name'] || '';
+        const val    = safeNum(r['2025-26']);
+        if (!agency || val == null) continue;
+        byAgency[agency] = (byAgency[agency] || 0) + val;
+      }
+      return buildAUMap(byAgency);
+    }
+  } catch (e) { console.warn(`[validator:AU] CKAN datastore failed: ${e.message}`); }
+
+  console.warn('[validator:AU] All AU sources failed — AU depts will be self-reported');
+  return {};
 }
 
 // ─── Build a single validation result ────────────────────────────────────────
@@ -378,8 +486,7 @@ function validateJurisdiction(depts, officialMap, defaultSourceUrl, ts) {
   return depts.map(dept => {
     let match = findBestMatch(dept.department_name, officialMap);
 
-    // US fallback: try to extract toptier_code from the stored department_id
-    // ID format: us-dept-{3-digit-code}-{name-slug}
+    // US fallback: extract toptier_code from stored department_id (us-dept-{code}-{slug})
     if (!match && dept.jurisdiction === 'US' && dept.department_id) {
       const codeM = dept.department_id.match(/^us-dept-(\d{3})-/);
       if (codeM) {
@@ -396,10 +503,11 @@ function validateJurisdiction(depts, officialMap, defaultSourceUrl, ts) {
 // ─── Summarise results ────────────────────────────────────────────────────────
 
 function summarise(jur, results) {
-  const verified   = results.filter(r => r.status === 'verified').length;
-  const mismatch   = results.filter(r => r.status === 'mismatch').length;
-  const unverified = results.filter(r => r.status === 'unverified').length;
-  console.log(`[validator:${jur}] ${results.length} depts — verified: ${verified}  mismatch: ${mismatch}  unverified: ${unverified}`);
+  const verified      = results.filter(r => r.status === 'verified').length;
+  const mismatch      = results.filter(r => r.status === 'mismatch').length;
+  const unverified    = results.filter(r => r.status === 'unverified').length;
+  const selfReported  = results.filter(r => r.status === 'self-reported').length;
+  console.log(`[validator:${jur}] ${results.length} depts — verified: ${verified}  mismatch: ${mismatch}  unverified: ${unverified}  self-reported: ${selfReported}`);
   if (mismatch > 0) {
     results
       .filter(r => r.status === 'mismatch')
@@ -438,7 +546,7 @@ async function validateBudgets() {
   const ts = new Date().toISOString();
 
   console.log('[validator] Loading federal_departments from Firestore...');
-  const snap    = await db.collection('federal_departments').get();
+  const snap     = await db.collection('federal_departments').get();
   const allDepts = snap.docs.map(d => ({ department_id: d.id, ...d.data() }));
 
   const byJur = { CA: [], US: [], UK: [], AU: [] };
@@ -447,24 +555,48 @@ async function validateBudgets() {
   }
   console.log(`[validator] Loaded: CA=${byJur.CA.length} US=${byJur.US.length} UK=${byJur.UK.length} AU=${byJur.AU.length}`);
 
-  const allResults = [];
-
+  // ── Primary validation pass ───────────────────────────────────────────────
+  const resultsByJur = {};
   for (const [jur, fetchFn, sourceUrl] of [
     ['CA', fetchCAOfficial, CA_SOURCE_URL],
     ['US', fetchUSOfficial, 'https://www.usaspending.gov'],
     ['UK', fetchUKOfficial, UK_DEL_URL],
-    ['AU', fetchAUOfficial, AU_PAES_URL],
+    ['AU', fetchAUOfficial, AU_SOURCE_URL],
   ]) {
     try {
-      const officialMap = await fetchFn();
-      const results     = validateJurisdiction(byJur[jur], officialMap, sourceUrl, ts);
-      summarise(jur, results);
-      allResults.push(...results);
+      const officialMap  = await fetchFn();
+      resultsByJur[jur]  = validateJurisdiction(byJur[jur], officialMap, sourceUrl, ts);
+      summarise(jur, resultsByJur[jur]);
     } catch (err) {
       console.warn(`[validator:${jur}] Skipped — ${err.message}`);
-      allResults.push(...byJur[jur].map(d => buildResult(d, null, sourceUrl, ts)));
+      resultsByJur[jur] = byJur[jur].map(d => buildResult(d, null, sourceUrl, ts));
     }
   }
+
+  // ── UK secondary pass: gov.uk org lookup for unverified agencies ──────────
+  const ukUnverified = resultsByJur.UK.filter(r => r.status === 'unverified');
+  if (ukUnverified.length > 0) {
+    console.log(`\n[validator:UK] gov.uk org lookup for ${ukUnverified.length} unverified agencies...`);
+    const CONCUR = 10;
+    let found = 0;
+    for (let i = 0; i < ukUnverified.length; i += CONCUR) {
+      await Promise.all(ukUnverified.slice(i, i + CONCUR).map(async r => {
+        const url = await tryGovukOrgUrl(r.department);
+        if (url) { r.source_url = url; found++; }
+      }));
+    }
+    console.log(`[validator:UK] Located gov.uk org pages for ${found}/${ukUnverified.length} agencies`);
+  }
+
+  // ── Final pass: mark all remaining unverified as self-reported ────────────
+  const allResults = Object.values(resultsByJur).flat();
+  let selfReportedCount = 0;
+  for (const r of allResults) {
+    if (r.status === 'unverified') { r.status = 'self-reported'; selfReportedCount++; }
+  }
+  console.log(`\n[validator] Marked ${selfReportedCount} depts as self-reported (no independent source found)`);
+  console.log('[validator] Final summary:');
+  for (const jur of ['CA', 'US', 'UK', 'AU']) summarise(jur, resultsByJur[jur]);
 
   console.log(`\n[validator] Total results: ${allResults.length}`);
 
