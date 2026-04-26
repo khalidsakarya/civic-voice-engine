@@ -11,6 +11,10 @@ const COLLECTION_NAME = 'department_heads';
 
 const OUTPUT_DIR = path.resolve(__dirname, '../../output/department_heads');
 
+const CHROME_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+// HHS blocks Chrome UA but accepts Safari; use Safari for that endpoint.
+const SAFARI_UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15';
+
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 function safeStr(v) { return (v == null) ? null : String(v).trim() || null; }
@@ -179,56 +183,263 @@ async function fetchCanadaDeptHeads() {
   return count;
 }
 
-// ─── US — whitehouse.gov/administration/cabinet ───────────────────────────────
-// Pattern (Gutenberg blocks):
-//   <h2 class="wp-block-heading"><strong>NAME</strong></h2>
-//   ...
-//   <h3 class="wp-block-heading"><strong>TITLE</strong></h3>
+// ─── US — per-department official websites ────────────────────────────────────
+//
+// Each entry describes how to extract the current secretary/head name directly
+// from that department's own website. defense.gov blocks all automated requests;
+// that position falls back to whitehouse.gov.
+//
+// Mapping from stored `title` field to dept key (for validation merging):
+//   Secretary of Homeland Security       → dhs
+//   Secretary of State                   → state
+//   Secretary of the Treasury            → treasury
+//   Attorney General / Acting AG         → justice
+//   Secretary of Health and Human Svcs  → hhs
+//   Secretary of Education               → education
+//   Secretary of Energy                  → energy
+//   Administrator of the EPA            → epa
+
+const DEPT_DIRECT_SOURCES = [
+  {
+    key:   'dhs',
+    dept:  'Department of Homeland Security',
+    title: 'Secretary of Homeland Security',
+    url:   'https://www.dhs.gov/leadership',
+    ua:    CHROME_UA,
+    parse(html) {
+      // <li>Secretary, <a href="/markwayne-mullin">Markwayne Mullin</a>
+      const m = html.match(/Secretary,\s*<a[^>]+>([^<]+)<\/a>/i);
+      return m?.[1]?.trim() ?? null;
+    },
+  },
+  {
+    key:   'state',
+    dept:  'Department of State',
+    title: 'Secretary of State',
+    url:   'https://www.state.gov/secretary/',
+    ua:    CHROME_UA,
+    parse(html) {
+      // Secretary's page has alt="Marco Rubio" on the portrait image
+      const m = html.match(/alt="([A-Z][a-z]+(?:\s[A-Z][a-z.]+)+)"/);
+      return m?.[1]?.trim() ?? null;
+    },
+  },
+  {
+    key:   'treasury',
+    dept:  'Department of the Treasury',
+    title: 'Secretary of the Treasury',
+    url:   'https://home.treasury.gov/about/general-information/officials',
+    ua:    CHROME_UA,
+    parse(html) {
+      // Officials list has two links for the Secretary: text="Secretary" then text="Scott Bessent".
+      // Skip the generic title entry; take the first link whose text is a person name.
+      const re = /\/officials\/[a-z-]+"[^>]*>([^<]+)<\/a>/gi;
+      let m;
+      while ((m = re.exec(html))) {
+        const name = m[1].trim();
+        if (/^[A-Z][a-z]/.test(name) && !/^(?:Secretary|Deputy|Acting|Under|Assistant)\b/.test(name)) {
+          return name;
+        }
+      }
+      return null;
+    },
+  },
+  {
+    key:   'justice',
+    dept:  'Department of Justice',
+    title: 'Attorney General',
+    url:   'https://www.justice.gov/ag',
+    ua:    CHROME_UA,
+    parse(html) {
+      // No /i flag: [A-Z] must be strict uppercase so we don't capture lowercase words.
+      // Page contains "Attorney General Todd Blanche" in body text.
+      const m = html.match(/(?:Acting )?Attorney General\s+([A-Z][a-z]+\s+[A-Z][a-z.]+)/);
+      return m?.[1]?.trim() ?? null;
+    },
+  },
+  {
+    key:   'hhs',
+    dept:  'Department of Health and Human Services',
+    title: 'Secretary of Health and Human Services',
+    url:   'https://www.hhs.gov/about/leadership/index.html',
+    ua:    SAFARI_UA,  // hhs.gov returns 403 for Chrome UA; Safari passes through
+    parse(html) {
+      // usa-card__heading h3s list the Secretary first (then deputies/staff).
+      // Use [\s\S]*? so nested anchor tags inside the h3 don't break the match.
+      const re = /<h3[^>]*class="[^"]*usa-card__heading[^"]*"[^>]*>([\s\S]*?)<\/h3>/gi;
+      let m;
+      while ((m = re.exec(html))) {
+        const name = m[1].replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+        if (name && name !== 'Vacant' && /[A-Z][a-z]/.test(name)) return name;
+      }
+      return null;
+    },
+  },
+  {
+    key:   'education',
+    dept:  'Department of Education',
+    title: 'Secretary of Education',
+    url:   'https://www.ed.gov/about/news',
+    ua:    CHROME_UA,
+    parse(html) {
+      // News article hrefs contain the secretary's name as a slug, e.g.:
+      //   /press-release/us-secretary-of-education-linda-mcmahon-visits-...
+      // Extract the slug and convert to title-case, handling Mc/Mac prefixes.
+      const slugM = html.match(/us-secretary-of-education-([a-z]+)-([a-z]+)-/);
+      if (slugM) {
+        const fromSlug = s => {
+          // Title-case, then fix Mc/Mac prefix (applied after capitalisation)
+          const t = s.charAt(0).toUpperCase() + s.slice(1);
+          return t.replace(/^Mc([a-z])/, (_, c) => 'Mc' + c.toUpperCase())
+                  .replace(/^Mac([a-z])/, (_, c) => 'Mac' + c.toUpperCase());
+        };
+        return [slugM[1], slugM[2]].map(fromSlug).join(' ');
+      }
+      // Fallback: find "U.S. Secretary of Education NAME" in text. [A-Za-z] handles
+      // surnames with internal caps (McMahon). Stops before a third capitalized word.
+      const textM = html.match(/U\.S\.\s+Secretary of Education\s+([A-Z][a-z]+\s+[A-Z][A-Za-z]+)/);
+      return textM?.[1]?.trim() ?? null;
+    },
+  },
+  {
+    key:   'energy',
+    dept:  'Department of Energy',
+    title: 'Secretary of Energy',
+    url:   'https://www.energy.gov/our-leadership-offices',
+    ua:    CHROME_UA,
+    parse(html) {
+      // Megamenu headshot: alt="Chris Wright" class="megamenu-block__headshot"
+      const m = html.match(/alt="([^"]+)"\s*class="megamenu-block__headshot"/i);
+      return m?.[1]?.trim() ?? null;
+    },
+  },
+  {
+    key:   'epa',
+    dept:  'Environmental Protection Agency',
+    title: 'EPA Administrator',
+    url:   'https://www.epa.gov/aboutepa/epa-administrator',
+    ua:    CHROME_UA,
+    parse(html) {
+      // Administrator page has h2 = "Lee Zeldin" immediately after the h1
+      const m = html.match(/<h2[^>]*>([^<]+)<\/h2>/);
+      return m?.[1]?.trim() ?? null;
+    },
+  },
+  // defense.gov blocks all automated requests — Pete Hegseth sourced from WH fallback.
+];
+
+// Title substrings that map a stored record to a dept-direct source key.
+// Used to override the WH-scraped name with the dept-site name.
+const TITLE_TO_DEPT_KEY = {
+  'Secretary of Homeland Security':           'dhs',
+  'Secretary of State':                       'state',
+  'Secretary of the Treasury':                'treasury',
+  'Attorney General':                         'justice',
+  'Acting Attorney General':                  'justice',
+  'Secretary of Health and Human Services':   'hhs',
+  'Secretary of Education':                   'education',
+  'Secretary of Energy':                      'energy',
+  'Administrator of the Environmental':       'epa',  // prefix match
+};
+
+function titleToDeptKey(title) {
+  if (!title) return null;
+  for (const [pattern, key] of Object.entries(TITLE_TO_DEPT_KEY)) {
+    if (title.startsWith(pattern) || title === pattern) return key;
+  }
+  return null;
+}
 
 const WH_CABINET_URL = 'https://www.whitehouse.gov/administration/cabinet/';
-
-// Non-member h2 strings at the end of the page
 const WH_SKIP = new Set(['About', 'Media', 'Initiatives', 'Contact Us', 'News', 'Videos', 'Issues', 'The Administration']);
+
+// Scrape whitehouse.gov/administration/cabinet — used for Defense + supplemental positions
+async function fetchWHCabinet() {
+  const { data: html } = await axios.get(WH_CABINET_URL, {
+    timeout: 30000,
+    headers: { 'User-Agent': CHROME_UA },
+  });
+
+  const members = [];
+  const secRe = /<h2[^>]*class="[^"]*wp-block-heading[^"]*"[^>]*>([\s\S]*?)<\/h2>([\s\S]*?)(?=<h2[^>]*class="[^"]*wp-block-heading|<\/main|<footer)/g;
+  let m;
+  while ((m = secRe.exec(html))) {
+    const name = stripHtml(m[1]);
+    if (!name || WH_SKIP.has(name)) continue;
+    const h3m = m[2].match(/<h3[^>]*>([\s\S]*?)<\/h3>/);
+    if (!h3m) continue;
+    const title = stripHtml(h3m[1]);
+    if (!title) continue;
+    members.push({ name, title });
+  }
+  return members;
+}
+
+// Fetch secretary names from each department's own website in parallel.
+async function fetchDeptSources() {
+  const results = new Map();
+
+  await Promise.allSettled(DEPT_DIRECT_SOURCES.map(async cfg => {
+    try {
+      const { data: html } = await axios.get(cfg.url, {
+        timeout: 25000,
+        headers: { 'User-Agent': cfg.ua },
+        maxRedirects: 5,
+      });
+      const name = cfg.parse(html);
+      if (name) {
+        results.set(cfg.key, { name, url: cfg.url });
+        console.log(`[dept-heads:US:${cfg.key}] ${name}`);
+      } else {
+        console.warn(`[dept-heads:US:${cfg.key}] Parser returned null`);
+      }
+    } catch (err) {
+      console.warn(`[dept-heads:US:${cfg.key}] ${err.response?.status ?? err.code} — ${err.message?.slice(0, 60)}`);
+    }
+  }));
+
+  return results;
+}
 
 async function fetchUSDeptHeads() {
   const _ts = new Date().toISOString();
   const records = [];
 
   try {
-    console.log('[dept-heads:US] Fetching whitehouse.gov cabinet page...');
-    const { data: html } = await axios.get(WH_CABINET_URL, {
-      timeout: 30000,
-      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; CivicVoice/1.0)' },
-    });
+    console.log('[dept-heads:US] Fetching department websites + whitehouse.gov supplement...');
 
-    // Each section: h2 (name) followed by h3 (title) before the next h2
-    const secRe = /<h2[^>]*class="[^"]*wp-block-heading[^"]*"[^>]*>([\s\S]*?)<\/h2>([\s\S]*?)(?=<h2[^>]*class="[^"]*wp-block-heading|<\/main|<footer)/g;
-    let m;
-    while ((m = secRe.exec(html))) {
-      const name = stripHtml(m[1]);
-      if (!name || WH_SKIP.has(name)) continue;
+    // Run dept-direct fetches and WH scrape in parallel
+    const [deptResults, whMembers] = await Promise.all([
+      fetchDeptSources(),
+      fetchWHCabinet(),
+    ]);
 
-      const h3m = m[2].match(/<h3[^>]*>([\s\S]*?)<\/h3>/);
-      if (!h3m) continue;
-      const title = stripHtml(h3m[1]);
-      if (!title) continue;
+    console.log(`[dept-heads:US] Dept-direct: ${deptResults.size}/8 succeeded | WH supplement: ${whMembers.length} members`);
+
+    // Build merged record set: dept-site name overrides WH name where available
+    for (const wh of whMembers) {
+      const deptKey = titleToDeptKey(wh.title);
+      const deptData = deptKey ? deptResults.get(deptKey) : null;
+
+      const name      = deptData ? deptData.name     : wh.name;
+      const sourceUrl = deptData ? deptData.url       : WH_CABINET_URL;
+      const source    = deptData ? 'department_website' : 'whitehouse_gov';
 
       records.push({
         id:             `us-${slug(name)}`,
         jurisdiction:   'US',
         name:           safeStr(name),
-        title:          safeStr(title),
-        department:     inferDept(title, 'US'),
-        // Trump second-term inauguration; some secretaries confirmed weeks later
-        // but Jan 20 is used as the nominal appointment date.
+        title:          safeStr(wh.title),
+        department:     inferDept(wh.title, 'US'),
         date_appointed: '2025-01-20',
         party:          'Republican Party',
-        source_url:     WH_CABINET_URL,
+        source_url:     sourceUrl,
+        source,
         tier:           'cabinet',
       });
     }
 
-    console.log(`[dept-heads:US] Extracted ${records.length} cabinet members`);
+    console.log(`[dept-heads:US] Built ${records.length} cabinet records`);
   } catch (err) {
     console.warn(`[dept-heads:US] Skipped — ${err.message}`);
     await writeAuditLog({ collection_name: COLLECTION_NAME, jurisdiction: 'US', data_pull_timestamp: _ts, source_endpoint: WH_CABINET_URL, record_count: 0, import_status: 'failed', error_message: err.message, scheduler_tier: SCHEDULER_TIER });
@@ -236,7 +447,7 @@ async function fetchUSDeptHeads() {
   }
 
   const count = saveRecords('US', records);
-  await writeAuditLog({ collection_name: COLLECTION_NAME, jurisdiction: 'US', data_pull_timestamp: _ts, source_endpoint: WH_CABINET_URL, record_count: count, import_status: count > 0 ? 'success' : 'partial', scheduler_tier: SCHEDULER_TIER });
+  await writeAuditLog({ collection_name: COLLECTION_NAME, jurisdiction: 'US', data_pull_timestamp: _ts, source_endpoint: 'dept-direct+whitehouse.gov', record_count: count, import_status: count > 0 ? 'success' : 'partial', scheduler_tier: SCHEDULER_TIER });
   return count;
 }
 
@@ -438,4 +649,8 @@ module.exports = {
   fetchUSDeptHeads,
   fetchUKDeptHeads,
   fetchAUDeptHeads,
+  // Exported so validateCabinet.js can share the source configs without re-defining them
+  DEPT_DIRECT_SOURCES,
+  titleToDeptKey,
+  fetchDeptSources,
 };
