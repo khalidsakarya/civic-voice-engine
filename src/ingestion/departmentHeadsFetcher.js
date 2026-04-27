@@ -32,6 +32,10 @@ function stripHtml(s) {
     .replace(/\s+/g, ' ').trim();
 }
 
+function escapeRegex(s) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 function saveRecords(jurisdiction, records) {
   if (!fs.existsSync(OUTPUT_DIR)) fs.mkdirSync(OUTPUT_DIR, { recursive: true });
   const ts   = new Date().toISOString().replace(/[:.]/g, '-');
@@ -189,15 +193,21 @@ async function fetchCanadaDeptHeads() {
 // from that department's own website. defense.gov blocks all automated requests;
 // that position falls back to whitehouse.gov.
 //
+// dol.gov serves a bot-detection challenge for bare UA requests. Passing a
+// minimal Accept / Accept-Language header set bypasses it (any UA works).
+//
+// Optional `extraHeaders` field is merged into the request headers alongside UA.
+//
 // Mapping from stored `title` field to dept key (for validation merging):
-//   Secretary of Homeland Security       → dhs
-//   Secretary of State                   → state
-//   Secretary of the Treasury            → treasury
-//   Attorney General / Acting AG         → justice
-//   Secretary of Health and Human Svcs  → hhs
-//   Secretary of Education               → education
-//   Secretary of Energy                  → energy
-//   Administrator of the EPA            → epa
+//   Secretary of Homeland Security                  → dhs
+//   Secretary of State                              → state
+//   Secretary of the Treasury                       → treasury
+//   Attorney General / Acting AG                    → justice
+//   Secretary of Health and Human Svcs             → hhs
+//   Secretary of Education                          → education
+//   Secretary of Energy                             → energy
+//   Administrator of the EPA                       → epa
+//   Secretary of Labor / Acting Secretary of Labor → labor
 
 const DEPT_DIRECT_SOURCES = [
   {
@@ -325,6 +335,27 @@ const DEPT_DIRECT_SOURCES = [
       return m?.[1]?.trim() ?? null;
     },
   },
+  {
+    key:   'labor',
+    dept:  'Department of Labor',
+    title: 'Secretary of Labor',
+    url:   'https://www.dol.gov/agencies/osec',
+    ua:    'python-requests/2.31.0',
+    // dol.gov bot-detection bypassed by including Accept + Accept-Language headers.
+    extraHeaders: {
+      'Accept':          'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+      'Accept-Language': 'en-US,en;q=0.5',
+    },
+    parse(html) {
+      // h1: "Acting Secretary of Labor Keith E. Sonderling"
+      //  or "Secretary of Labor NAME" when a permanent secretary is in place.
+      const h1m = html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/i);
+      if (!h1m) return null;
+      const text = h1m[1].replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+      const m = text.match(/(?:Acting\s+)?Secretary of Labor\s+(.+)/i);
+      return m?.[1]?.trim() ?? null;
+    },
+  },
   // defense.gov blocks all automated requests — Pete Hegseth sourced from WH fallback.
 ];
 
@@ -340,6 +371,8 @@ const TITLE_TO_DEPT_KEY = {
   'Secretary of Education':                   'education',
   'Secretary of Energy':                      'energy',
   'Administrator of the Environmental':       'epa',  // prefix match
+  'Secretary of Labor':                       'labor',
+  'Acting Secretary of Labor':                'labor',
 };
 
 function titleToDeptKey(title) {
@@ -366,10 +399,21 @@ async function fetchWHCabinet() {
   while ((m = secRe.exec(html))) {
     const name = stripHtml(m[1]);
     if (!name || WH_SKIP.has(name)) continue;
-    const h3m = m[2].match(/<h3[^>]*>([\s\S]*?)<\/h3>/);
+    const sectionHtml = m[2];
+    const h3m = sectionHtml.match(/<h3[^>]*>([\s\S]*?)<\/h3>/);
     if (!h3m) continue;
-    const title = stripHtml(h3m[1]);
+    let title = stripHtml(h3m[1]);
     if (!title) continue;
+
+    // Detect acting designation: WH sometimes keeps the permanent title in h3
+    // while the bio text says "designated as the Acting [title]". Prefix if so.
+    if (!title.startsWith('Acting')) {
+      const bioText = stripHtml(sectionHtml);
+      if (new RegExp('\\bActing\\s+' + escapeRegex(title), 'i').test(bioText)) {
+        title = 'Acting ' + title;
+      }
+    }
+
     members.push({ name, title });
   }
   return members;
@@ -383,7 +427,7 @@ async function fetchDeptSources() {
     try {
       const { data: html } = await axios.get(cfg.url, {
         timeout: 25000,
-        headers: { 'User-Agent': cfg.ua },
+        headers: { 'User-Agent': cfg.ua, ...(cfg.extraHeaders || {}) },
         maxRedirects: 5,
       });
       const name = cfg.parse(html);
@@ -414,7 +458,7 @@ async function fetchUSDeptHeads() {
       fetchWHCabinet(),
     ]);
 
-    console.log(`[dept-heads:US] Dept-direct: ${deptResults.size}/8 succeeded | WH supplement: ${whMembers.length} members`);
+    console.log(`[dept-heads:US] Dept-direct: ${deptResults.size}/9 succeeded | WH supplement: ${whMembers.length} members`);
 
     // Build merged record set: dept-site name overrides WH name where available
     for (const wh of whMembers) {

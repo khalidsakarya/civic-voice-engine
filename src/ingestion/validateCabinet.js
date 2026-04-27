@@ -7,7 +7,7 @@
  * compares against stored Firestore records, and automatically updates Firestore
  * when a discrepancy is detected.
  *
- * Sources (8 direct, 1 fallback):
+ * Sources (9 direct, 1 fallback):
  *   DHS       → dhs.gov/leadership
  *   State     → state.gov/secretary/
  *   Treasury  → home.treasury.gov/about/general-information/officials
@@ -16,7 +16,11 @@
  *   Education → ed.gov/about/news
  *   Energy    → energy.gov/our-leadership-offices
  *   EPA       → epa.gov/aboutepa/epa-administrator
+ *   Labor     → dol.gov/agencies/osec (requires Accept/Accept-Language headers)
  *   Defense   → defense.gov (403) → whitehouse.gov fallback
+ *
+ * Acting detection: fetchWHCabinet() scans bio text for "Acting [title]" and
+ * prefixes the WH h3 title if the permanent title hasn't been updated yet.
  *
  * Run: node src/ingestion/validateCabinet.js
  * Scheduled: weekly (same tier as departmentHeadsFetcher)
