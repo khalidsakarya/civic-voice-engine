@@ -183,6 +183,30 @@ async function fetchCanadaDeptHeads() {
     return saveRecords('CA', records);
   }
 
+  // PM is not listed on ministers.html — fetch from pm.gc.ca separately.
+  // Prepend so the PM appears first in the output file.
+  if (!records.some(r => /^Prime Minister$/i.test(r.title))) {
+    try {
+      const pmName = await fetchPMCanada();
+      if (pmName) {
+        records.unshift({
+          id:             `ca-${slug(pmName)}`,
+          jurisdiction:   'CA',
+          name:           pmName,
+          title:          'Prime Minister',
+          department:     'Office of the Prime Minister',
+          date_appointed: '2025-03-14',
+          party:          'Liberal Party of Canada',
+          source_url:     'https://www.pm.gc.ca/en',
+          tier:           'prime_minister',
+        });
+        console.log(`[dept-heads:CA] PM added from pm.gc.ca: ${pmName}`);
+      }
+    } catch (err) {
+      console.warn(`[dept-heads:CA] PM fetch skipped — ${err.message}`);
+    }
+  }
+
   const count = saveRecords('CA', records);
   await writeAuditLog({ collection_name: COLLECTION_NAME, jurisdiction: 'CA', data_pull_timestamp: _ts, source_endpoint: 'https://www.canada.ca/en/government/ministers.html', record_count: count, import_status: count > 0 ? 'success' : 'partial', scheduler_tier: SCHEDULER_TIER });
   return count;
@@ -774,14 +798,39 @@ function parseAUListing(html, sourceUrl) {
 // Each function fetches the authoritative listing page for its jurisdiction and
 // returns a Map<key, {name, title, url}> for the key positions defined above.
 
+async function fetchPMCanada() {
+  // pm.gc.ca/en carries the PM name in the og:title meta tag as
+  // "Right Honourable <Name>" — more reliable than ministers.html
+  // which does not list the PM at all.
+  const html   = await httpsGet('https://www.pm.gc.ca/en');
+  const ogm    = html.match(/<meta[^>]+property="og:title"[^>]+content="([^"]+)"/i)
+               || html.match(/<meta[^>]+content="([^"]+)"[^>]+property="og:title"/i);
+  if (!ogm) return null;
+  const name = ogm[1].replace(/^(?:The\s+)?Right\s+Honourable\s+/i, '').trim();
+  return name || null;
+}
+
 async function fetchDeptSourcesCA() {
   const html    = await httpsGet('https://www.canada.ca/en/government/ministers.html');
   const all     = parseCanadaListing(html);
   const results = new Map();
   for (const pos of CA_KEY_POSITIONS) {
+    if (pos.key === 'prime_minister') continue;  // handled separately below
     const match = all.find(r => pos.titleRe.test(r.title));
     if (match) results.set(pos.key, { name: match.name, title: match.title, url: match.url });
     else        console.warn(`[dept-heads:CA] No listing match for key: ${pos.key}`);
+  }
+  // PM is not on ministers.html — fetch from pm.gc.ca directly
+  try {
+    const pmName = await fetchPMCanada();
+    if (pmName) {
+      results.set('prime_minister', { name: pmName, title: 'Prime Minister', url: 'https://www.pm.gc.ca/en' });
+      console.log(`[dept-heads:CA] PM from pm.gc.ca: ${pmName}`);
+    } else {
+      console.warn('[dept-heads:CA] Could not extract PM name from pm.gc.ca');
+    }
+  } catch (err) {
+    console.warn(`[dept-heads:CA] pm.gc.ca fetch failed — ${err.message}`);
   }
   console.log(`[dept-heads:CA] Key positions extracted: ${results.size}/${CA_KEY_POSITIONS.length}`);
   return results;
