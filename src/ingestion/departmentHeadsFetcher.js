@@ -147,7 +147,8 @@ async function fetchCanadaDeptHeads() {
     console.log('[dept-heads:CA] Fetching canada.ca ministers page...');
     const html = await httpsGet('https://www.canada.ca/en/government/ministers.html');
 
-    const re = /<dt>\s*<a href="([^"]+)">(The Honourable[^<]+)<\/a>\s*<\/dt>\s*<dd>\s*([\s\S]*?)\s*<\/dd>/g;
+    // Match both "The Honourable" (ministers) and "The Right Honourable" (PM/Deputy PM).
+    const re = /<dt>\s*<a href="([^"]+)">(The (?:Right )?Honourable[^<]+)<\/a>\s*<\/dt>\s*<dd>\s*([\s\S]*?)\s*<\/dd>/g;
     let m;
     while ((m = re.exec(html))) {
       const href  = m[1];
@@ -161,7 +162,7 @@ async function fetchCanadaDeptHeads() {
       else if (/^Parliamentary Secretary/i.test(title)) tier = 'parliamentary_secretary';
 
       records.push({
-        id:             `ca-${slug(name.replace('The Honourable ', ''))}`,
+        id:             `ca-${slug(name.replace(/The (?:Right )?Honourable\s+/i, ''))}`,
         jurisdiction:   'CA',
         name:           safeStr(name),
         title:          safeStr(title),
@@ -657,6 +658,174 @@ async function fetchAUDeptHeads() {
   return count;
 }
 
+// ─── Key positions for CA / UK / AU cabinet validation ───────────────────────
+//
+// Each entry's titleRe is tested against the primary title field returned by the
+// official listing page for that jurisdiction. Patterns include (?:Acting\s+)? so
+// they match both permanent and acting designees. For compound AU titles such as
+// "Deputy Prime Minister, Minister for Defence", patterns use \b (not $) so they
+// match a prefix of the full title string.
+//
+// These arrays are exported and consumed by validateCabinet.js.
+
+const CA_KEY_POSITIONS = [
+  { key: 'prime_minister',   titleRe: /^(?:Acting\s+)?Prime Minister$/i },
+  { key: 'finance',          titleRe: /^(?:Acting\s+)?(?:Deputy Prime Minister and\s+)?Minister of Finance\b/i },
+  { key: 'foreign_affairs',  titleRe: /^(?:Acting\s+)?Minister of Foreign Affairs\b/i },
+  { key: 'national_defence', titleRe: /^(?:Acting\s+)?Minister of National Defence\b/i },
+  { key: 'justice',          titleRe: /^(?:Acting\s+)?Minister of Justice\b/i },
+  { key: 'treasury_board',   titleRe: /^(?:Acting\s+)?President of the Treasury Board\b/i },
+  { key: 'public_safety',    titleRe: /^(?:Acting\s+)?Minister of Public Safety\b/i },
+  { key: 'transport',        titleRe: /^(?:Acting\s+)?Minister of Transport\b/i },
+  { key: 'health',           titleRe: /^(?:Acting\s+)?Minister of Health\b/i },
+  { key: 'immigration',      titleRe: /^(?:Acting\s+)?Minister of Immigration\b/i },
+];
+
+const UK_KEY_POSITIONS = [
+  { key: 'prime_minister',    titleRe: /^Prime Minister$/i },
+  { key: 'deputy_pm',         titleRe: /^Deputy Prime Minister\b/i },
+  { key: 'chancellor',        titleRe: /^Chancellor of the Exchequer$/i },
+  { key: 'home_secretary',    titleRe: /^(?:Acting\s+)?Secretary of State for the Home Department$/i },
+  // Foreign title truncates at comma: "Secretary of State for Foreign, Commonwealth..."
+  { key: 'foreign_secretary', titleRe: /^(?:Acting\s+)?Secretary of State for Foreign\b/i },
+  { key: 'health',            titleRe: /^(?:Acting\s+)?Secretary of State for Health\b/i },
+  { key: 'education',         titleRe: /^(?:Acting\s+)?Secretary of State for Education\b/i },
+  { key: 'defence',           titleRe: /^(?:Acting\s+)?Secretary of State for Defence\b/i },
+  { key: 'attorney_general',  titleRe: /^(?:Acting\s+)?Attorney General$/i },
+  { key: 'work_pensions',     titleRe: /^(?:Acting\s+)?Secretary of State for Work and Pensions$/i },
+];
+
+const AU_KEY_POSITIONS = [
+  { key: 'prime_minister',   titleRe: /^(?:Acting\s+)?Prime Minister\b/i },
+  // "Deputy Prime Minister, Minister for Defence" — match by prefix
+  { key: 'deputy_pm',        titleRe: /^Deputy Prime Minister\b/i },
+  { key: 'treasurer',        titleRe: /^(?:Acting\s+)?Treasurer\b/i },
+  { key: 'attorney_general', titleRe: /^(?:Acting\s+)?Attorney-General\b/i },
+  { key: 'foreign_affairs',  titleRe: /^(?:Acting\s+)?Minister for Foreign Affairs\b/i },
+  // "Minister for Home Affairs, Immigration and Citizenship..." — match by prefix
+  { key: 'home_affairs',     titleRe: /^(?:Acting\s+)?Minister for Home Affairs\b/i },
+  // "Minister for Finance, Women, the Public Service..." — match by prefix
+  { key: 'finance',          titleRe: /^(?:Acting\s+)?Minister for Finance\b/i },
+  { key: 'education',        titleRe: /^(?:Acting\s+)?Minister for Education\b/i },
+  // "Minister for Health and Ageing..." — match by prefix
+  { key: 'health',           titleRe: /^(?:Acting\s+)?Minister for Health\b/i },
+  { key: 'employment',       titleRe: /^(?:Acting\s+)?Minister for Employment\b/i },
+];
+
+// ─── Shared listing-page parsers ──────────────────────────────────────────────
+// Used by both the full fetchers (fetchCA/UK/AUDeptHeads) and the key-position
+// extractors (fetchDeptSourcesCA/UK/AU). Returning plain objects avoids duplication.
+
+function parseCanadaListing(html) {
+  const records = [];
+  const re = /<dt>\s*<a href="([^"]+)">(The (?:Right )?Honourable[^<]+)<\/a>\s*<\/dt>\s*<dd>\s*([\s\S]*?)\s*<\/dd>/g;
+  let m;
+  while ((m = re.exec(html))) {
+    const name  = stripHtml(m[2]);
+    const title = stripHtml(m[3]);
+    if (!name || !title) continue;
+    records.push({
+      name,
+      title,
+      url: m[1].startsWith('http') ? m[1] : `https://www.canada.ca${m[1]}`,
+    });
+  }
+  return records;
+}
+
+function parseUKListing(html) {
+  const records = [];
+  const re = /gem-c-image-card__title[^>]*>[\s\S]*?<a[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>[\s\S]*?gem-c-image-card__description"><p>([\s\S]*?)<\/p>/g;
+  let m;
+  while ((m = re.exec(html))) {
+    const name         = stripHtml(m[2]);
+    // Roles are comma-separated anchor tags; the role titles themselves may also contain
+    // commas (e.g. "Secretary of State for Foreign, Commonwealth and Development Affairs")
+    // which causes split() to truncate them. This is consistent with how stored titles
+    // are generated so matching still works across validation runs.
+    const primaryTitle = m[3].replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim()
+      .split(/\s*,\s*/)[0].trim();
+    if (name && primaryTitle) records.push({
+      name,
+      title: primaryTitle,
+      url: m[1].startsWith('http') ? m[1] : `https://www.gov.uk${m[1]}`,
+    });
+  }
+  return records;
+}
+
+function parseAUListing(html, sourceUrl) {
+  const records = [];
+  const articleRe = /<article class="portfolio-role child-roles clearfix">([\s\S]*?)<\/article>/g;
+  let a;
+  while ((a = articleRe.exec(html))) {
+    const block  = a[1];
+    const titleM = block.match(/<h3>([\s\S]*?)<\/h3>/);
+    const nameM  = block.match(/class="[^"]*role-title[^"]*"[\s\S]*?<a[^>]*>([^<]+)<\/a>/);
+    if (!titleM || !nameM) continue;
+    const title = stripHtml(titleM[1]);
+    const name  = nameM[1].trim();
+    if (title && name) records.push({ name, title, url: sourceUrl || null });
+  }
+  return records;
+}
+
+// ─── Dept-source extractors for CA / UK / AU ─────────────────────────────────
+// Each function fetches the authoritative listing page for its jurisdiction and
+// returns a Map<key, {name, title, url}> for the key positions defined above.
+
+async function fetchDeptSourcesCA() {
+  const html    = await httpsGet('https://www.canada.ca/en/government/ministers.html');
+  const all     = parseCanadaListing(html);
+  const results = new Map();
+  for (const pos of CA_KEY_POSITIONS) {
+    const match = all.find(r => pos.titleRe.test(r.title));
+    if (match) results.set(pos.key, { name: match.name, title: match.title, url: match.url });
+    else        console.warn(`[dept-heads:CA] No listing match for key: ${pos.key}`);
+  }
+  console.log(`[dept-heads:CA] Key positions extracted: ${results.size}/${CA_KEY_POSITIONS.length}`);
+  return results;
+}
+
+async function fetchDeptSourcesUK() {
+  const { data: html } = await axios.get(UK_MINISTERS_URL, {
+    timeout: 30000,
+    headers: { 'User-Agent': 'Mozilla/5.0 (compatible; CivicVoice/1.0)' },
+  });
+  const all     = parseUKListing(html);
+  const results = new Map();
+  for (const pos of UK_KEY_POSITIONS) {
+    const match = all.find(r => pos.titleRe.test(r.title));
+    if (match) results.set(pos.key, { name: match.name, title: match.title, url: match.url });
+    else        console.warn(`[dept-heads:UK] No listing match for key: ${pos.key}`);
+  }
+  console.log(`[dept-heads:UK] Key positions extracted: ${results.size}/${UK_KEY_POSITIONS.length}`);
+  return results;
+}
+
+async function fetchDeptSourcesAU() {
+  const all = [];
+  for (const { url } of AU_TIERS.slice(0, 2)) {  // cabinet + outer only; assistant ministers not needed
+    try {
+      const { data: html } = await axios.get(url, {
+        timeout: 20000,
+        headers: { 'User-Agent': 'Mozilla/5.0 (compatible; CivicVoice/1.0)' },
+      });
+      all.push(...parseAUListing(html, url));
+    } catch (err) {
+      console.warn(`[dept-heads:AU] fetchDeptSourcesAU: ${url} failed — ${err.message}`);
+    }
+  }
+  const results = new Map();
+  for (const pos of AU_KEY_POSITIONS) {
+    const match = all.find(r => pos.titleRe.test(r.title));
+    if (match) results.set(pos.key, { name: match.name, title: match.title, url: match.url });
+    else        console.warn(`[dept-heads:AU] No listing match for key: ${pos.key}`);
+  }
+  console.log(`[dept-heads:AU] Key positions extracted: ${results.size}/${AU_KEY_POSITIONS.length}`);
+  return results;
+}
+
 // ─── Orchestrator ─────────────────────────────────────────────────────────────
 
 async function fetchAllDeptHeads() {
@@ -693,8 +862,15 @@ module.exports = {
   fetchUSDeptHeads,
   fetchUKDeptHeads,
   fetchAUDeptHeads,
-  // Exported so validateCabinet.js can share the source configs without re-defining them
+  // US dept-direct sources (exported for validateCabinet.js)
   DEPT_DIRECT_SOURCES,
   titleToDeptKey,
   fetchDeptSources,
+  // CA / UK / AU key-position sources (exported for validateCabinet.js)
+  CA_KEY_POSITIONS,
+  UK_KEY_POSITIONS,
+  AU_KEY_POSITIONS,
+  fetchDeptSourcesCA,
+  fetchDeptSourcesUK,
+  fetchDeptSourcesAU,
 };
