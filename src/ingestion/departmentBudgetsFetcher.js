@@ -504,14 +504,23 @@ async function fetchUSDepartmentBudgets() {
           const res = await axios.get(US_BUD_RES_URL(agency.toptier_code), { timeout: 20000 });
           const fy25 = (res.data?.agency_data_by_year || []).find(y => y.fiscal_year === currentFY);
           let budget = fy25?.agency_budgetary_resources ?? null;
+          let obligated = fy25?.agency_total_obligated ?? null;
+          let grossOut = fy25?.agency_total_outlayed ?? null;
 
           const cap = ENACTED_CAPS[agency.toptier_code];
-          if (cap != null && budget > cap * 1.5) budget = cap;
+          if (cap != null && budget != null && budget > cap * 1.5) budget = cap;
+          // Obligations/outlays at toptier often include government-wide flows (e.g. Treasury as
+          // financial agent). When they dwarf enacted discretionary caps they are not comparable
+          // to the budget figure above — omit so downstream UIs do not show misleading "spent" $T.
+          if (cap != null) {
+            if (obligated != null && obligated > cap * 1.5) obligated = null;
+            if (grossOut != null && grossOut > cap * 1.5) grossOut = null;
+          }
 
           budgetMap[agency.toptier_code] = {
             budget,
-            obligated:     fy25?.agency_total_obligated  ?? null,
-            gross_outlays: fy25?.agency_total_outlayed   ?? null,
+            obligated,
+            gross_outlays: grossOut,
           };
         } catch { budgetMap[agency.toptier_code] = { budget: null, obligated: null }; }
       }));
@@ -574,6 +583,8 @@ async function fetchUSDepartmentBudgets() {
       const ggCode  = GRANTS_GOV_CODE[code];
       const openOps = ggCode != null ? (grantsGovCounts[ggCode] ?? null) : null;
 
+      const budgetNote = 'USASpending.gov FY2025 — budget authority uses enacted discretionary caps for major cabinets where raw budgetary resources were inflated; obligations/outlays omitted when not comparable to that basis.';
+
       records.push({
         id:                         `us-dept-${slug(code + '-' + name)}`,
         jurisdiction:               'US',
@@ -584,7 +595,7 @@ async function fetchUSDepartmentBudgets() {
         total_spent:                bud.obligated,
         gross_outlays:              bud.gross_outlays ?? null,
         currency:                   'USD',
-        budget_note:                'USASpending.gov FY2025 — agency budgetary resources (mandatory + discretionary, USD)',
+        budget_note:                budgetNote,
         key_programs:               grants,
         grants_given:               grants,
         internal_spending:          ocMap[code] || [],
