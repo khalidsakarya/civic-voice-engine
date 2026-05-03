@@ -470,25 +470,30 @@ async function fetchUSDepartmentBudgets() {
     console.log(`[dept-budgets:US] Got ${agencies.length} agencies`);
 
     // ── Budgetary resources (per-agency FY2025) ────────────────────────────────
-    // USASpending agency_budgetary_resources includes multi-year carryover from
-    // IIJA, IRA, ARPA, and CARES Act on top of enacted appropriations, inflating
-    // most departments by 2-7×. ENACTED_CAPS maps each affected toptier_code to
-    // the OMB FY2025 enacted budget authority (mandatory + discretionary, no
-    // carryover). Cap is applied whenever raw value exceeds enacted × 1.5.
-    // Source: OMB FY2026 Budget Appendix Table S-11 (FY2025 enacted column).
+    // USASpending agency_budgetary_resources inflates most departments 2-55×
+    // by including mandatory entitlements (Medicare, SNAP, debt interest, UI,
+    // veterans benefits) and multi-year carryover from IIJA, IRA, ARPA, CARES.
+    // ENACTED_CAPS holds the FY2025 enacted DISCRETIONARY budget authority for
+    // each affected toptier_code — what Congress annually appropriates and
+    // departments operationally control. Cap applies when raw > enacted × 1.5.
+    // Source: P.L. 119-4 (Full-Year CR, signed 2025-03-15), confirmed via CRS
+    // appropriations reports for each subcommittee bill.
     const ENACTED_CAPS = {
-      '012': 228_000_000_000,     // Agriculture: SNAP $127B + farm programs + discretionary $26B
-      '013': 13_400_000_000,      // Commerce: mostly discretionary; IIJA/BEAD/CHIPS carryover excluded
-      '014': 19_200_000_000,      // Interior: mostly discretionary; IRA conservation carryover excluded
-      '015': 38_500_000_000,      // Justice: mostly discretionary; ARPA court/prison carryover excluded
-      '020': 793_000_000_000,     // Treasury: debt interest ~$775B + IRS operations; CARES/ARP carryover excluded
-      '069': 107_700_000_000,     // Transportation: highway trust fund $82B + discretionary; IIJA $550B carryover excluded
-      '070': 90_100_000_000,      // DHS: discretionary $66B + FEMA mandatory; disaster relief accumulation excluded
-      '075': 1_779_000_000_000,   // HHS: Medicare ~$875B + Medicaid ~$618B + discretionary; ARP carryover excluded
-      '086': 72_100_000_000,      // HUD: rental assistance + discretionary; Section 8 long-term contracts excluded
-      '089': 44_700_000_000,      // Energy: discretionary (net); IRA clean energy and IIJA carryover excluded
-      '097': 872_000_000_000,     // DoD: enacted discretionary base+OCO; procurement carryover excluded
-      '1601': 47_000_000_000,     // Labor: UI mandatory $31B + discretionary $13B; COVID UI supplement excluded
+      '012': 21_400_000_000,      // Agriculture: ~$21.4B discretionary (USDA titles only; SNAP $127B mandatory excluded). CRS R48431
+      '013': 10_388_000_000,      // Commerce: $10.388B discretionary (NOAA, Census, NIST, USPTO). CRS R48134
+      '014': 15_250_000_000,      // Interior: $15.250B discretionary (DOI Title I only; IRA carryover excluded). CRS R48267
+      '015': 36_967_000_000,      // Justice: $36.967B discretionary (FBI, DEA, ATF, BOP). CRS R48134
+      '019': 53_444_000_000,      // State: $53.444B discretionary (State ops + all Foreign Operations). CRS R48231
+      '020': 14_300_000_000,      // Treasury: $14.3B discretionary (IRS $12.32B + bureaus); debt interest ~$775B mandatory excluded. CRS R48188
+      '036': 129_040_000_000,     // VA: $129.04B discretionary (medical care + admin); veterans compensation $231B mandatory excluded. CRS R48608
+      '069': 26_987_000_000,      // Transportation: $26.987B discretionary; highway trust fund $79B IIJA multi-year excluded. CRS R48253
+      '070': 64_790_000_000,      // DHS: $64.79B net discretionary (gross $93.69B minus FEMA disaster/fees/rescissions). CRS R48126
+      '075': 101_500_000_000,     // HHS: ~$101.5B discretionary (est. 51% of LHHS $198.15B); Medicare $875B + Medicaid $618B excluded. CRS R48598
+      '086': 73_300_000_000,      // HUD: ~$73.3B discretionary (rental assistance; est. at FY2024 level). CRS R48253
+      '089': 50_190_000_000,      // Energy: $50.190B discretionary (NNSA $25B + science + cleanup). CRS R48097
+      '091': 79_600_000_000,      // Education: ~$79.6B discretionary (est. at FY2024 level; student loan mandatory excluded). CRS R48598
+      '097': 851_300_000_000,     // DoD: $841.3B base + $10B emergency = $851.3B; MilCon $19.3B separate. CRS IN12425
+      '1601': 13_700_000_000,     // Labor: ~$13.7B discretionary (OSHA, BLS, training); UI trust fund $31B mandatory excluded. DOL BIB
     };
 
     console.log('[dept-budgets:US] Fetching per-agency budgetary resources for FY2025...');
