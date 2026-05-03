@@ -1,0 +1,32 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(curl -s \"https://api.congress.gov/v3/vote/118/senate?api_key=DEMO_KEY&limit=1\")",
+      "Bash(curl -s \"https://api.congress.gov/v3/vote/118/house/2/actions?api_key=DEMO_KEY\")",
+      "Bash(node -e ':*)",
+      "Bash(wait)",
+      "Bash(node *)",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)",
+      "Bash(git push *)",
+      "Bash(npm run *)",
+      "Bash(git -C /c/Users/jem91/civic-voice-engine diff HEAD -- src/ingestion/departmentBudgetsFetcher.js src/ingestion/departmentHeadsFetcher.js src/ingestion/departmentExpensesFetcher.js)",
+      "Bash(git *)",
+      "Bash(curl -I --max-time 10 https://efts.house.gov/EFTS-Public/query)",
+      "Bash(curl -I --max-time 10 https://efts.senate.gov/ETRS/query)",
+      "Bash(nslookup *)",
+      "Bash(curl -s --max-time 15 \"https://disclosures.house.gov/FinancialDisclosure#Search\" -I)",
+      "Bash(curl -s --max-time 15 \"https://disclosurespreview.house.gov/\" -I)",
+      "Bash(curl -s --max-time 15 \"https://disclosurespreview.house.gov/eFD/api/Search?Lastn=Aderholt&FilingType=P&DateRange=CustomDateRange&FromDate=01/01/2024&ToDate=05/02/2026&State=&District=&QueryText=&pageSize=10&pageNumber=1&SortField=FilingDate&SortOrder=DESC\")",
+      "Bash(curl *)",
+      "Read(//tmp/**)",
+      "Skill(claude-api)",
+      "Bash(npm install *)",
+      "Bash(Get-Content \"C:\\\\Users\\\\jem91\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\C--Users-jem91-civic-voice-engine\\\\ee2aaa24-2982-4ef4-b0f1-32110b44f3f0\\\\tasks\\\\b0dd65jzj.output\" -Wait)",
+      "Bash(Select-String --line-buffered \"Done|Error|Fatal|parsed|error|skipped|Complete\")",
+      "Bash(Get-Content \"C:\\\\Users\\\\jem91\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\C--Users-jem91-civic-voice-engine\\\\ee2aaa24-2982-4ef4-b0f1-32110b44f3f0\\\\tasks\\\\b0dd65jzj.output\")",
+      "Bash(Select-String \"Done|Complete|Parsed|Skipped|Error|Fatal|total\")",
+      "Bash(Select-Object -Last 30)"
+    ]
+  }
+}
