@@ -477,10 +477,21 @@ async function fetchUSDepartmentBudgets() {
         try {
           const res = await axios.get(US_BUD_RES_URL(agency.toptier_code), { timeout: 20000 });
           const fy25 = (res.data?.agency_data_by_year || []).find(y => y.fiscal_year === currentFY);
+          let budget = fy25?.agency_budgetary_resources ?? null;
+
+          // DoD (toptier 097): USASpending agency_budgetary_resources includes multi-year
+          // procurement carryover and working capital fund reimbursements, inflating the
+          // figure to ~$2.2T. The correct FY2025 enacted discretionary appropriations
+          // (base + OCO, per OMB Historical Table 3.2) is ~$872B. Replace whenever the
+          // raw value exceeds $1T, which reliably identifies the carryover-inflated total.
+          if (agency.toptier_code === '097' && budget > 1_000_000_000_000) {
+            budget = 872_000_000_000;
+          }
+
           budgetMap[agency.toptier_code] = {
-            budget:        fy25?.agency_budgetary_resources ?? null,
-            obligated:     fy25?.agency_total_obligated     ?? null,
-            gross_outlays: fy25?.agency_total_outlayed      ?? null,
+            budget,
+            obligated:     fy25?.agency_total_obligated  ?? null,
+            gross_outlays: fy25?.agency_total_outlayed   ?? null,
           };
         } catch { budgetMap[agency.toptier_code] = { budget: null, obligated: null }; }
       }));
