@@ -470,6 +470,27 @@ async function fetchUSDepartmentBudgets() {
     console.log(`[dept-budgets:US] Got ${agencies.length} agencies`);
 
     // ── Budgetary resources (per-agency FY2025) ────────────────────────────────
+    // USASpending agency_budgetary_resources includes multi-year carryover from
+    // IIJA, IRA, ARPA, and CARES Act on top of enacted appropriations, inflating
+    // most departments by 2-7×. ENACTED_CAPS maps each affected toptier_code to
+    // the OMB FY2025 enacted budget authority (mandatory + discretionary, no
+    // carryover). Cap is applied whenever raw value exceeds enacted × 1.5.
+    // Source: OMB FY2026 Budget Appendix Table S-11 (FY2025 enacted column).
+    const ENACTED_CAPS = {
+      '012': 228_000_000_000,     // Agriculture: SNAP $127B + farm programs + discretionary $26B
+      '013': 13_400_000_000,      // Commerce: mostly discretionary; IIJA/BEAD/CHIPS carryover excluded
+      '014': 19_200_000_000,      // Interior: mostly discretionary; IRA conservation carryover excluded
+      '015': 38_500_000_000,      // Justice: mostly discretionary; ARPA court/prison carryover excluded
+      '020': 793_000_000_000,     // Treasury: debt interest ~$775B + IRS operations; CARES/ARP carryover excluded
+      '069': 107_700_000_000,     // Transportation: highway trust fund $82B + discretionary; IIJA $550B carryover excluded
+      '070': 90_100_000_000,      // DHS: discretionary $66B + FEMA mandatory; disaster relief accumulation excluded
+      '075': 1_779_000_000_000,   // HHS: Medicare ~$875B + Medicaid ~$618B + discretionary; ARP carryover excluded
+      '086': 72_100_000_000,      // HUD: rental assistance + discretionary; Section 8 long-term contracts excluded
+      '089': 44_700_000_000,      // Energy: discretionary (net); IRA clean energy and IIJA carryover excluded
+      '097': 872_000_000_000,     // DoD: enacted discretionary base+OCO; procurement carryover excluded
+      '1601': 47_000_000_000,     // Labor: UI mandatory $31B + discretionary $13B; COVID UI supplement excluded
+    };
+
     console.log('[dept-budgets:US] Fetching per-agency budgetary resources for FY2025...');
     const budgetMap = {};
     for (let i = 0; i < agencies.length; i += CONCUR) {
@@ -479,14 +500,8 @@ async function fetchUSDepartmentBudgets() {
           const fy25 = (res.data?.agency_data_by_year || []).find(y => y.fiscal_year === currentFY);
           let budget = fy25?.agency_budgetary_resources ?? null;
 
-          // DoD (toptier 097): USASpending agency_budgetary_resources includes multi-year
-          // procurement carryover and working capital fund reimbursements, inflating the
-          // figure to ~$2.2T. The correct FY2025 enacted discretionary appropriations
-          // (base + OCO, per OMB Historical Table 3.2) is ~$872B. Replace whenever the
-          // raw value exceeds $1T, which reliably identifies the carryover-inflated total.
-          if (agency.toptier_code === '097' && budget > 1_000_000_000_000) {
-            budget = 872_000_000_000;
-          }
+          const cap = ENACTED_CAPS[agency.toptier_code];
+          if (cap != null && budget > cap * 1.5) budget = cap;
 
           budgetMap[agency.toptier_code] = {
             budget,
