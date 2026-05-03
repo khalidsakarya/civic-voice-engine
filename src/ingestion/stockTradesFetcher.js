@@ -2,25 +2,24 @@
  * Member Stock Trades Fetcher — Civic Voice Engine
  *
  * Fetches real STOCK Act periodic transaction reports (PTRs) filed by US
- * members of Congress via the official public EFTS disclosure search APIs.
+ * members of Congress via the official public disclosure search endpoints.
  *
  * Sources
  * ─────────────────────────────────────────────────────────────────────────────
- * US House  efts.house.gov/EFTS-Public/query
- *   The same Electronic Financial Disclosure Text Search (EFTS) endpoint used
- *   by disclosures.house.gov. Filter by fileType=PTR to get Periodic Transaction
- *   Reports only — these are the STOCK Act filings that list individual trades.
- *   Fields: FilingID, First, Last, Office, FilingType, FilingYear, StateDst, URL
+ * US House  disclosures-clerk.house.gov/FinancialDisclosure/ViewMemberSearchResult
+ *   POST endpoint from the House Clerk's FinancialDisclosure system. Returns an
+ *   HTML table of PTR filings filtered by year and report type.
+ *   Params: LastName (blank = all), FilingYear, State, District, ReportType=P
+ *   Row columns: Name (link to PDF), Office (state+district), Filing Year, Filing type
+ *   PDF base: https://disclosures-clerk.house.gov/public_disc/ptr-pdfs/{year}/{id}.pdf
  *
- * US Senate  efts.senate.gov/ETRS/query
- *   The Senate Electronic Text Reporting System (ETRS). Same Elasticsearch-style
- *   response envelope as House EFTS. Filter by report_types=['ptr'] (lower-case).
- *   Fields: first_name, last_name, office_id, report_type, date_filed, year,
- *           document_id, link (relative path to PDF/XML on disclosures.senate.gov)
+ *   NOTE: efts.house.gov/EFTS-Public/query is NXDOMAIN as of 2026-05-02 — the old
+ *   Elasticsearch-based EFTS was decommissioned.
  *
- * Note: Both domains resolve fine in production. If DNS fails locally (Windows
- * dev environment quirk), the fetcher catches the error, logs it, and continues
- * so the scheduler is not interrupted.
+ * US Senate  efts.senate.gov/ETRS/query — DEAD as of 2026-05-02 (NXDOMAIN)
+ *   ethics.senate.gov blocks programmatic access (Akamai WAF 403).
+ *   efd.senate.gov requires filer authentication.
+ *   Senate PTRs are currently not fetchable programmatically; skipped gracefully.
  */
 
 'use strict';
@@ -76,198 +75,145 @@ function dateRange(lookbackMonths) {
   };
 }
 
-// ─── US House EFTS — PTR filings ──────────────────────────────────────────────
+// ─── US House — PTR filings via ViewMemberSearchResult ────────────────────────
 //
-//  GET https://efts.house.gov/EFTS-Public/query
-//    ?q=               — blank for all
-//    &fileType=PTR     — Periodic Transaction Reports (STOCK Act trades)
-//    &dateRange=custom
-//    &fromDate=YYYY-MM-DD
-//    &toDate=YYYY-MM-DD
+//  POST https://disclosures-clerk.house.gov/FinancialDisclosure/ViewMemberSearchResult
+//    LastName=       — blank = all members
+//    FilingYear=     — 4-digit year
+//    State=          — blank = all states
+//    District=       — blank = all districts
+//    ReportType=P    — P = Periodic Transaction Report (PTR)
 //
-//  EFTS returns up to 10 hits by default. The response also includes
-//  hits.total.value with the full count. We page through using the `start`
-//  param (offset) in increments of 100 until we've fetched all results.
+//  Returns an HTML page with a <tbody> table. Each row has four cells:
+//    [0] Name — <a href="public_disc/ptr-pdfs/{year}/{id}.pdf">LastName, Title. First M.</a>
+//    [1] Office — state+district code (e.g. "AL04")
+//    [2] Filing Year
+//    [3] Filing type (e.g. "PTR Original", "PTR Amendment")
 //
-//  Individual trade detail is in the PDF/XML at disclosures.house.gov + s.URL
-//  (e.g. /public_disc/ptr-pdfs/2025/20025000.pdf). We record the document URL
-//  so the app can deep-link to the original filing.
+//  We query all years from the lookback window and de-duplicate by filing_id.
 
-const HOUSE_EFTS_BASE = 'https://efts.house.gov/EFTS-Public/query';
-const HOUSE_DOC_BASE  = 'https://disclosures.house.gov';
-const HOUSE_PAGE_SIZE = 100;
+const HOUSE_SEARCH_URL = 'https://disclosures-clerk.house.gov/FinancialDisclosure/ViewMemberSearchResult';
+const HOUSE_DOC_BASE   = 'https://disclosures-clerk.house.gov';
+
+function parseHouseSearchHtml(html, year) {
+  const tbodyMatch = html.match(/<tbody>([\s\S]*?)<\/tbody>/i);
+  if (!tbodyMatch) return [];
+
+  const rows = tbodyMatch[1].match(/<tr[\s\S]*?<\/tr>/gi) || [];
+  const records = [];
+
+  for (const row of rows) {
+    const cells = (row.match(/<td[^>]*>([\s\S]*?)<\/td>/gi) || [])
+      .map(c => c.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim());
+
+    const linkMatch = row.match(/href="([^"]+\.pdf)"/i);
+    if (!cells[0] || !linkMatch) continue;
+
+    const pdfPath  = linkMatch[1];
+    const idMatch  = pdfPath.match(/(\d+)\.pdf$/);
+    const filingId = idMatch ? idMatch[1] : null;
+
+    // Name format: "LastName, Hon.. FirstName M." — split on first comma
+    const rawName   = cells[0].trim();
+    const commaIdx  = rawName.indexOf(',');
+    const lastName  = commaIdx > -1 ? rawName.slice(0, commaIdx).trim() : rawName;
+    const firstPart = commaIdx > -1 ? rawName.slice(commaIdx + 1).replace(/Hon\.\.?\s*/i, '').trim() : '';
+    const firstName = firstPart.replace(/\s+[A-Z]\.$/, '').trim() || null;
+
+    records.push({
+      id:           `us-house-ptr-${filingId}`,
+      filing_id:    filingId,
+      member_name:  rawName || null,
+      first_name:   firstName,
+      last_name:    safeStr(lastName) || null,
+      office:       safeStr(cells[1]) || null,
+      state_district: safeStr(cells[1]) || null,
+      filing_type:  safeStr(cells[3]) || 'PTR',
+      filing_year:  safeNum(cells[2] || year),
+      filing_date:  null,
+      document_url: pdfPath ? `${HOUSE_DOC_BASE}/${pdfPath}` : null,
+      jurisdiction: 'US',
+      chamber:      'House',
+      report_type:  'PTR',
+      source_url:   HOUSE_SEARCH_URL,
+    });
+  }
+
+  return records;
+}
 
 async function fetchUSHouseTrades() {
   const _ts = new Date().toISOString();
   try {
-  const { fromDate, toDate } = dateRange(LOOKBACK_MONTHS);
-  console.log(`[stock-trades:US-House] Querying EFTS PTR filings from ${fromDate} to ${toDate}…`);
+    const currentYear = new Date().getFullYear();
+    const startYear   = currentYear - Math.ceil(LOOKBACK_MONTHS / 12);
+    const years       = [];
+    for (let y = startYear; y <= currentYear; y++) years.push(y);
 
-  let allHits = [];
-  let start   = 0;
-  let total   = null;
+    console.log(`[stock-trades:US-House] Querying PTR filings for years: ${years.join(', ')}…`);
 
-  do {
-    const resp = await axios.get(HOUSE_EFTS_BASE, {
-      params: {
-        q:         '',
-        fileType:  'PTR',
-        dateRange: 'custom',
-        fromDate,
-        toDate,
-        start,
-      },
-      headers: { Accept: 'application/json' },
-      timeout: TIMEOUT_MS,
+    const allRecords = [];
+    const seenIds    = new Set();
+
+    for (const year of years) {
+      const resp = await axios.post(HOUSE_SEARCH_URL, new URLSearchParams({
+        LastName:    '',
+        FilingYear:  String(year),
+        State:       '',
+        District:    '',
+        ReportType:  'P',
+      }).toString(), {
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          'Accept':       'text/html',
+          'Origin':       'https://disclosures-clerk.house.gov',
+          'Referer':      'https://disclosures-clerk.house.gov/FinancialDisclosure',
+        },
+        timeout: TIMEOUT_MS,
+      });
+
+      const rows = parseHouseSearchHtml(resp.data, year);
+      console.log(`[stock-trades:US-House] Year ${year}: ${rows.length} PTR rows`);
+
+      for (const r of rows) {
+        if (r.filing_id && seenIds.has(r.filing_id)) continue;
+        if (r.filing_id) seenIds.add(r.filing_id);
+        allRecords.push(r);
+      }
+    }
+
+    console.log(`[stock-trades:US-House] Total PTR filings fetched: ${allRecords.length}`);
+
+    const result = saveRecords('us_house_ptr', allRecords, {
+      years,
+      sourceUrl: HOUSE_SEARCH_URL,
     });
-
-    const hits = resp.data?.hits?.hits || [];
-    if (total === null) {
-      total = resp.data?.hits?.total?.value ?? hits.length;
-      console.log(`[stock-trades:US-House] Total PTR filings available: ${total}`);
-    }
-
-    allHits.push(...hits);
-    start += HOUSE_PAGE_SIZE;
-
-    // Avoid hammering the API — cap at 1 000 filings per run
-    if (allHits.length >= 1000) {
-      console.log('[stock-trades:US-House] Reached 1 000-record cap; stopping pagination');
-      break;
-    }
-  } while (allHits.length < total);
-
-  const records = allHits.map(h => {
-    const s = h._source || {};
-    const filingId = safeStr(s.FilingID || h._id);
-    const docPath  = safeStr(s.URL);
-    return {
-      id:             `us-house-ptr-${filingId}`,
-      filing_id:      filingId,
-      member_name:    [safeStr(s.First), safeStr(s.Last)].filter(Boolean).join(' ') || null,
-      first_name:     safeStr(s.First),
-      last_name:      safeStr(s.Last),
-      office:         safeStr(s.Office),
-      state_district: safeStr(s.StateDst),
-      filing_type:    safeStr(s.FilingType || s.DocumentType) || 'PTR',
-      filing_year:    safeNum(s.FilingYear),
-      filing_date:    safeStr(s.FilingDate || s.DateFiled),
-      document_url:   docPath ? `${HOUSE_DOC_BASE}${docPath}` : null,
-      jurisdiction:   'US',
-      chamber:        'House',
-      report_type:    'PTR',
-      source_url:     HOUSE_EFTS_BASE,
-    };
-  });
-
-  const result = saveRecords('us_house_ptr', records, {
-    fromDate,
-    toDate,
-    totalAvailable: total,
-    sourceApi: HOUSE_EFTS_BASE,
-  });
-  await writeAuditLog({ collection_name: COLLECTION_NAME, jurisdiction: 'US-House', data_pull_timestamp: _ts, source_endpoint: 'https://efts.house.gov/EFTS-Public/query', record_count: result.count, import_status: 'success', scheduler_tier: SCHEDULER_TIER });
-  return result;
+    await writeAuditLog({ collection_name: COLLECTION_NAME, jurisdiction: 'US-House', data_pull_timestamp: _ts, source_endpoint: HOUSE_SEARCH_URL, record_count: result.count, import_status: 'success', scheduler_tier: SCHEDULER_TIER });
+    return result;
   } catch (err) {
-    await writeAuditLog({ collection_name: COLLECTION_NAME, jurisdiction: 'US-House', data_pull_timestamp: _ts, source_endpoint: 'https://efts.house.gov/EFTS-Public/query', record_count: 0, import_status: 'failed', error_message: err.message, scheduler_tier: SCHEDULER_TIER });
+    await writeAuditLog({ collection_name: COLLECTION_NAME, jurisdiction: 'US-House', data_pull_timestamp: _ts, source_endpoint: HOUSE_SEARCH_URL, record_count: 0, import_status: 'failed', error_message: err.message, scheduler_tier: SCHEDULER_TIER });
     throw err;
   }
 }
 
-// ─── US Senate ETRS — PTR filings ─────────────────────────────────────────────
+// ─── US Senate PTR filings — UNAVAILABLE ──────────────────────────────────────
 //
-//  GET https://efts.senate.gov/ETRS/query
-//    ?report_types[]=ptr  — Periodic Transaction Reports (lower-case)
-//    &from_date=YYYY-MM-DD
-//    &to_date=YYYY-MM-DD
-//    &limit=100
-//    &offset=0
+//  efts.senate.gov/ETRS/query is NXDOMAIN as of 2026-05-02.
+//  ethics.senate.gov (the public search UI) blocks all programmatic access via
+//  Akamai WAF (403). efd.senate.gov requires filer authentication.
+//  No public bulk-download alternative has been identified.
 //
-//  Response mirrors the House EFTS envelope:
-//    { hits: { hits: [...], total: { value: N } } }
-//
-//  _source fields include: first_name, last_name, office_id, report_type,
-//  date_filed, year, document_id, link (relative URL on disclosures.senate.gov)
-//
-//  We page through using offset until all results are retrieved (cap: 1 000).
+//  This function logs the skip to the audit log and returns 0 records until a
+//  working Senate PTR source is identified.
 
-const SENATE_ETRS_BASE = 'https://efts.senate.gov/ETRS/query';
-const SENATE_DOC_BASE  = 'https://disclosures.senate.gov';
-const SENATE_PAGE_SIZE = 100;
+const SENATE_ETRS_BASE = 'https://efts.senate.gov/ETRS/query'; // dead — kept for audit log reference
 
 async function fetchUSSenatorTrades() {
   const _ts = new Date().toISOString();
-  try {
-  const { fromDate, toDate } = dateRange(LOOKBACK_MONTHS);
-  console.log(`[stock-trades:US-Senate] Querying Senate ETRS PTR filings from ${fromDate} to ${toDate}…`);
-
-  let allHits = [];
-  let offset  = 0;
-  let total   = null;
-
-  do {
-    const resp = await axios.get(SENATE_ETRS_BASE, {
-      params: {
-        'report_types[]': 'ptr',
-        from_date: fromDate,
-        to_date:   toDate,
-        limit:     SENATE_PAGE_SIZE,
-        offset,
-      },
-      headers: { Accept: 'application/json' },
-      timeout: TIMEOUT_MS,
-    });
-
-    const hits = resp.data?.hits?.hits || [];
-    if (total === null) {
-      total = resp.data?.hits?.total?.value ?? hits.length;
-      console.log(`[stock-trades:US-Senate] Total PTR filings available: ${total}`);
-    }
-
-    if (hits.length === 0) break;
-    allHits.push(...hits);
-    offset += SENATE_PAGE_SIZE;
-
-    if (allHits.length >= 1000) {
-      console.log('[stock-trades:US-Senate] Reached 1 000-record cap; stopping pagination');
-      break;
-    }
-  } while (allHits.length < total);
-
-  const records = allHits.map(h => {
-    const s = h._source || {};
-    const docId  = safeStr(s.document_id || h._id);
-    const link   = safeStr(s.link);
-    return {
-      id:             `us-senate-ptr-${docId}`,
-      filing_id:      docId,
-      member_name:    [safeStr(s.first_name), safeStr(s.last_name)].filter(Boolean).join(' ') || null,
-      first_name:     safeStr(s.first_name),
-      last_name:      safeStr(s.last_name),
-      office:         safeStr(s.office_id),
-      filing_type:    safeStr(s.report_type) || 'PTR',
-      filing_year:    safeNum(s.year),
-      filing_date:    safeStr(s.date_filed),
-      document_url:   link ? (link.startsWith('http') ? link : `${SENATE_DOC_BASE}${link}`) : null,
-      jurisdiction:   'US',
-      chamber:        'Senate',
-      report_type:    'PTR',
-      source_url:     SENATE_ETRS_BASE,
-    };
-  });
-
-  const result = saveRecords('us_senate_ptr', records, {
-    fromDate,
-    toDate,
-    totalAvailable: total,
-    sourceApi: SENATE_ETRS_BASE,
-  });
-  await writeAuditLog({ collection_name: COLLECTION_NAME, jurisdiction: 'US-Senate', data_pull_timestamp: _ts, source_endpoint: 'https://efts.senate.gov/ETRS/query', record_count: result.count, import_status: 'success', scheduler_tier: SCHEDULER_TIER });
-  return result;
-  } catch (err) {
-    await writeAuditLog({ collection_name: COLLECTION_NAME, jurisdiction: 'US-Senate', data_pull_timestamp: _ts, source_endpoint: 'https://efts.senate.gov/ETRS/query', record_count: 0, import_status: 'failed', error_message: err.message, scheduler_tier: SCHEDULER_TIER });
-    throw err;
-  }
+  const reason = 'efts.senate.gov is NXDOMAIN (decommissioned); ethics.senate.gov blocks programmatic access via Akamai WAF — no public Senate PTR API available';
+  console.warn('[stock-trades:US-Senate] ⚠ Skipped: ' + reason);
+  await writeAuditLog({ collection_name: COLLECTION_NAME, jurisdiction: 'US-Senate', data_pull_timestamp: _ts, source_endpoint: SENATE_ETRS_BASE, record_count: 0, import_status: 'skipped', error_message: reason, scheduler_tier: SCHEDULER_TIER });
+  return { count: 0, skipped: true, reason };
 }
 
 // ─── Main export ───────────────────────────────────────────────────────────────
@@ -280,20 +226,13 @@ async function fetchAllStockTrades() {
   try {
     results.usHouse = await fetchUSHouseTrades();
   } catch (err) {
-    // DNS failures in Windows dev env — domain resolves fine in production
     console.warn(`[stock-trades:US-House] ⚠ Skipped: ${err.message}`);
-    await writeAuditLog({ collection_name: COLLECTION_NAME, jurisdiction: 'US-House', data_pull_timestamp: new Date().toISOString(), source_endpoint: 'https://efts.house.gov/EFTS-Public/query', record_count: 0, import_status: 'failed', error_message: err.message, scheduler_tier: SCHEDULER_TIER });
+    await writeAuditLog({ collection_name: COLLECTION_NAME, jurisdiction: 'US-House', data_pull_timestamp: new Date().toISOString(), source_endpoint: HOUSE_SEARCH_URL, record_count: 0, import_status: 'failed', error_message: err.message, scheduler_tier: SCHEDULER_TIER });
     results.usHouse = { count: 0, skipped: true, reason: err.message };
   }
 
-  // Senate PTRs
-  try {
-    results.usSenate = await fetchUSSenatorTrades();
-  } catch (err) {
-    console.warn(`[stock-trades:US-Senate] ⚠ Skipped: ${err.message}`);
-    await writeAuditLog({ collection_name: COLLECTION_NAME, jurisdiction: 'US-Senate', data_pull_timestamp: new Date().toISOString(), source_endpoint: 'https://efts.senate.gov/ETRS/query', record_count: 0, import_status: 'failed', error_message: err.message, scheduler_tier: SCHEDULER_TIER });
-    results.usSenate = { count: 0, skipped: true, reason: err.message };
-  }
+  // Senate PTRs — skipped until a working public source is identified
+  results.usSenate = await fetchUSSenatorTrades();
 
   const total = (results.usHouse?.count || 0) + (results.usSenate?.count || 0);
   console.log(`\n[stock-trades] Done. Total filings fetched: ${total}`);
