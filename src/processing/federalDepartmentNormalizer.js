@@ -158,8 +158,57 @@ function buildRecord(budget, head, expense, jurisdiction) {
 
   // Financial figures in local currency (unit-scaled, no FX)
   const budgetAuthority = toLocalAmount(budget?.total_budget, jurisdiction);
-  const { obligations, outlays } = getObligationsOutlays(budget, jurisdiction);
-  const remaining       = budgetAuthority != null && obligations != null ? budgetAuthority - obligations : null;
+  let { obligations, outlays } = getObligationsOutlays(budget, jurisdiction);
+  let remaining = budgetAuthority != null && obligations != null ? budgetAuthority - obligations : null;
+
+  // US cabinet view: never publish obligations/outlays/remaining_balance on federal_departments — USAspending
+  // toptier totals mix federal-wide managed flows with discretionary operating appropriations and misread as
+  // "department budget" (e.g. multi-trillion Treasury obligations). Cash position (TGA) is not this field.
+  let financialClassification = null;
+  if (jurisdiction === 'US') {
+    obligations = null;
+    outlays = null;
+    remaining = null;
+    const fy = budget?.fiscal_year != null ? String(budget.fiscal_year) : null;
+    financialClassification = {
+      budget_authority: {
+        metric_key: 'budget_authority',
+        type: 'operating_appropriation',
+        scope: 'department_level',
+        display_label: fy ? `FY${fy} Operating Appropriation (Discretionary)` : 'Operating Appropriation (Discretionary)',
+        exclusions: [
+          'Mandatory / entitlement spending routed through agencies (Medicare, Medicaid, SNAP, etc.) — national fiscal modules only.',
+          'Trust funds, credit programs, and inter-governmental pass-throughs in USAspending toptier aggregates.',
+          'Federal-wide payment / settlement activity (central disbursement) attributed to an agency code but not cabinet operating budget.',
+        ],
+        source_transparency:
+          'USAspending.gov agency budgetary resources; Civic Voice applies enacted discretionary ceilings (CRS-aligned) where raw totals are inflated — engine `ENACTED_CAPS` in departmentBudgetsFetcher.js (P.L. 119-4 Full-Year Continuing Appropriations, 2025; CRS primers e.g. R48188 Treasury, R48598 HHS, R48608 VA, R48253 USDA/HUD/DOT, R48134 Justice/Commerce, R48267 Interior, R48231 State, R48126 DHS, R48097 Energy, R48253 HUD, R48431 USDA, IN12425 DoD, DOL BIB Labor).',
+      },
+      obligations: {
+        metric_key: 'obligations',
+        presented: false,
+        type: 'managed_financial_activity',
+        scope: 'federal_level',
+        reason:
+          'Excluded from cabinet department cards — USAspending obligations at toptier are not equivalent to the secretary’s operating appropriation.',
+      },
+      outlays: {
+        metric_key: 'outlays',
+        presented: false,
+        type: 'managed_financial_activity',
+        scope: 'federal_level',
+        reason: 'Excluded for the same classification reason as obligations.',
+      },
+      remaining_balance: {
+        metric_key: 'remaining_balance',
+        presented: false,
+        type: 'cash_balance',
+        scope: 'federal_level',
+        reason:
+          'Not U.S. Treasury General Account (TGA) cash — previously budget−obligations and misinterpreted. Dynamic TGA belongs in a dedicated federal liquidity view.',
+      },
+    };
+  }
 
   // Expense figures: already in local currency, no conversion needed
   const expCurrency = expense?.currency || currency;
@@ -233,6 +282,7 @@ function buildRecord(budget, head, expense, jurisdiction) {
     grants,
     internal_spending: internalSpending,
     source_metadata:   sourceMeta,
+    financial_classification: financialClassification,
   });
 }
 

@@ -76,6 +76,10 @@
  *
  * Provenance
  * @property {SourceMetadata}  source_metadata - Where the data came from and when it was fetched
+ *
+ * Classification (US only)
+ * @property {Object|null}  financial_classification - Structured semantics for published figures
+ *          (type, scope, exclusions, source_transparency); obligations/outlays intentionally omitted at cabinet scope.
  */
 
 /** Canonical field list — use this to validate or construct records programmatically. */
@@ -113,6 +117,9 @@ const FEDERAL_DEPARTMENT_FIELDS = [
 
   // Provenance
   'source_metadata',
+
+  // US: explicit metric semantics (cabinet vs federal-wide)
+  'financial_classification',
 ];
 
 /**
@@ -148,6 +155,7 @@ function createDepartmentRecord(overrides = {}) {
       fiscal_year:  null,
       currency:     null,
     },
+    financial_classification: null,
   };
   return { ...base, ...overrides };
 }
