@@ -49,15 +49,17 @@
     "auth": null
   },
   {
-    "_comment": "=== USA ===",
+    "_comment": "=== USA === 119th Congress only (Jan 20 2025 – present, Trump administration)",
     "name": "us_congress_bills",
     "type": "bill",
     "jurisdiction": "US",
-    "url": "https://api.congress.gov/v3/bill",
+    "url": "https://api.congress.gov/v3/bill/119",
     "method": "GET",
     "params": {
-      "limit": 20,
-      "format": "json"
+      "limit": 250,
+      "format": "json",
+      "sort": "updateDate+desc",
+      "fromDateTime": "2025-01-20T00:00:00Z"
     },
     "auth": {
       "apiKeyParam": "api_key",
@@ -72,7 +74,8 @@
     "method": "GET",
     "params": {
       "jurisdiction": "California",
-      "per_page": 20
+      "per_page": 20,
+      "introduced_since": "2025-01-20"
     },
     "auth": {
       "apiKeyHeader": "X-API-KEY",
