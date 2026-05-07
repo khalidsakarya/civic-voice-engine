@@ -116,12 +116,12 @@ async function fetchCAJustices() {
 }
 
 async function fetchCACases() {
-  console.log('[court:CA:cases] Fetching SCC RSS decisions...');
+  console.log('[court:CA:cases] Fetching SCC RSS decisions (2023+)...');
   const r = await axios.get('https://decisions.scc-csc.ca/scc-csc/scc-csc/en/rss.do',
     { headers: BROWSER_HEADERS, timeout: 20000 });
 
   const xml = r.data;
-  const items = [...xml.matchAll(/<item>([\s\S]*?)<\/item>/g)].slice(0, 30);
+  const items = [...xml.matchAll(/<item>([\s\S]*?)<\/item>/g)];
 
   const records = items.map(m => {
     const raw     = m[1];
@@ -130,28 +130,25 @@ async function fetchCACases() {
     const descRaw   = raw.match(/<description>([\s\S]*?)<\/description>/)?.[1]?.replace(/<!\[CDATA\[|\]\]>/g,'').trim() || '';
     const descText  = stripTags(descRaw).trim();
 
-    // Title format: "Case Name - YYYY SCC N - YYYY-MM-DD"
-    // or            "Case Name - YYYY-MM-DD"
     const citationMatch = rawTitle.match(/- (\d{4} SCC \d+)/);
     const dateInTitle   = rawTitle.match(/- (\d{4}-\d{2}-\d{2})\s*$/);
     const citation      = citationMatch?.[1] || null;
 
-    // Case name = everything before the citation or date suffix
     const caseName = rawTitle
       .replace(/ - \d{4} SCC \d+.*/, '')
       .replace(/ - \d{4}-\d{2}-\d{2}.*/, '')
       .trim();
 
-    // Date: from title suffix or from description "published on YYYY-MM-DD"
     let date = dateInTitle?.[1] || null;
     if (!date) {
       const descDate = descText.match(/(\d{4}-\d{2}-\d{2})/);
       if (descDate) date = descDate[1];
     }
 
-    // Summary from description
-    const summary = descText.replace(/^New document published.*?\.|^Document updated.*?\./i, '').trim() || null;
+    // Filter to 2023+
+    if (date && date < '2023-01-01') return null;
 
+    const summary = descText.replace(/^New document published.*?\.|^Document updated.*?\./i, '').trim() || null;
     if (!caseName) return null;
     const idSlug = caseName.replace(/[^a-zA-Z0-9]+/g, '_').slice(0, 60);
 
@@ -162,7 +159,7 @@ async function fetchCACases() {
       title:        caseName,
       citation,
       date:         date || null,
-      status:       citation ? 'Decided' : 'Pending',
+      status:       citation ? 'decided' : 'ongoing',
       summary:      summary || null,
       source_url:   link || 'https://decisions.scc-csc.ca/scc-csc/scc-csc/en/nav.do',
     };
@@ -176,9 +173,45 @@ async function fetchCACases() {
     seen.add(k); return true;
   });
 
-  console.log(`[court:CA:cases] ${deduped.length} cases`);
-  saveOutput('cases', 'CA', deduped);
-  return deduped;
+  // Also fetch hearing list for upcoming cases
+  let upcoming = [];
+  try {
+    const hearingsPage = await axios.get('https://www.scc-csc.ca/case-dossier/cms-sgd/near-proche-eng.aspx',
+      { headers: BROWSER_HEADERS, timeout: 15000 });
+    const hText = stripTags(hearingsPage.data);
+    // Extract upcoming hearing entries: lines with year+case name pattern
+    const lines = hText.split('\n').map(l => l.trim()).filter(l => l.length > 20);
+    for (const line of lines) {
+      const dateM = line.match(/(\d{4}-\d{2}-\d{2}|\w+ \d{1,2},? \d{4})/);
+      const date  = dateM ? parseDate(dateM[1]) : null;
+      if (!date || date < '2023-01-01') continue;
+      const title = line.replace(dateM?.[0] || '', '').replace(/\s+/g,' ').trim().slice(0, 120);
+      if (!title || title.length < 5) continue;
+      const idSlug = title.replace(/[^a-zA-Z0-9]+/g, '_').slice(0, 60);
+      upcoming.push({
+        id:           `CA-SCC-upcoming-${idSlug}`,
+        jurisdiction: 'CA',
+        court:        'Supreme Court of Canada',
+        title,
+        citation:     null,
+        date,
+        status:       'upcoming',
+        summary:      null,
+        source_url:   'https://www.scc-csc.ca/case-dossier/cms-sgd/near-proche-eng.aspx',
+      });
+    }
+    // Deduplicate upcoming against decided
+    const decidedTitles = new Set(deduped.map(d => d.title));
+    upcoming = upcoming.filter(u => !decidedTitles.has(u.title)).slice(0, 10);
+    console.log(`[court:CA:cases] ${upcoming.length} upcoming hearings found`);
+  } catch (e) {
+    console.warn(`[court:CA:cases] Upcoming hearings fetch failed: ${e.message}`);
+  }
+
+  const all = [...deduped, ...upcoming];
+  console.log(`[court:CA:cases] ${all.length} cases (${deduped.length} decided/ongoing, ${upcoming.length} upcoming)`);
+  saveOutput('cases', 'CA', all);
+  return all;
 }
 
 // ─── United States — Supreme Court of the United States ───────────────────────
@@ -243,17 +276,34 @@ async function fetchUSJustices() {
 }
 
 async function fetchUSCases() {
-  console.log('[court:US:cases] Fetching SCOTUS cases from Oyez (term 2024)...');
-  const r = await axios.get('https://api.oyez.org/cases',
-    { params: { filter: 'term:2024', page: 0, per_page: 25 },
-      headers: { 'Accept': 'application/json', 'User-Agent': 'Mozilla/5.0' }, timeout: 20000 });
+  // Fetch terms 2022, 2023, 2024 — covers Oct 2022 through present (2023+ decisions)
+  const TERMS = ['2022', '2023', '2024'];
+  const allCaseList = [];
+  const seenDockets = new Set();
 
-  const caseList = r.data || [];
-  console.log(`[court:US:cases] ${caseList.length} cases in term 2024, fetching details...`);
+  for (const term of TERMS) {
+    console.log(`[court:US:cases] Fetching SCOTUS term ${term} from Oyez...`);
+    try {
+      const r = await axios.get('https://api.oyez.org/cases',
+        { params: { filter: `term:${term}`, page: 0, per_page: 100 },
+          headers: { 'Accept': 'application/json', 'User-Agent': 'Mozilla/5.0' }, timeout: 25000 });
+      for (const c of (r.data || [])) {
+        const key = c.docket_number?.trim() || c.ID;
+        if (!seenDockets.has(key)) { seenDockets.add(key); allCaseList.push(c); }
+      }
+      console.log(`[court:US:cases] Term ${term}: ${r.data?.length || 0} cases`);
+    } catch (e) {
+      console.warn(`[court:US:cases] Term ${term} fetch failed: ${e.message}`);
+    }
+  }
 
-  // Fetch individual case details in parallel (capped to 20)
+  console.log(`[court:US:cases] ${allCaseList.length} total cases across terms, fetching details (up to 60)...`);
+
+  // Prioritise recent + undecided cases; fetch up to 60 details
+  const toFetch = allCaseList.slice(0, 60);
+
   const details = await Promise.allSettled(
-    caseList.slice(0, 20).map(c =>
+    toFetch.map(c =>
       axios.get(c.href, { headers: { 'Accept': 'application/json', 'User-Agent': 'Mozilla/5.0' }, timeout: 20000 })
         .then(r2 => r2.data)
         .catch(() => c)
@@ -261,23 +311,25 @@ async function fetchUSCases() {
   );
 
   const records = details.map((d, i) => {
-    const cas = d.status === 'fulfilled' ? d.value : caseList[i];
+    const cas = d.status === 'fulfilled' ? d.value : toFetch[i];
     const decision = (cas.decisions || [])[0];
 
-    const timeline = cas.timeline || [];
-    const grantedEvent  = timeline.find(t => t.event === 'Granted');
-    const decidedEvent  = timeline.find(t => t.event === 'Decided');
+    const timeline    = cas.timeline || [];
+    const grantedEvent = timeline.find(t => t.event === 'Granted');
+    const arguedEvent  = timeline.find(t => t.event === 'Argued');
+    const decidedEvent = timeline.find(t => t.event === 'Decided');
 
-    const dateArgued  = timeline.find(t => t.event === 'Argued');
     const dateGranted = grantedEvent?.dates?.[0]
       ? new Date(grantedEvent.dates[0] * 1000).toISOString().slice(0, 10) : null;
+    const dateArgued  = arguedEvent?.dates?.[0]
+      ? new Date(arguedEvent.dates[0] * 1000).toISOString().slice(0, 10) : null;
     const dateDecided = decidedEvent?.dates?.[0]
       ? new Date(decidedEvent.dates[0] * 1000).toISOString().slice(0, 10) : null;
 
-    // Status
-    const status = dateDecided ? 'Decided'
-                 : dateArgued  ? 'Argued — awaiting decision'
-                 :               'Pending';
+    // Normalised status: decided / ongoing / upcoming
+    const status = dateDecided ? 'decided'
+                 : dateArgued  ? 'ongoing'   // argued but awaiting opinion
+                 :               'upcoming';  // cert granted, not yet argued
 
     const summary = [
       cas.facts_of_the_case ? `Facts: ${stripTags(cas.facts_of_the_case).slice(0, 300)}` : null,
@@ -295,16 +347,19 @@ async function fetchUSCases() {
       court:         'Supreme Court of the United States',
       title:         cas.name || `${cas.first_party} v. ${cas.second_party}`,
       docket:        (cas.docket_number || '').trim() || null,
+      term:          cas.term || null,
       citation,
-      date:          dateDecided || dateGranted,
+      date:          dateDecided || dateArgued || dateGranted,
+      date_argued:   dateArgued,
+      date_decided:  dateDecided,
       status,
       decision:      decision?.description?.slice(0, 300) || null,
       summary,
       source_url:    `https://www.oyez.org/cases/${cas.term}/${cas.docket_number?.trim()}`,
     };
-  });
+  }).filter(r => r.date >= '2023-01-01' || !r.date); // keep 2023+ and undated upcoming
 
-  console.log(`[court:US:cases] ${records.length} cases`);
+  console.log(`[court:US:cases] ${records.length} cases (filtered 2023+)`);
   saveOutput('cases', 'US', records);
   return records;
 }
@@ -377,82 +432,128 @@ async function fetchUKJustices() {
 }
 
 async function fetchUKCases() {
-  console.log('[court:UK:cases] Fetching UKSC cases list...');
+  // UK National Archives Find Case Law — Atom feed for UKSC decisions 2023+
+  // https://caselaw.nationalarchives.gov.uk/atom.xml?query=&court=uksc&date_from=2023-01-01&per_page=50&page=N
+  console.log('[court:UK:cases] Fetching UKSC decisions via UK National Archives Atom feed (2023+)...');
 
-  // Extract case IDs from the cases page HTML
-  const listPage = await axios.get('https://www.supremecourt.uk/cases',
-    { headers: BROWSER_HEADERS, timeout: 20000 });
-  const caseLinks = [...new Set(
-    [...listPage.data.matchAll(/href="(\/cases\/uksc-\d{4}-\d+[^"]*?)"/g)]
-      .map(m => m[1])
-      .filter(u => !u.includes('-a') && !u.includes('-b'))   // skip sub-hearings
-  )];
-  console.log(`[court:UK:cases] Found ${caseLinks.length} unique case links in HTML`);
+  const TNA_BASE = 'https://caselaw.nationalarchives.gov.uk';
+  const allEntries = [];
 
-  // Fetch each case page
-  const casePages = await Promise.allSettled(
-    caseLinks.slice(0, 20).map(url =>
-      axios.get(`https://www.supremecourt.uk${url}`,
-        { headers: BROWSER_HEADERS, timeout: 20000 })
-        .then(r => ({ url, html: r.data }))
-        .catch(() => ({ url, html: null }))
-    )
-  );
+  // Fetch up to 5 pages (250 max) to cover all 2023+ cases
+  for (let page = 1; page <= 5; page++) {
+    try {
+      const r = await axios.get(`${TNA_BASE}/atom.xml`, {
+        params: { query: '', court: 'uksc', date_from: '2023-01-01', per_page: 50, page },
+        headers: { ...BROWSER_HEADERS, Accept: 'application/atom+xml,text/xml,*/*' },
+        timeout: 25000,
+      });
+      const entries = [...r.data.matchAll(/<entry>([\s\S]*?)<\/entry>/gi)];
+      if (!entries.length) break;
+      allEntries.push(...entries);
+      const oldest = entries[entries.length - 1]?.[1]?.match(/<updated>([\s\S]*?)<\/updated>/i)?.[1]?.slice(0, 10);
+      console.log(`[court:UK:cases] Atom page ${page}: ${entries.length} entries (oldest: ${oldest})`);
+      // Stop if oldest entry is before 2023
+      if (oldest && oldest < '2023-01-01') break;
+    } catch (e) {
+      console.warn(`[court:UK:cases] Atom page ${page} failed: ${e.message}`);
+      break;
+    }
+  }
 
-  const records = casePages.map(p => {
-    const { url, html } = p.value || {};
-    if (!html) return null;
+  console.log(`[court:UK:cases] ${allEntries.length} raw Atom entries`);
 
-    const main = (html.match(/<main[^>]*>([\s\S]*?)<\/main>/)?.[1] || html);
-    const text = stripTags(main);
+  const seen = new Set();
+  const decidedRecords = allEntries.map(m => {
+    const raw     = m[1];
+    const title   = raw.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1]
+      ?.replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/<!\[CDATA\[|\]\]>/g, '').trim() || '';
+    const updated = raw.match(/<updated>([\s\S]*?)<\/updated>/i)?.[1]?.slice(0, 10) || null;
+    const id      = raw.match(/<id>([\s\S]*?)<\/id>/i)?.[1]?.trim() || '';
+    const cite    = raw.match(/\[(\d{4})\] UKSC (\d+)/)?.[0] || null;
 
-    // Case ID from URL
-    const caseId = url.replace('/cases/', '').toUpperCase();
+    if (!title || !updated || updated < '2023-01-01') return null;
+    if (seen.has(cite || title)) return null;
+    seen.add(cite || title);
 
-    // Title = first <h1>
-    const titleMatch = html.match(/<h1[^>]*>([^<]+)<\/h1>/);
-    const title = titleMatch ? titleMatch[1].trim() : null;
-    if (!title) return null;
+    // Build canonical URL from neutral citation e.g. [2025] UKSC 13 → /uksc/2025/13
+    const citeMatch = cite?.match(/\[(\d{4})\] UKSC (\d+)/);
+    const sourceUrl = citeMatch
+      ? `${TNA_BASE}/uksc/${citeMatch[1]}/${citeMatch[2]}`
+      : id.startsWith('http') ? id : `${TNA_BASE}/${id}`;
 
-    // Extract structured fields
-    const extract = (label) => {
-      const re = new RegExp(`${label}[:\\s]+([^\\n]+?)(?=\\s{2,}|Case ID|Parties|Issue|Facts|Date|$)`, 'i');
-      return text.match(re)?.[1]?.trim() || null;
-    };
-
-    const dateIssued = extract('Date of issue') || extract('Date issued');
-    const issue      = text.match(/Issue\s+(.{30,400}?)(?=Facts|Date|Case ID|Parties|Change|$)/s)?.[1]?.trim().slice(0, 400) || null;
-    const facts      = text.match(/Facts\s+(.{30,500}?)(?=Issue|Date|Case ID|Parties|Change|$)/s)?.[1]?.trim().slice(0, 400) || null;
-
-    // Parties
-    const parties = text.match(/(?:Appellant|Respondent)\(s\)\s+([^\n]{5,120})/gi)
-      ?.map(s => s.trim()).join(' / ').slice(0, 200) || null;
-
-    // Status: "Hearing listed" → upcoming; if issue/facts available → pending; decided if date in past
-    const hasHearing = html.includes('Hearing listed') || html.includes('hearing is listed');
-    const dateStr    = dateIssued ? parseDate(dateIssued) : null;
-    const status     = hasHearing ? 'Hearing listed'
-                     : dateStr && dateStr < new Date().toISOString().slice(0,10) ? 'Decided'
-                     : 'Pending';
+    const idSlug = cite?.replace(/[\[\]\s]/g, '_') || title.replace(/[^a-zA-Z0-9]+/g, '_').slice(0, 60);
 
     return {
-      id:            `UK-UKSC-${caseId}`,
-      jurisdiction:  'UK',
-      court:         'UK Supreme Court',
+      id:           `UK-UKSC-${idSlug}`,
+      jurisdiction: 'UK',
+      court:        'UK Supreme Court',
       title,
-      case_id:       caseId,
-      parties,
-      issue,
-      summary:       facts || issue || null,
-      date:          dateStr,
-      status,
-      source_url:    `https://www.supremecourt.uk${url}`,
+      citation:     cite,
+      date:         updated,
+      status:       'decided',
+      summary:      null,
+      source_url:   sourceUrl,
     };
   }).filter(Boolean);
 
-  console.log(`[court:UK:cases] ${records.length} cases`);
-  saveOutput('cases', 'UK', records);
-  return records;
+  // Also fetch upcoming UKSC cases from the main /cases page
+  let upcomingRecords = [];
+  try {
+    const mainPage = await axios.get('https://www.supremecourt.uk/cases',
+      { headers: BROWSER_HEADERS, timeout: 20000 });
+    const caseLinks = [...new Set(
+      [...mainPage.data.matchAll(/href="(\/cases\/uksc-\d{4}-\d+[^"#]*?)"/g)]
+        .map(m => m[1]).filter(u => !/[-]([ab])(\b|$)/.test(u))
+    )];
+
+    const casePages = await Promise.allSettled(
+      caseLinks.slice(0, 20).map(url =>
+        axios.get(`https://www.supremecourt.uk${url}`, { headers: BROWSER_HEADERS, timeout: 20000 })
+          .then(r => ({ url, html: r.data }))
+          .catch(() => ({ url, html: null }))
+      )
+    );
+
+    upcomingRecords = casePages.map(p => {
+      const { url, html } = p.value || {};
+      if (!html) return null;
+      const caseId = url.replace('/cases/', '').toUpperCase();
+      const title  = html.match(/<h1[^>]*>([^<]+)<\/h1>/)?.[1]?.trim();
+      if (!title) return null;
+
+      const text = stripTags(html.match(/<main[^>]*>([\s\S]*?)<\/main>/)?.[1] || html);
+      const isHearing = html.includes('Hearing listed') || html.includes('hearing is listed');
+      const status = isHearing ? 'upcoming' : 'ongoing';
+
+      // Don't duplicate if already in decided list
+      if (seen.has(title)) return null;
+
+      return {
+        id:           `UK-UKSC-${caseId}`,
+        jurisdiction: 'UK',
+        court:        'UK Supreme Court',
+        title,
+        citation:     null,
+        case_id:      caseId,
+        date:         null,
+        status,
+        summary:      null,
+        source_url:   `https://www.supremecourt.uk${url}`,
+      };
+    }).filter(Boolean);
+
+    console.log(`[court:UK:cases] ${upcomingRecords.length} upcoming/ongoing cases from UKSC site`);
+  } catch (e) {
+    console.warn(`[court:UK:cases] UKSC /cases page failed: ${e.message}`);
+  }
+
+  const all = [...decidedRecords, ...upcomingRecords];
+  const decided  = all.filter(r => r.status === 'decided').length;
+  const ongoing  = all.filter(r => r.status === 'ongoing').length;
+  const upcoming = all.filter(r => r.status === 'upcoming').length;
+  console.log(`[court:UK:cases] ${all.length} total — decided:${decided} ongoing:${ongoing} upcoming:${upcoming}`);
+  saveOutput('cases', 'UK', all);
+  return all;
 }
 
 // ─── Australia — High Court of Australia ──────────────────────────────────────
@@ -505,84 +606,100 @@ async function fetchAUJustices() {
 }
 
 async function fetchAUCases() {
-  console.log('[court:AU:cases] Fetching HCA decisions from AustLII (2024 + 2025)...');
+  // classic.austlii.edu.au — probe individual case pages directly, bypassing the TOC
+  // (TOC pages 403 under concurrent load; individual pages are stable)
+  // HCA cases are sequentially numbered per year: /au/cases/cth/HCA/{year}/{N}.html
+  console.log('[court:AU:cases] Fetching HCA decisions from classic.austlii.edu.au (2023-2025, sequential probe)...');
 
-  // Get year indexes for 2024 and 2025
-  const yearResults = await Promise.allSettled(
-    ['2024', '2025'].map(yr =>
-      axios.get(`https://www.austlii.edu.au/cgi-bin/viewtoc/au/cases/cth/HCA/${yr}/`,
-        { headers: BROWSER_HEADERS, timeout: 25000 })
-        .then(r => ({ yr, html: r.data }))
-        .catch(e => { console.warn(`[court:AU:cases] AustLII ${yr} failed: ${e.message}`); return { yr, html: '' }; })
-    )
-  );
+  const CLASSIC_BASE = 'https://classic.austlii.edu.au';
+  const DELAY_MS     = 400;
 
-  // Extract case links and titles
-  const caseEntries = [];
-  for (const res of yearResults) {
-    if (res.status !== 'fulfilled') continue;
-    const { yr, html } = res.value;
-    const matches = [...(html || '').matchAll(
-      /href="(\/cgi-bin\/viewdoc\/au\/cases\/cth\/HCA\/\d+\/\d+\.html)"[^>]*>([^<]+)<\/a>/g
-    )];
-    for (const m of matches) {
-      caseEntries.push({ path: m[1], label: m[2].trim(), yr });
+  // Probe ranges: start from high numbers and work down (most recent first)
+  // 2025: up to ~55 cases; 2024: ~40; 2023: ~40
+  const probeRanges = [
+    ...Array.from({ length: 55 }, (_, i) => ({ yr: '2025', num: 55 - i })),
+    ...Array.from({ length: 40 }, (_, i) => ({ yr: '2024', num: 40 - i })),
+    ...Array.from({ length: 40 }, (_, i) => ({ yr: '2023', num: 40 - i })),
+  ];
+
+  // Collect successfully fetched pages sequentially to avoid rate limiting
+  const pages = [];
+  let consecutiveFail = 0;
+  let lastYr = null;
+  let ipBlocked = false;
+
+  for (const { yr, num } of probeRanges) {
+    if (ipBlocked) break;
+    if (yr !== lastYr) { consecutiveFail = 0; lastYr = yr; }
+    if (consecutiveFail >= 5) continue; // skip rest of year after 5 consecutive failures
+
+    const path = `/au/cases/cth/HCA/${yr}/${num}.html`;
+    try {
+      const r = await axios.get(`${CLASSIC_BASE}${path}`,
+        { headers: BROWSER_HEADERS, timeout: 25000 });
+      pages.push({ path, yr, num, html: r.data });
+      consecutiveFail = 0;
+      if (pages.length % 10 === 0) console.log(`[court:AU:cases] Fetched ${pages.length} pages so far...`);
+    } catch (e) {
+      const status = e.response?.status;
+      if (status === 403) {
+        consecutiveFail++;
+        if (consecutiveFail >= 3) {
+          console.warn(`[court:AU:cases] IP blocked by classic.austlii.edu.au (403) — aborting AU fetch`);
+          ipBlocked = true;
+        }
+      } else if (status === 404) {
+        consecutiveFail++;
+      } else {
+        console.warn(`[court:AU:cases] ${yr}/${num}: ${e.message.slice(0, 40)}`);
+        consecutiveFail++;
+      }
     }
+    await new Promise(r => setTimeout(r, DELAY_MS));
+
+    if (pages.length >= 45) break; // cap at 45 to control runtime
   }
-  console.log(`[court:AU:cases] ${caseEntries.length} case entries found, fetching first 20...`);
 
-  // Fetch case pages (most recent first — AustLII lists in chronological order, so reverse)
-  const toFetch = caseEntries.slice(-20).reverse();
-  const pages   = await Promise.allSettled(
-    toFetch.map(entry =>
-      axios.get(`https://www.austlii.edu.au${entry.path}`,
-        { headers: BROWSER_HEADERS, timeout: 25000 })
-        .then(r => ({ ...entry, html: r.data }))
-        .catch(() => ({ ...entry, html: null }))
-    )
-  );
+  console.log(`[court:AU:cases] ${pages.length} pages fetched, parsing...`);
 
-  const records = pages.map(p => {
-    const { path, label, html } = p.value || {};
-    if (!html) return null;
+  const records = pages.map(({ path, yr, num, html }) => {
+    const text  = stripTags(html);
+    const cite  = html.match(/\[(\d{4})\]\s+HCA\s+(\d+)/)?.[0] || `[${yr}] HCA ${num}`;
 
-    // Content div
-    const content = html.match(/<div[^>]*class="[^"]*content[^"]*"[^>]*>([\s\S]*?)<\/div>/i)?.[1] || html;
-    const text    = stripTags(content);
+    // Title: from <title> or from first heading containing "v"
+    let title = html.match(/<title>([^<]+)<\/title>/i)?.[1]?.trim()
+              || text.match(/([A-Z][^\n]{5,80}\sv\s[A-Z][^\n]{3,60})/)?.[0]
+              || cite;
+    // Strip AustLII boilerplate from title
+    title = title.replace(/\s*[-|—]\s*AustLII.*$/i, '').replace(/\[(\d{4})\]\s+HCA\s+\d+.*/,'').trim();
 
-    // Title + citation from label: "Harvey v Minister [...] [2024] HCA 1 (7 February 2024)"
-    const labelMatch = label.match(/^(.+?)\s+\[(\d{4})\]\s+HCA\s+(\d+)\s+\(([^)]+)\)$/);
-    const title     = labelMatch?.[1]?.replace(/&amp;/g,'&').trim() || label;
-    const citation  = labelMatch ? `[${labelMatch[2]}] HCA ${labelMatch[3]}` : null;
-    const dateStr   = labelMatch?.[4] ? parseDate(labelMatch[4]) : null;
-    const caseNum   = citation?.replace(/[\[\]\s]/g, '_') || path.replace(/[^a-zA-Z0-9]+/g,'_');
+    // Date from citation parenthetical or from HTML
+    const dateMatch = html.match(/\[(\d{4})\]\s+HCA\s+\d+\s+\(([^)]+)\)/)?.[2]
+                   || text.match(/(?:decided|delivered)\s+(\d{1,2}\s+\w+\s+\d{4})/i)?.[1];
+    const dateStr = dateMatch ? parseDate(dateMatch) : null;
 
-    // Decision from ORDER section
+    const caseNumId = cite.replace(/[\[\]\s]/g, '_');
+
+    // Order / decision outcome
     const order = text.match(/ORDER\s+(.{20,400}?)(?=REASONS|JUDGMENT|HIGH COURT|$)/s)?.[1]?.trim().slice(0, 300)
                 || text.match(/(?:Appeal|Application) (?:allowed|dismissed)[^.]*\./i)?.[0]
                 || null;
-
-    // Justices (CORAM) from text
-    const coram = text.match(/(?:GAGELER|GORDON|EDELMAN|STEWARD|GLEESON|JAGOT|BEECH-JONES)[^J]*(?:JJ|CJ)/i)?.[0]?.trim() || null;
-
-    // Summary from first substantive paragraph after the header
-    const summary = text.slice(0, 600)
-      .replace(/^.*?(?=[\dA-Z][a-z].*v\s)/,'').trim().slice(0, 400) || null;
+    const coram = text.match(/(?:GAGELER|GORDON|EDELMAN|STEWARD|GLEESON|JAGOT|BEECH.JONES)[^J]*(?:JJ|CJ)/i)?.[0]?.trim() || null;
 
     return {
-      id:            `AU-HCA-${caseNum}`,
-      jurisdiction:  'AU',
-      court:         'High Court of Australia',
+      id:           `AU-HCA-${caseNumId}`,
+      jurisdiction: 'AU',
+      court:        'High Court of Australia',
       title,
-      citation,
-      date:          dateStr,
-      status:        'Decided',
-      decision:      order,
-      justices:      coram,
-      summary:       order || summary,
-      source_url:    `https://www.austlii.edu.au${path}`,
+      citation:     cite,
+      date:         dateStr || `${yr}-01-01`,
+      status:       'decided',
+      decision:     order,
+      justices:     coram,
+      summary:      order || null,
+      source_url:   `${CLASSIC_BASE}${path}`,
     };
-  }).filter(Boolean);
+  }).filter(r => r.title && r.title.length > 3);
 
   console.log(`[court:AU:cases] ${records.length} cases`);
   saveOutput('cases', 'AU', records);
