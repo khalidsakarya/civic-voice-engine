@@ -52,8 +52,38 @@ function withTimestamp(record) {
   return { ...record, last_updated: new Date().toISOString() };
 }
 
+// Valid values Claude is instructed to use for predictedOutcome.
+const VALID_PREDICTED_OUTCOMES = new Set([
+  'likely_to_pass', 'likely_to_fail', 'uncertain', 'already_passed', 'already_failed',
+]);
+
+/**
+ * Returns true only when an analysis object contains genuine generated content
+ * across every required field. Partial or null analyses are rejected so that
+ * existing Firestore enrichment is never overwritten with empty/null values.
+ */
+function hasRealEnrichment(analysis) {
+  if (!analysis || typeof analysis !== 'object') return false;
+  return (
+    typeof analysis.plainLanguageSummary === 'string' &&
+    analysis.plainLanguageSummary.trim().length > 0 &&
+    Array.isArray(analysis.argumentsFor) && analysis.argumentsFor.length > 0 &&
+    Array.isArray(analysis.argumentsAgainst) && analysis.argumentsAgainst.length > 0 &&
+    typeof analysis.citizenImpactScore === 'number' &&
+    analysis.citizenImpactScore >= 1 && analysis.citizenImpactScore <= 10 &&
+    VALID_PREDICTED_OUTCOMES.has(analysis.predictedOutcome)
+  );
+}
+
 /**
  * Upload all processed bills (with AI analysis) to the `bills` collection.
+ *
+ * Safe-write contract: enrichment fields (plainLanguageSummary, argumentsFor,
+ * argumentsAgainst, citizenImpactScore, citizenImpactRationale, predictedOutcome,
+ * predictedOutcomeRationale, analysis) are written ONLY when hasRealEnrichment()
+ * returns true. When Claude failed or returned incomplete data, those fields are
+ * omitted entirely from the Firestore payload. Because batchWrite uses merge:true,
+ * omitted fields are left untouched — existing enrichment in Firestore is preserved.
  */
 async function uploadBills() {
   const processedDir = path.join(OUTPUT_ROOT, 'processed');
@@ -65,20 +95,37 @@ async function uploadBills() {
 
   const { bills } = JSON.parse(fs.readFileSync(path.join(processedDir, files[files.length - 1])));
 
-  const docs = bills.map(bill => withTimestamp({
-    ...bill,
-    plainLanguageSummary:      bill.analysis?.plainLanguageSummary      ?? null,
-    argumentsFor:              bill.analysis?.argumentsFor              ?? [],
-    argumentsAgainst:          bill.analysis?.argumentsAgainst          ?? [],
-    citizenImpactScore:        bill.analysis?.citizenImpactScore        ?? null,
-    citizenImpactRationale:    bill.analysis?.citizenImpactRationale    ?? null,
-    predictedOutcome:          bill.analysis?.predictedOutcome          ?? null,
-    predictedOutcomeRationale: bill.analysis?.predictedOutcomeRationale ?? null,
-    analysis: bill.analysis ?? null,
-  }));
+  let enriched = 0, preserved = 0;
+
+  const docs = bills.map(bill => {
+    // Destructure enrichment and processing-error fields out of the base payload.
+    // Never spread them blindly — handle each explicitly below.
+    const { analysis, error: _processingError, ...billBase } = bill;
+
+    if (hasRealEnrichment(analysis)) {
+      enriched++;
+      return withTimestamp({
+        ...billBase,
+        plainLanguageSummary:      analysis.plainLanguageSummary,
+        argumentsFor:              analysis.argumentsFor,
+        argumentsAgainst:          analysis.argumentsAgainst,
+        citizenImpactScore:        analysis.citizenImpactScore,
+        citizenImpactRationale:    analysis.citizenImpactRationale  ?? null,
+        predictedOutcome:          analysis.predictedOutcome,
+        predictedOutcomeRationale: analysis.predictedOutcomeRationale ?? null,
+        analysis,
+      });
+    }
+
+    // Claude failed or returned incomplete data — write only the base bill fields.
+    // Enrichment fields are absent from this payload, so merge:true leaves any
+    // previously-written plainLanguageSummary, argumentsFor, etc. intact.
+    preserved++;
+    return withTimestamp(billBase);
+  });
 
   const count = await batchWrite('bills', docs);
-  console.log(`[firebase] ✓ bills: ${count} documents written`);
+  console.log(`[firebase] ✓ bills: ${count} documents written (${enriched} newly enriched, ${preserved} existing enrichment preserved)`);
   return count;
 }
 
