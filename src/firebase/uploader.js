@@ -1459,7 +1459,11 @@ const CANONICAL_STAT_DEFS = {
  * - Produces exactly 32 documents (8 statNames × 4 countries)
  * - Doc shape: { country, statName, value, source, sourceUrl, updated }
  * - Doc ID: {COUNTRY}_{statName}  e.g. US_unemploymentRate
- * - Wipes the entire collection first so no stale docs remain
+ *
+ * Safe-write order: new docs are written (upserted) first with merge:true so
+ * the collection is always live. Stale docs whose IDs fall outside the current
+ * expected set are deleted only after the write succeeds. The collection is
+ * never empty at any point during the operation.
  */
 async function uploadSocialStatsCanonical() {
   const dir = path.join(OUTPUT_ROOT, 'socialstats');
@@ -1488,17 +1492,9 @@ async function uploadSocialStatsCanonical() {
   const db  = getDb();
   const now = new Date().toISOString();
 
-  // ── 1. Wipe existing collection ───────────────────────────────────────────
-  const existing = await db.collection('social_stats').get();
-  if (existing.size > 0) {
-    const delBatch = db.batch();
-    existing.docs.forEach(d => delBatch.delete(d.ref));
-    await delBatch.commit();
-    console.log(`[firebase]   Cleared ${existing.size} existing social_stats docs`);
-  }
-
-  // ── 2. Build & write canonical 32 docs ───────────────────────────────────
+  // ── 1. Build & upsert the canonical docs (collection stays live) ──────────
   const writeBatch = db.batch();
+  const expectedIds = new Set();
   let count = 0;
 
   for (const [statName, countryDefs] of Object.entries(CANONICAL_STAT_DEFS)) {
@@ -1506,6 +1502,7 @@ async function uploadSocialStatsCanonical() {
       const def   = countryDefs[country];
       const live  = def.liveKey ? liveIndex[`${country}_${def.liveKey}`] : null;
       const docId = sanitizeId(`${country}_${statName}`);
+      expectedIds.add(docId);
 
       const doc = stripUndefined({
         country,
@@ -1517,13 +1514,29 @@ async function uploadSocialStatsCanonical() {
         last_updated: now,
       });
 
-      writeBatch.set(db.collection('social_stats').doc(docId), doc);
+      // merge:true — existing docs are updated, not replaced; nothing is deleted
+      writeBatch.set(db.collection('social_stats').doc(docId), doc, { merge: true });
       count++;
     }
   }
 
   await writeBatch.commit();
   console.log(`[firebase] ✓ social_stats: ${count} canonical documents written (${Object.keys(CANONICAL_STAT_DEFS).length} stats × ${CANONICAL_COUNTRIES.length} countries)`);
+
+  // ── 2. Remove stale docs (IDs outside the current expected set) ───────────
+  // Done only after the write succeeds so the collection is never empty.
+  const snapshot  = await db.collection('social_stats').get();
+  const staleDocs = snapshot.docs.filter(d => !expectedIds.has(d.id));
+  if (staleDocs.length > 0) {
+    // Delete in batches of 400 in case stale count ever grows large
+    for (let i = 0; i < staleDocs.length; i += 400) {
+      const delBatch = db.batch();
+      staleDocs.slice(i, i + 400).forEach(d => delBatch.delete(d.ref));
+      await delBatch.commit();
+    }
+    console.log(`[firebase]   Removed ${staleDocs.length} stale social_stats doc(s)`);
+  }
+
   return count;
 }
 
@@ -1611,7 +1624,7 @@ async function uploadLiveStats() {
  *
  * Reads the most recent output/targeted/targeted_*.json file.
  * Writes one document per successful result, doc ID = {COUNTRY}_{stat}.
- * Uses set() (not merge) so stale values are fully overwritten.
+ * Uses merge:true so any fields not present in the targeted payload are left intact.
  *
  * Schema: country, statName, value, unit, date, source, sourceUrl, notes,
  *         fetchedAt, last_updated.
@@ -1659,7 +1672,7 @@ async function uploadTargetedStats() {
       notes:        r.notes     ?? null,
       fetchedAt:    fetchedAt ?? r.fetchedAt ?? null,
       last_updated: now,
-    }));
+    }), { merge: true });
     count++;
   }
 
