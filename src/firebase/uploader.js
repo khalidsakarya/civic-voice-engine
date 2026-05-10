@@ -5,6 +5,39 @@ const { getDb } = require('./client');
 const OUTPUT_ROOT = path.resolve(__dirname, '../../output');
 const BATCH_SIZE = 400; // Firestore max is 500 ops per batch
 
+// Fields that may only be written to Firestore when they carry real generated content.
+// If any of these fields is null, undefined, an empty string, or an empty array, it is
+// dropped from the write payload so that merge:true leaves the existing Firestore value
+// untouched. This prevents failed or partial enrichment runs from overwriting good data.
+const PROTECTED_ENRICHMENT_FIELDS = new Set([
+  'plainLanguageSummary', 'plain_language_summary', 'summary', 'aiSummary', 'civicSummary',
+  'argumentsFor', 'argumentsAgainst', 'pros', 'cons',
+  'citizenImpactScore', 'predictedOutcome',
+  'editorialReviewed', 'manuallyReviewed',
+  'enrichmentSource',
+]);
+
+/**
+ * Drop any protected enrichment field whose value is empty/null so that
+ * Firestore merge:true leaves the existing value untouched.
+ * Rules per type:
+ *   null / undefined  → always dropped
+ *   string            → dropped when blank after trim()
+ *   array             → dropped when length === 0
+ *   boolean / number  → kept as-is (false and 0 are valid values)
+ */
+function guardEnrichmentFields(doc) {
+  const out = { ...doc };
+  for (const field of PROTECTED_ENRICHMENT_FIELDS) {
+    if (!(field in out)) continue;
+    const v = out[field];
+    if (v === null || v === undefined)                    { delete out[field]; continue; }
+    if (typeof v === 'string' && v.trim().length === 0)   { delete out[field]; continue; }
+    if (Array.isArray(v) && v.length === 0)               { delete out[field]; continue; }
+  }
+  return out;
+}
+
 /**
  * Write an array of records to a Firestore collection in batches.
  * Each record must have an `id` field used as the document ID.
@@ -21,7 +54,7 @@ async function batchWrite(collectionName, records) {
     for (const record of chunk) {
       const docId = sanitizeId(record.id || record.sourceId || `auto-${Date.now()}-${Math.random()}`);
       const ref = db.collection(collectionName).doc(docId);
-      batch.set(ref, stripUndefined(record), { merge: true });
+      batch.set(ref, guardEnrichmentFields(stripUndefined(record)), { merge: true });
     }
 
     await batch.commit();
