@@ -869,6 +869,20 @@ const RUN_BUDGET_ANALYTICS_NOW  = process.argv.includes('--budget-analytics');
 const RUN_GOV_STATS_NOW         = process.argv.includes('--gov-stats');
 const RUN_TARGETED_STATS_NOW    = process.argv.includes('--targeted-stats');
 
+// ⚠️  STARTUP-RUN GUARD
+// Without this flag, bare `node src/scheduler.js` registers cron schedules only.
+// No cycle runs until its scheduled time.
+//
+// Set this flag explicitly when you want all cycles to run immediately on start:
+//   node src/scheduler.js --run-on-start
+//   SCHEDULER_RUN_ON_START=true node src/scheduler.js
+//
+// DO NOT set this in production unless you understand the full credit and Firestore
+// write cost of running all 8 cycles in sequence (daily=Claude per bill, expense and
+// leader-expense=Claude per batch, gov-stats=Claude Sonnet×4).
+const SCHEDULER_RUN_ON_START = process.env.SCHEDULER_RUN_ON_START === 'true'
+  || process.argv.includes('--run-on-start');
+
 if (RUN_NOW) {
   runDailyCycle()
     .then(() => runWeeklyCycle())
@@ -919,7 +933,10 @@ if (RUN_NOW) {
   console.log(`  Gov Stats        (revenue, debt, deficit, ODA, grants)        → ${GOV_STATS_SCHEDULE}`);
   console.log(`  Daily (fetch-only) (bills+votes+elections, no Claude, zero credits)   → manual only`);
   console.log('\n  Flags: --now (all), --daily, --daily-fetch-only, --weekly, --monthly, --bimonthly,');
-  console.log('         --expenses, --leader-expenses, --budget-analytics, --gov-stats, --targeted-stats\n');
+  console.log('         --expenses, --leader-expenses, --budget-analytics, --gov-stats, --targeted-stats');
+  console.log('         --run-on-start  (or env SCHEDULER_RUN_ON_START=true) — also fires all cycles immediately\n');
+  console.log('  ⚠  No immediate run. Cycles start on their cron schedules only.');
+  console.log('     Pass --run-on-start (or set SCHEDULER_RUN_ON_START=true) to fire all cycles now.\n');
 
   cron.schedule(DAILY_SCHEDULE,            () => runDailyCycle());
   cron.schedule(WEEKLY_SCHEDULE,           () => runWeeklyCycle());
@@ -930,14 +947,18 @@ if (RUN_NOW) {
   cron.schedule(BUDGET_ANALYTICS_SCHEDULE, () => runBudgetAnalyticsCycle());
   cron.schedule(GOV_STATS_SCHEDULE,        () => runGovStatsCycle());
 
-  // Run all tiers on startup
-  console.log('[scheduler] Running initial cycles on startup...');
-  runDailyCycle()
-    .then(() => runWeeklyCycle())
-    .then(() => runMonthlyCycle())
-    .then(() => runBiMonthlyCycle())
-    .then(() => runExpenseCycle())
-    .then(() => runLeaderExpenseCycle())
-    .then(() => runBudgetAnalyticsCycle())
-    .then(() => runGovStatsCycle());
+  if (SCHEDULER_RUN_ON_START) {
+    console.log('[scheduler] --run-on-start / SCHEDULER_RUN_ON_START=true detected — running all cycles immediately.');
+    console.log('[scheduler] ⚠  This will spend AI credits (daily=Claude/bill, expense/leader-expense=Claude/batch, gov-stats=Sonnet×4).');
+    runDailyCycle()
+      .then(() => runWeeklyCycle())
+      .then(() => runMonthlyCycle())
+      .then(() => runBiMonthlyCycle())
+      .then(() => runExpenseCycle())
+      .then(() => runLeaderExpenseCycle())
+      .then(() => runBudgetAnalyticsCycle())
+      .then(() => runGovStatsCycle());
+  } else {
+    console.log('[scheduler] Cron daemon running — waiting for scheduled times. No cycles running now.');
+  }
 }

@@ -116,7 +116,7 @@ Refreshes official bill, vote, and election data without calling Claude. Safe to
 | 3 — Score efficiency | Local computation from output files | None | None |
 | 4 — Upload efficiency/budget/audit | Writes `efficiency_scores_monthly`, `budget_spending`, `audit_findings`, `department_performance` | Firebase | Firestore |
 | 5 — Targeted stats fetch | World Bank API, BLS, USAspending, CKAN — "live" snapshot stats | None | Free |
-| 6 — Upload targeted stats | Writes `social_stats` (targeted) using `set()` without merge | Firebase | Firestore |
+| 6 — Upload targeted stats | Writes `social_stats` (targeted) using `{ merge: true }` | Firebase | Firestore |
 | 7 — Fetch dept budgets | CA/US/UK/AU budget breakdowns from open-data APIs | None | Free |
 | 8 — Upload dept budgets | Writes `department_budgets` | Firebase | Firestore |
 | 9 — Fetch foreign aid | World Bank ODA data, OECD DAC | None | Free |
@@ -130,8 +130,7 @@ Refreshes official bill, vote, and election data without calling Claude. Safe to
 
 **Behavior when credits missing:** Not applicable.
 
-**Preserves Firestore enrichment:** Mostly ✅ (`merge: true`).  
-⚠️ Step 6 (`uploadTargetedStats`) uses `set()` without merge — **overwrites** `social_stats` docs for the 15 targeted fields without preserving any extra fields written by other jobs.
+**Preserves Firestore enrichment:** ✅ All uploads use `{ merge: true }` — including `uploadTargetedStats()` (fixed in commit after `76ac36c`).
 
 **Cost risk:** `free` for Claude. Firestore: `medium`–`high` depending on contract/expense volumes.
 
@@ -254,9 +253,9 @@ Not a scheduled cron — manual trigger only.
 | Step | What it does | API keys required | AI/API usage |
 |---|---|---|---|
 | 1 — Targeted fetch | `runTargetedFetch()` — pulls 15 specific stats (unemployment rate, debt-to-GDP, etc.) from World Bank, BLS, and open-data APIs | None | Free |
-| 2 — Upload | `uploadTargetedStats()` — writes `social_stats` using `set()` without merge | Firebase | Firestore |
+| 2 — Upload | `uploadTargetedStats()` — writes `social_stats` using `{ merge: true }` | Firebase | Firestore |
 
-**Preserves Firestore enrichment:** ⚠️ `set()` without merge — **overwrites** the 15 targeted stat docs entirely. Does not destroy other `social_stats` docs (different doc IDs) but overwrites the targeted ones.
+**Preserves Firestore enrichment:** ✅ `{ merge: true }` — targeted stat docs are upserted, not replaced. Other fields in the same documents survive.
 
 **Cost risk:** `free`.
 
@@ -289,14 +288,31 @@ These are not wired into the scheduler and are run manually.
 ### 3.1 Daily cycle destroys bill enrichment on partial failure
 The daily cycle processes every bill on every run with no "skip if already enriched" guard. If Claude fails mid-run (key missing, quota exhausted, network error), the scheduler writes `analysis: null` for failed bills and the uploader writes those null values to Firestore via `{ merge: true }`, **overwriting any previously-good enrichment**. A single failed daily run can zero out enrichment for bills that were successfully processed the day before.
 
-### 3.2 `social_stats` canonical upload deletes before rewriting
-`uploadSocialStats()` (the canonical 8×4 matrix) **deletes all existing `social_stats` docs** before writing new ones. If the fetch or build step fails after the delete, the collection is left empty.
+### 3.2 ~~`social_stats` canonical upload deletes before rewriting~~ — **FIXED**
+Previously `uploadSocialStatsCanonical()` (the canonical 8×4 matrix) deleted all existing `social_stats` docs before writing new ones, leaving the collection empty on any write failure.
+
+**Fix applied (commit `76ac36c`):** Now upserts the 32 canonical docs with `{ merge: true }` first, then queries the collection and deletes only IDs not in the expected set. The collection is never empty at any point during the operation. `uploadTargetedStats()` also switched to `{ merge: true }` in the same commit.
 
 ### 3.3 No AI credit budget guard in any cycle
 No cycle checks the Claude API balance or rate limit before starting. A cycle that starts when credits are near-zero will partially spend credits, partially enrich data, and leave a mixed Firestore state.
 
-### 3.4 `node src/scheduler.js` (no flags) starts all crons immediately on startup
-Running the scheduler with no arguments registers all 8 cron schedules **and immediately runs all cycles on startup** (see line 808: `console.log('[scheduler] Running initial cycles on startup...')`). This means simply starting the process triggers a full run within seconds.
+### 3.4 ~~`node src/scheduler.js` starts all cycles on startup~~ — **FIXED**
+Previously, bare `node src/scheduler.js` registered all 8 cron schedules **and immediately ran all cycles on startup**, triggering a full multi-hour run with Claude calls within seconds.
+
+**Fix applied (commit after `76ac36c`):** The auto-run is now gated behind an explicit opt-in flag:
+
+```
+node src/scheduler.js --run-on-start
+# or
+SCHEDULER_RUN_ON_START=true node src/scheduler.js
+```
+
+Without either flag, bare `node src/scheduler.js` now:
+1. Prints the schedule banner including the warning `⚠  No immediate run. Cycles start on their cron schedules only.`
+2. Registers all 8 cron schedules (no cycles fire until their scheduled time)
+3. Stays running as a cron daemon
+
+The `--run-on-start` path prints an explicit warning about Claude credit spend before firing cycles.
 
 ### 3.5 TheyWorkForYou key absent = warning only, request continues
 If `THEYWORKFORYOU_API_KEY` is not set, `fetcher.js` logs a warning but still makes the request — the API may return an error or a degraded response rather than refusing. If the API requires a key and the key is absent, the response will likely be a 403/401 but it will not halt the weekly cycle (the error propagates to the pipeline runner).
@@ -324,10 +340,11 @@ If `THEYWORKFORYOU_API_KEY` is not set, `fetcher.js` logs a warning but still ma
 | `node src/scheduler.js --expenses` | ⛔ Requires approval — calls Claude per batch |
 | `node src/scheduler.js --leader-expenses` | ⛔ Requires approval — calls Claude per batch |
 | `node src/scheduler.js --gov-stats` | ⛔ Requires approval — calls Claude Sonnet (more expensive) |
-| `node src/scheduler.js` (no flags) | ⛔ Requires approval — starts ALL cycles immediately |
+| `node src/scheduler.js` (no flags) | ✅ Safe — registers crons only, **no cycles fire immediately** (§3.4 fixed) |
+| `node src/scheduler.js --run-on-start` | ⛔ Requires approval — fires all cycles immediately (Claude calls, Firestore writes) |
 | `node src/scheduler.js --now` | ⛔ Requires approval — runs all cycles sequentially |
 | Any `src/processing/*.js` processor | ⛔ Requires approval — all call Claude |
 
 ---
 
-*Last updated: 2026-05-10. Re-audit after adding any new ingestion script, processor, or scheduler step.*
+*Last updated: 2026-05-10 (§3.1 bill enrichment fix, §3.2 social_stats safe-write fix, §3.4 scheduler startup guard — all applied). Re-audit after adding any new ingestion script, processor, or scheduler step.*
