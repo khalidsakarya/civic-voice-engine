@@ -28,16 +28,47 @@
 | 4 — Upload to Firestore | Writes `bills`, `votes`, `efficiency_scores` collections | Firebase credentials | Firestore batch writes |
 | 4b — Elections (conditional) | Only if election ≤90 days away — fetches from elections.ca, FEC, DemocracyClub, AEC | None | Free gov APIs |
 
-**Fetch-only option:** No built-in flag. To skip Claude, comment out step 2 (`processBillsFromOutput()`) or run only the pipeline directly. The fetch (step 1) and upload (step 4) can run without Claude if a previous enriched output file already exists.
+**Fetch-only option:** Use `--daily-fetch-only` instead — see §1.1a below.
 
 **Behavior when credits missing:**  
-`processBill()` throws on API error. The scheduler catches the error **per bill**, records `{ analysis: null, error: "..." }`, and continues to the next bill. After all bills, it writes a `bills_enriched_*.json` output file containing the failures with `analysis: null`. `uploadBills()` then reads this file and writes every bill to Firestore — including the failed ones with `analysis: null` as explicit field values.
+`processBill()` throws on API error. The scheduler catches the error **per bill**, records `{ analysis: null, error: "..." }`, and continues. After all bills, writes `bills_enriched_*.json` with `analysis: null` for failed bills. **`uploadBills()` now guards these via `hasRealEnrichment()` — failed bills have enrichment fields omitted from the Firestore payload, so existing enrichment in Firestore is preserved.** (`guardEnrichmentFields()` in `batchWrite()` provides a second layer of protection for all other protected fields.)
 
-**Preserves Firestore enrichment:** ❌ **NO.** `uploadBills()` writes `plainLanguageSummary: null`, `argumentsFor: []`, `analysis: null` for any bill where Claude failed. With `merge: true`, these null values overwrite previously-good enrichment fields in Firestore. A partial credit failure on re-run destroys enrichment for the failed bills.
+**Preserves Firestore enrichment:** ✅ **YES** (fixed). `uploadBills()` only writes enrichment fields when `hasRealEnrichment(analysis)` returns true. Bills where Claude failed have enrichment fields omitted entirely — existing Firestore values survive.
 
-**No skip-if-already-processed logic** — every daily run re-processes every bill in the pipeline, even ones enriched yesterday.
+**No skip-if-already-processed logic** — every daily run re-processes every bill, spending one Haiku call per bill even if it was enriched the day before.
 
-**Cost risk:** `medium` — depends on bill count in pipeline. Each new bill = 1 Claude Haiku call (~800 tokens input + 1,024 output). 100 bills ≈ $0.10; 1,000 bills ≈ $1.00. Firestore: low volume (hundreds of docs/day).
+**Cost risk:** `medium` — depends on bill count. Each bill = 1 Haiku call (~800 tokens in + 1,024 out). 100 bills ≈ $0.10; 1,000 bills ≈ $1.00.
+
+---
+
+### 1.1a Daily Fetch-Only — `node src/scheduler.js --daily-fetch-only`
+**Cron:** Manual only (not scheduled)  
+**AI credits spent: zero**
+
+Refreshes official bill, vote, and election data without calling Claude. Safe to run at any time regardless of credit balance or `ANTHROPIC_API_KEY` availability.
+
+| Step | What it does | API keys required | AI/API usage |
+|---|---|---|---|
+| 1 — Fetch bills & votes | Same as `--daily` step 1 — Congress.gov, OpenParliament, parliament.uk, aph.gov.au | `CONGRESS_API_KEY` (optional) | Free gov APIs |
+| 2 — Pass-through enriched file | `buildPassThroughEnrichedFile()` reads raw bill files and writes `bills_enriched_*.json` with `analysis: null` for every bill. No Claude call. | None | None |
+| 3 — Score efficiency | Local computation only | None | None |
+| 4 — Upload bills, votes, scores | `uploadBills()` sees `hasRealEnrichment(null) = false` for all bills → enrichment fields omitted → Firestore `merge:true` leaves existing `plainLanguageSummary`, `argumentsFor`, `citizenImpactScore`, etc. intact. Non-enrichment fields (title, status, date, sponsor) are refreshed. | Firebase | Firestore |
+| 5 — Fetch & upload elections | **Always runs** — not gated on 90-day window. Fetches from elections.ca, FEC, DemocracyClub, AEC unconditionally. | None | Free gov APIs |
+
+**Fetch-only option:** This IS the fetch-only mode.
+
+**Behavior when credits missing:** Not applicable — no Claude calls at any step.
+
+**Preserves Firestore enrichment:** ✅ **Guaranteed.** `hasRealEnrichment(null)` = false → enrichment fields never reach the Firestore payload. `guardEnrichmentFields()` in `batchWrite()` provides a second catch for any protected field. Existing `plainLanguageSummary`, `argumentsFor`, `argumentsAgainst`, `citizenImpactScore`, `predictedOutcome`, `editorialReviewed`, `manuallyReviewed`, `enrichmentSource` are all preserved.
+
+**When to use:**
+- Credit balance is low or exhausted
+- `ANTHROPIC_API_KEY` not available in the current environment
+- Between full enrichment runs to keep bill status / vote records current
+- After a failed `--daily` run — safe to use to refresh data without re-spending credits
+- Keeping election results current at any time
+
+**Cost risk:** `free`
 
 ---
 
@@ -283,6 +314,7 @@ If `THEYWORKFORYOU_API_KEY` is not set, `fetcher.js` logs a warning but still ma
 | `node src/ingestion/leaderProfileFetcher.js` | ✅ Yes |
 | `node src/ingestion/carneyProfileFetcher.js` | ✅ Yes |
 | Any other standalone fetcher (no Claude, free API) | ✅ Yes — verify first |
+| `node src/scheduler.js --daily-fetch-only` | ✅ Yes — zero AI credits, enrichment fully preserved |
 | `node src/scheduler.js --weekly` | ✅ Yes (no Claude; TheyWorkForYou status unknown) |
 | `node src/scheduler.js --monthly` | ✅ Yes (no Claude; monitor Firestore write count) |
 | `node src/scheduler.js --bimonthly` | ✅ Yes (no Claude; monitor Firestore write count) |

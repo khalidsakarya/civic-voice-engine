@@ -689,6 +689,126 @@ async function runGovStatsCycle() {
   }
 }
 
+// ─── Fetch-only bill pass-through ────────────────────────────────────────────
+// Reads the latest raw bill files and writes a bills_enriched_*.json in which
+// every bill has analysis: null.  uploadBills() will see hasRealEnrichment()=false
+// for all bills and omit enrichment fields from the Firestore payload entirely.
+// Because batchWrite uses merge:true, existing plainLanguageSummary, argumentsFor,
+// citizenImpactScore, etc. survive untouched.  Non-enrichment fields (title,
+// status, sponsor, lastActionDate, …) are still refreshed from the latest data.
+
+function buildPassThroughEnrichedFile() {
+  fs.mkdirSync(PROCESSED_DIR, { recursive: true });
+
+  const files = fs.readdirSync(BILL_DIR).filter(f => f.endsWith('.json')).sort();
+  const latest = {};
+  for (const file of files) {
+    const key = file.replace(/_\d{4}-\d{2}-\d{2}T[\d-]+Z\.json$/, '');
+    latest[key] = file;
+  }
+
+  const allBills = [];
+  for (const file of Object.values(latest)) {
+    const raw = JSON.parse(fs.readFileSync(path.join(BILL_DIR, file)));
+    allBills.push(...raw.records.map(bill => ({
+      ...bill,
+      analysis:    null,
+      processedAt: new Date().toISOString(),
+    })));
+  }
+
+  const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const outFile   = path.join(PROCESSED_DIR, `bills_enriched_${timestamp}.json`);
+  fs.writeFileSync(outFile, JSON.stringify({
+    generatedAt: new Date().toISOString(),
+    fetchOnly:   true,
+    totalBills:  allBills.length,
+    bills:       allBills,
+  }, null, 2));
+
+  console.log(`[scheduler:daily-fetch-only] ${allBills.length} bills passed through (no Claude) → ${path.basename(outFile)}`);
+  return allBills.length;
+}
+
+// ─── Daily fetch-only cycle ───────────────────────────────────────────────────
+//
+//  DAILY_FETCH_ONLY  (manual: node src/scheduler.js --daily-fetch-only)
+//
+//  Refreshes official bill, vote, and election data from source APIs without
+//  calling Claude. Zero AI credits are spent. Existing Firestore enrichment
+//  (plainLanguageSummary, argumentsFor, citizenImpactScore, predictedOutcome,
+//  etc.) is fully preserved because uploadBills() omits enrichment fields when
+//  hasRealEnrichment() returns false, and guardEnrichmentFields() in batchWrite
+//  drops any null/empty protected field before it reaches Firestore.
+//
+//  Use this mode to:
+//    • Refresh bill status / vote records cheaply between full enrichment runs
+//    • Resume after a credit outage without risking enrichment loss
+//    • Run the pipeline when ANTHROPIC_API_KEY is not set or exhausted
+//    • Keep election results current (always fetched, not gated on 90-day window)
+
+async function runDailyFetchOnlyCycle() {
+  const startedAt = new Date();
+  console.log(`\n${'='.repeat(60)}`);
+  console.log(`[scheduler:daily-fetch-only] Cycle started at ${startedAt.toISOString()}`);
+  console.log('[scheduler:daily-fetch-only] Mode: fetch-only — Claude AI step skipped, zero credits spent');
+  console.log('='.repeat(60));
+
+  let billCount = 0, voteCount = 0, scoreCount = 0, electionsCount = 0;
+
+  try {
+    console.log('\n[scheduler:daily-fetch-only] Step 1/5 — Fetching bills & votes from official sources...');
+    await runPipeline(dailySources);
+
+    console.log('\n[scheduler:daily-fetch-only] Step 2/5 — Building pass-through enriched file (analysis: null for all bills)...');
+    const passedThrough = buildPassThroughEnrichedFile();
+    console.log(`[scheduler:daily-fetch-only]   ${passedThrough} bills ready; existing Firestore enrichment will be preserved`);
+
+    console.log('\n[scheduler:daily-fetch-only] Step 3/5 — Scoring government efficiency (local, no AI)...');
+    delete require.cache[require.resolve('./scoreEfficiency')];
+    require('./scoreEfficiency');
+
+    console.log('\n[scheduler:daily-fetch-only] Step 4/5 — Uploading bills, votes, efficiency scores to Firestore...');
+    billCount  = await uploadBills();
+    voteCount  = await uploadVotes();
+    scoreCount = await uploadEfficiencyScores();
+
+    // Elections are always fetched in fetch-only mode — the 90-day gate used in
+    // the full daily cycle is omitted because election results can change at any
+    // time and this mode is cheap enough to run unconditionally.
+    console.log('\n[scheduler:daily-fetch-only] Step 5/5 — Fetching & uploading election data (unconditional)...');
+    await fetchAllElections();
+    electionsCount = await uploadElections();
+
+    console.log(`\n[scheduler:daily-fetch-only] ✓ Done at ${new Date().toISOString()}`);
+    console.log(`[scheduler:daily-fetch-only]   bills: ${billCount}  votes: ${voteCount}  efficiency_scores: ${scoreCount}  elections: ${electionsCount}`);
+    console.log('[scheduler:daily-fetch-only]   AI credits spent: 0');
+
+    await writeSchedulerStatus('daily_fetch_only', {
+      startedAt,
+      status:         'success',
+      collections:    ['bills', 'votes', 'efficiency_scores', 'elections'],
+      recordsUpdated: billCount + voteCount + scoreCount + electionsCount,
+      recordsSkipped: 0,
+      aiCallsMade:    0,
+      cronSchedule:   'manual',
+    });
+  } catch (err) {
+    console.error(`[scheduler:daily-fetch-only] ✗ Failed: ${err.message}`);
+    console.error(err.stack);
+    await writeSchedulerStatus('daily_fetch_only', {
+      startedAt,
+      status:         'error',
+      collections:    ['bills', 'votes', 'efficiency_scores', 'elections'],
+      recordsUpdated: billCount + voteCount + scoreCount + electionsCount,
+      recordsSkipped: 0,
+      aiCallsMade:    0,
+      cronSchedule:   'manual',
+      errorMessage:   err.message,
+    }).catch(() => {});
+  }
+}
+
 // ─── Bill processing helper ───────────────────────────────────────────────────
 // Returns { total, succeeded, failed } so the daily cycle can track AI stats.
 
@@ -739,6 +859,7 @@ async function processBillsFromOutput() {
 
 const RUN_NOW                   = process.argv.includes('--now');
 const RUN_DAILY_NOW             = process.argv.includes('--daily');
+const RUN_DAILY_FETCH_ONLY      = process.argv.includes('--daily-fetch-only');
 const RUN_WEEKLY_NOW            = process.argv.includes('--weekly');
 const RUN_MONTHLY_NOW           = process.argv.includes('--monthly');
 const RUN_BIMONTHLY_NOW         = process.argv.includes('--bimonthly');
@@ -761,6 +882,8 @@ if (RUN_NOW) {
     .catch(() => process.exit(1));
 } else if (RUN_DAILY_NOW) {
   runDailyCycle().then(() => process.exit(0)).catch(() => process.exit(1));
+} else if (RUN_DAILY_FETCH_ONLY) {
+  runDailyFetchOnlyCycle().then(() => process.exit(0)).catch(() => process.exit(1));
 } else if (RUN_WEEKLY_NOW) {
   runWeeklyCycle().then(() => process.exit(0)).catch(() => process.exit(1));
 } else if (RUN_MONTHLY_NOW) {
@@ -794,7 +917,9 @@ if (RUN_NOW) {
   console.log(`  Leader Expenses  (minister/secretary expenses + leaderboard) → ${LEADER_EXPENSE_SCHEDULE}`);
   console.log(`  Budget/Analytics (federal budgets, GDP, unemployment, crime) → ${BUDGET_ANALYTICS_SCHEDULE}`);
   console.log(`  Gov Stats        (revenue, debt, deficit, ODA, grants)        → ${GOV_STATS_SCHEDULE}`);
-  console.log('\n  Flags: --now (all), --daily, --weekly, --monthly, --bimonthly, --expenses, --leader-expenses, --budget-analytics, --gov-stats, --targeted-stats\n');
+  console.log(`  Daily (fetch-only) (bills+votes+elections, no Claude, zero credits)   → manual only`);
+  console.log('\n  Flags: --now (all), --daily, --daily-fetch-only, --weekly, --monthly, --bimonthly,');
+  console.log('         --expenses, --leader-expenses, --budget-analytics, --gov-stats, --targeted-stats\n');
 
   cron.schedule(DAILY_SCHEDULE,            () => runDailyCycle());
   cron.schedule(WEEKLY_SCHEDULE,           () => runWeeklyCycle());
