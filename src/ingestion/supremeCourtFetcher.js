@@ -606,100 +606,116 @@ async function fetchAUJustices() {
 }
 
 async function fetchAUCases() {
-  // classic.austlii.edu.au — probe individual case pages directly, bypassing the TOC
-  // (TOC pages 403 under concurrent load; individual pages are stable)
-  // HCA cases are sequentially numbered per year: /au/cases/cth/HCA/{year}/{N}.html
-  console.log('[court:AU:cases] Fetching HCA decisions from classic.austlii.edu.au (2023-2025, sequential probe)...');
+  // AustLII and hcourt.gov.au consistently block/timeout from this environment.
+  // Fallback: pull Wikipedia articles for pages in the HCA cases category
+  // (sorted by most-recently-added so recent cases surface first), filter to
+  // [2023+] HCA citations, and build records from the infobox data.
+  console.log('[court:AU:cases] Fetching HCA decisions via Wikipedia HCA case articles (2023+)...');
 
-  const CLASSIC_BASE = 'https://classic.austlii.edu.au';
-  const DELAY_MS     = 400;
+  function decodeHtmlEntities(h) {
+    return h
+      .replace(/&#91;/g, '[').replace(/&#93;/g, ']').replace(/&#160;/g, ' ')
+      .replace(/&amp;/g, '&').replace(/&#x26;/g, '&').replace(/&lt;/g, '<')
+      .replace(/&gt;/g, '>').replace(/&nbsp;/g, ' ');
+  }
+  const wikiStrip = h => decodeHtmlEntities(h).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
 
-  // Probe ranges: start from high numbers and work down (most recent first)
-  // 2025: up to ~55 cases; 2024: ~40; 2023: ~40
-  const probeRanges = [
-    ...Array.from({ length: 55 }, (_, i) => ({ yr: '2025', num: 55 - i })),
-    ...Array.from({ length: 40 }, (_, i) => ({ yr: '2024', num: 40 - i })),
-    ...Array.from({ length: 40 }, (_, i) => ({ yr: '2023', num: 40 - i })),
+  // Step 1 — seed list of known 2023+ HCA Wikipedia articles (fetched first, guaranteed)
+  const SEED_TITLES = [
+    'NZYQ v Minister for Immigration',            // [2023] HCA 37
+    'ASF17 v Commonwealth of Australia',           // [2024] HCA 40
+    'Hurt v The King',                             // [2024] HCA 8
+    'Commonwealth v Yunupingu',                    // [2025] HCA 6
+    'Redland City Council v Kozik',                // 2024 (unknown citation)
+    'Vunilagi v. The Queen',                       // possibly recent
+    'Unions NSW & Ors v. State of New South Wales', // check
+    'Bryant & Ors v Badenoch Integrated Logging Pty Ltd', // check
+    'BHP Group Limited v Impiombato',              // check
+    'Farm Transparency International v New South Wales',   // [2022] HCA 23 — boundary
+    'CFMMEU v Personnel Contracting Pty Ltd',      // [2022] HCA 1 — boundary
   ];
 
-  // Collect successfully fetched pages sequentially to avoid rate limiting
-  const pages = [];
-  let consecutiveFail = 0;
-  let lastYr = null;
-  let ipBlocked = false;
-
-  for (const { yr, num } of probeRanges) {
-    if (ipBlocked) break;
-    if (yr !== lastYr) { consecutiveFail = 0; lastYr = yr; }
-    if (consecutiveFail >= 5) continue; // skip rest of year after 5 consecutive failures
-
-    const path = `/au/cases/cth/HCA/${yr}/${num}.html`;
-    try {
-      const r = await axios.get(`${CLASSIC_BASE}${path}`,
-        { headers: BROWSER_HEADERS, timeout: 25000 });
-      pages.push({ path, yr, num, html: r.data });
-      consecutiveFail = 0;
-      if (pages.length % 10 === 0) console.log(`[court:AU:cases] Fetched ${pages.length} pages so far...`);
-    } catch (e) {
-      const status = e.response?.status;
-      if (status === 403) {
-        consecutiveFail++;
-        if (consecutiveFail >= 3) {
-          console.warn(`[court:AU:cases] IP blocked by classic.austlii.edu.au (403) — aborting AU fetch`);
-          ipBlocked = true;
-        }
-      } else if (status === 404) {
-        consecutiveFail++;
-      } else {
-        console.warn(`[court:AU:cases] ${yr}/${num}: ${e.message.slice(0, 40)}`);
-        consecutiveFail++;
-      }
-    }
-    await new Promise(r => setTimeout(r, DELAY_MS));
-
-    if (pages.length >= 45) break; // cap at 45 to control runtime
+  // Step 2 — supplement with the most-recently-added category pages
+  let categoryPages = [];
+  try {
+    const catR = await axios.get('https://en.wikipedia.org/w/api.php', {
+      params: {
+        action: 'query', list: 'categorymembers',
+        cmtitle: 'Category:High_Court_of_Australia_cases',
+        cmlimit: 100, cmtype: 'page', cmsort: 'timestamp', cmdir: 'desc', format: 'json',
+      },
+      headers: { 'Accept': 'application/json', 'User-Agent': 'CivicVoiceBot/1.0 (civic-voice-engine)' },
+      timeout: 20000,
+    });
+    categoryPages = (catR.data?.query?.categorymembers || []).map(p => p.title);
+  } catch (e) {
+    console.warn(`[court:AU:cases] Category fetch failed: ${e.message}`);
   }
 
-  console.log(`[court:AU:cases] ${pages.length} pages fetched, parsing...`);
+  // Merge seed list first, then category pages; deduplicate
+  const seen = new Set(SEED_TITLES);
+  const toCheck = [
+    ...SEED_TITLES,
+    ...categoryPages.filter(t => !seen.has(t) && seen.add(t)),
+  ].slice(0, 50);
+  console.log(`[court:AU:cases] ${toCheck.length} pages to check (${SEED_TITLES.length} seeded + ${categoryPages.length} from category)...`);
 
-  const records = pages.map(({ path, yr, num, html }) => {
-    const text  = stripTags(html);
-    const cite  = html.match(/\[(\d{4})\]\s+HCA\s+(\d+)/)?.[0] || `[${yr}] HCA ${num}`;
+  // Step 3 — fetch each page (with 2 s delay to respect Wikipedia rate limits)
+  const records = [];
 
-    // Title: from <title> or from first heading containing "v"
-    let title = html.match(/<title>([^<]+)<\/title>/i)?.[1]?.trim()
-              || text.match(/([A-Z][^\n]{5,80}\sv\s[A-Z][^\n]{3,60})/)?.[0]
-              || cite;
-    // Strip AustLII boilerplate from title
-    title = title.replace(/\s*[-|—]\s*AustLII.*$/i, '').replace(/\[(\d{4})\]\s+HCA\s+\d+.*/,'').trim();
+  for (const title of toCheck) {
+    await new Promise(r => setTimeout(r, 2000));
+    try {
+      const r = await axios.get('https://en.wikipedia.org/w/api.php', {
+        params: { action: 'parse', page: title, prop: 'text', format: 'json' },
+        headers: { 'Accept': 'application/json', 'User-Agent': 'CivicVoiceBot/1.0 (civic-voice-engine)' },
+        timeout: 15000,
+      });
+      const rawHtml = r.data?.parse?.text?.['*'] || '';
+      const html    = decodeHtmlEntities(rawHtml);
+      const text    = wikiStrip(rawHtml);
 
-    // Date from citation parenthetical or from HTML
-    const dateMatch = html.match(/\[(\d{4})\]\s+HCA\s+\d+\s+\(([^)]+)\)/)?.[2]
-                   || text.match(/(?:decided|delivered)\s+(\d{1,2}\s+\w+\s+\d{4})/i)?.[1];
-    const dateStr = dateMatch ? parseDate(dateMatch) : null;
+      // Only keep cases with a [2023+] HCA citation
+      const rawCites = html.match(/\[20(2[3-9])\]\s*HCA\s*\d+/g) || [];
+      const citeMatches = [...new Set(rawCites.map(c => c.replace(/\s+/g, ' ').trim()))];
+      if (!citeMatches.length) continue;
+      if (!/High Court of Australia/i.test(text)) continue;
 
-    const caseNumId = cite.replace(/[\[\]\s]/g, '_');
+      const citation = citeMatches[0];
+      const yr = citation.match(/\[(\d{4})\]/)?.[1];
 
-    // Order / decision outcome
-    const order = text.match(/ORDER\s+(.{20,400}?)(?=REASONS|JUDGMENT|HIGH COURT|$)/s)?.[1]?.trim().slice(0, 300)
-                || text.match(/(?:Appeal|Application) (?:allowed|dismissed)[^.]*\./i)?.[0]
-                || null;
-    const coram = text.match(/(?:GAGELER|GORDON|EDELMAN|STEWARD|GLEESON|JAGOT|BEECH.JONES)[^J]*(?:JJ|CJ)/i)?.[0]?.trim() || null;
+      const decided = text.match(/Decided\s+([^\s].{3,50}?\d{4})/i)?.[1]?.trim();
+      const dateStr = decided ? parseDate(decided) : (yr ? `${yr}-01-01` : null);
 
-    return {
-      id:           `AU-HCA-${caseNumId}`,
-      jurisdiction: 'AU',
-      court:        'High Court of Australia',
-      title,
-      citation:     cite,
-      date:         dateStr || `${yr}-01-01`,
-      status:       'decided',
-      decision:     order,
-      justices:     coram,
-      summary:      order || null,
-      source_url:   `${CLASSIC_BASE}${path}`,
-    };
-  }).filter(r => r.title && r.title.length > 3);
+      // Summary: grab the first paragraph of the article text after the infobox
+      const summaryIdx = text.indexOf('High Court of Australia');
+      const rawSummary = summaryIdx >= 0 ? text.slice(summaryIdx + 30, summaryIdx + 600) : text.slice(0, 500);
+      const summary = rawSummary.replace(/\s+/g, ' ').trim().slice(0, 400) || null;
+
+      const slug = title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+      records.push({
+        id:           `AU-HCA-${slug}`,
+        jurisdiction: 'AU',
+        court:        'High Court of Australia',
+        title,
+        citation,
+        date:         dateStr,
+        status:       'decided',
+        decision:     null,
+        summary,
+        source_url:   `https://en.wikipedia.org/wiki/${encodeURIComponent(title.replace(/ /g, '_'))}`,
+      });
+      console.log(`[court:AU:cases] + ${title} (${citation})`);
+
+      if (records.length >= 20) break;
+    } catch (e) {
+      if (e.response?.status === 429) {
+        console.warn('[court:AU:cases] Wikipedia rate-limited — stopping early');
+        break;
+      }
+      // 404 / page not found is normal for some category members — skip silently
+    }
+  }
 
   console.log(`[court:AU:cases] ${records.length} cases`);
   saveOutput('cases', 'AU', records);
