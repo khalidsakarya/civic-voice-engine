@@ -102,7 +102,10 @@ function buildPatch(docId, rec) {
 
   // ── UK English regions (UK-ENG-*): full regional stats ───────────────────
   if (isUKRegion) {
-    addField(p, 'leader_since',      rec.leaderSince);   // "May 2024" format — flagged in report
+    // Only write leader_since if the value is a valid ISO date (YYYY-MM-DD).
+    // All current UK-ENG overlay values are "May 2024" / "May 2016" / "" — all excluded.
+    const ls = (rec.leaderSince || '').trim();
+    if (/^\d{4}-\d{2}-\d{2}$/.test(ls)) addField(p, 'leader_since', ls);
     addField(p, 'hasRegionalMayor',  rec.hasRegionalMayor);
     addField(p, 'area',              rec.area);
     addField(p, 'populationRaw',     rec.populationRaw);
@@ -246,7 +249,7 @@ async function main() {
   console.log(`\n[MERGE] ─── Fields That Would Be Written ───────────────────────`);
   const sortedFields = Object.entries(summary).sort((a, b) => b[1] - a[1]);
   for (const [field, count] of sortedFields) {
-    const note = field === 'leader_since' ? '  ⚠ non-ISO format for UK regions' : '';
+    const note = '';
     console.log(`  ${field.padEnd(35)} ${String(count).padStart(3)} records${note}`);
   }
 
