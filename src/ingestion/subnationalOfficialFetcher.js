@@ -110,16 +110,21 @@ const STATIC = {
   'UK-WLS': { capital: 'Cardiff',   area_km2: 20779,  officialWebsite: 'https://www.gov.wales',           leader_name: 'Eluned Morgan',    leader_party: 'Labour',                  leader_title: 'First Minister' },
   'UK-NIR': { capital: 'Belfast',   area_km2: 13843,  officialWebsite: 'https://www.nidirect.gov.uk',     leader_name: "Michelle O'Neill", leader_party: 'Sinn Féin',               leader_title: 'First Minister' },
 
-  // ── UK English regions (no regional premier; area + website only) ─────────────
-  'UK-ENG-NORTH-EAST':    { capital: 'Newcastle upon Tyne', area_km2: 8592,  officialWebsite: 'https://www.northeast-ca.gov.uk' },
-  'UK-ENG-NORTH-WEST':    { capital: 'Manchester',          area_km2: 14108, officialWebsite: 'https://www.greatermanchester-ca.gov.uk' },
-  'UK-ENG-YORKSHIRE':     { capital: 'Leeds',               area_km2: 15408, officialWebsite: 'https://www.westyorks-ca.gov.uk' },
-  'UK-ENG-EAST-MIDLANDS': { capital: 'Nottingham',          area_km2: 15628, officialWebsite: 'https://eastmidlands.gov.uk' },
-  'UK-ENG-WEST-MIDLANDS': { capital: 'Birmingham',          area_km2: 12998, officialWebsite: 'https://www.wmca.org.uk' },
-  'UK-ENG-EAST':          { capital: 'Cambridge',           area_km2: 19116, officialWebsite: 'https://www.easterncombinedauthority.org.uk' },
-  'UK-ENG-LONDON':        { capital: 'London',              area_km2: 1572,  officialWebsite: 'https://www.london.gov.uk', leader_name: 'Sadiq Khan', leader_party: 'Labour', leader_title: 'Mayor' },
-  'UK-ENG-SOUTH-EAST':    { capital: 'Reading',             area_km2: 19095, officialWebsite: 'https://www.gov.uk/government/publications/south-east-local-enterprise-partnership' },
-  'UK-ENG-SOUTH-WEST':    { capital: 'Bristol',             area_km2: 23829, officialWebsite: 'https://www.westofengland-ca.gov.uk' },
+  // ── UK England (overall; governed directly by UK Parliament) ─────────────────
+  // area: ONS, total area of England; population: ONS Mid-Year Estimate 2022
+  'UK-ENG': { capital: 'London', area_km2: 130279, officialWebsite: 'https://www.gov.uk', leader_name: 'Keir Starmer', leader_party: 'Labour', leader_title: 'Prime Minister' },
+
+  // ── UK English regions (Firestore IDs matched; no regional premier except London)
+  // area_km2: ONS; officialWebsite: combined authority or LEP gov page
+  'UK-ENG-NE':  { capital: 'Newcastle upon Tyne', area_km2: 8592,  officialWebsite: 'https://www.northeast-ca.gov.uk' },
+  'UK-ENG-NW':  { capital: 'Manchester',          area_km2: 14108, officialWebsite: 'https://www.greatermanchester-ca.gov.uk' },
+  'UK-ENG-YOR': { capital: 'Leeds',               area_km2: 15408, officialWebsite: 'https://www.westyorks-ca.gov.uk' },
+  'UK-ENG-EM':  { capital: 'Nottingham',          area_km2: 15628, officialWebsite: 'https://eastmidlands.gov.uk' },
+  'UK-ENG-WM':  { capital: 'Birmingham',          area_km2: 12998, officialWebsite: 'https://www.wmca.org.uk' },
+  'UK-ENG-EE':  { capital: 'Cambridge',           area_km2: 19116, officialWebsite: 'https://www.easterncombinedauthority.org.uk' },
+  'UK-ENG-LON': { capital: 'London',              area_km2: 1572,  officialWebsite: 'https://www.london.gov.uk', leader_name: 'Sadiq Khan', leader_party: 'Labour', leader_title: 'Mayor' },
+  'UK-ENG-SE':  { capital: 'Reading',             area_km2: 19095, officialWebsite: 'https://www.gov.uk/government/publications/south-east-local-enterprise-partnership' },
+  'UK-ENG-SW':  { capital: 'Bristol',             area_km2: 23829, officialWebsite: 'https://www.westofengland-ca.gov.uk' },
 };
 
 // ─── Population fallbacks (from official publications) ───────────────────────
@@ -154,10 +159,11 @@ const AU_POP_FALLBACK = {
 // ONS Mid-Year Population Estimates 2022
 const UK_POP_STATIC = {
   'UK-SCT': 5479100, 'UK-WLS': 3131640, 'UK-NIR': 1905200,
-  'UK-ENG-NORTH-EAST': 2647000, 'UK-ENG-NORTH-WEST': 7417000,
-  'UK-ENG-YORKSHIRE': 5541000,  'UK-ENG-EAST-MIDLANDS': 4934000,
-  'UK-ENG-WEST-MIDLANDS': 5934000, 'UK-ENG-EAST': 6348000,
-  'UK-ENG-LONDON': 8800000, 'UK-ENG-SOUTH-EAST': 9180000, 'UK-ENG-SOUTH-WEST': 5701000,
+  'UK-ENG': 56490048,
+  'UK-ENG-NE': 2647000,  'UK-ENG-NW': 7417000,
+  'UK-ENG-YOR': 5541000, 'UK-ENG-EM': 4934000,
+  'UK-ENG-WM': 5934000,  'UK-ENG-EE': 6348000,
+  'UK-ENG-LON': 8800000, 'UK-ENG-SE': 9180000, 'UK-ENG-SW': 5701000,
 };
 
 // ─── US Census FIPS → docId ───────────────────────────────────────────────────
