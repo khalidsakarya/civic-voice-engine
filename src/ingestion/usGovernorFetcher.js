@@ -48,6 +48,22 @@ US_DOCS.forEach(id => { if (!LEADER_TITLE[id]) LEADER_TITLE[id] = 'Governor'; })
 const NAME_CORRECTIONS = {
   // governor.virginia.gov: "Governor of Virginia Abigail D. Spanberger"
   'US-VA': 'Abigail D. Spanberger',
+  // gov.georgia.gov: "Governor Brian P. Kemp"
+  'US-GA': 'Brian P. Kemp',
+  // governor.hawaii.gov: "Governor Josh Green, M.D."
+  'US-HI': 'Josh Green, M.D.',
+  // gov.illinois.gov: "JB Pritzker, Governor" (no periods)
+  'US-IL': 'JB Pritzker',
+  // maine.gov/governor: "Governor Janet T. Mills"
+  'US-ME': 'Janet T. Mills',
+  // oklahoma.gov/governor: "J. Kevin Stitt"
+  'US-OK': 'J. Kevin Stitt',
+  // governor.sc.gov: "Henry Dargan McMaster"
+  'US-SC': 'Henry Dargan McMaster',
+  // governor.utah.gov: "Spencer J. Cox"
+  'US-UT': 'Spencer J. Cox',
+  // governor.wv.gov: "Patrick James Morrisey"
+  'US-WV': 'Patrick James Morrisey',
 };
 
 // ─── Firestore helpers ────────────────────────────────────────────────────────
