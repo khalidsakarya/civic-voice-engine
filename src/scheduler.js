@@ -29,6 +29,7 @@ const { validateAllCabinets }                     = require('./ingestion/validat
 const { fetchAllForeignAid }                      = require('./ingestion/foreignAidFetcher');
 const { fetchAllGovernmentContracts }             = require('./ingestion/governmentContractsFetcher');
 const { fetchAllDepartmentExpenses }              = require('./ingestion/departmentExpensesFetcher');
+const { fetchNewsAlerts }                         = require('./ingestion/newsAlertsFetcher');
 const { processGovStats }           = require('./processing/govStatsProcessor');
 const {
   uploadBills, uploadVotes, uploadMembers, uploadEfficiencyScores,
@@ -57,6 +58,7 @@ const EXPENSE_SCHEDULE          = process.env.CRON_EXPENSE          || '0 1 * * 
 const LEADER_EXPENSE_SCHEDULE   = process.env.CRON_LEADER_EXPENSE   || '0 2 * * 4';    // 02:00 every Thursday
 const BUDGET_ANALYTICS_SCHEDULE = process.env.CRON_BUDGET_ANALYTICS || '0 6 1 * *';    // 06:00 on the 1st
 const GOV_STATS_SCHEDULE        = process.env.CRON_GOV_STATS        || '0 7 1 1,4,7,10 *'; // 07:00 on Jan/Apr/Jul/Oct 1st
+const NEWS_ALERTS_SCHEDULE      = process.env.CRON_NEWS_ALERTS      || '0 */6 * * *';       // every 6 hours
 
 // ─── Source lists ─────────────────────────────────────────────────────────────
 
@@ -689,6 +691,56 @@ async function runGovStatsCycle() {
   }
 }
 
+// ─── News alerts cycle (every 6 hours) ───────────────────────────────────────
+//
+//  NEWS_ALERTS  (00:00, 06:00, 12:00, 18:00 every day)
+//    1. Fetch latest Canadian government announcements from pm.gc.ca (JSON:API)
+//    2. Pre-filter: drop media advisories and backgrounders
+//    3. Enrich with Claude Haiku: category, cost, affected groups, impact score
+//    4. Drop items with impact_score < 4 (routine/ceremonial)
+//    5. Write to news_alerts collection in Firestore
+
+async function runNewsAlertsCycle() {
+  const startedAt = new Date();
+  console.log(`\n${'='.repeat(60)}`);
+  console.log(`[scheduler:news-alerts] Cycle started at ${startedAt.toISOString()}`);
+  console.log('='.repeat(60));
+
+  let alertsCount = 0, aiCallsMade = 0;
+
+  try {
+    console.log('\n[scheduler:news-alerts] Fetching and enriching Canadian government announcements...');
+    alertsCount = await fetchNewsAlerts();
+    aiCallsMade = Math.ceil(alertsCount / 10); // approximate (CLAUDE_BATCH=10)
+
+    console.log(`\n[scheduler:news-alerts] ✓ Done at ${new Date().toISOString()}`);
+    console.log(`[scheduler:news-alerts]   news_alerts: ${alertsCount}`);
+
+    await writeSchedulerStatus('news_alerts', {
+      startedAt,
+      status:         'success',
+      collections:    ['news_alerts'],
+      recordsUpdated: alertsCount,
+      recordsSkipped: 0,
+      aiCallsMade,
+      cronSchedule:   NEWS_ALERTS_SCHEDULE,
+    });
+  } catch (err) {
+    console.error(`[scheduler:news-alerts] ✗ Failed: ${err.message}`);
+    console.error(err.stack);
+    await writeSchedulerStatus('news_alerts', {
+      startedAt,
+      status:         'error',
+      collections:    ['news_alerts'],
+      recordsUpdated: alertsCount,
+      recordsSkipped: 0,
+      aiCallsMade,
+      cronSchedule:   NEWS_ALERTS_SCHEDULE,
+      errorMessage:   err.message,
+    }).catch(() => {});
+  }
+}
+
 // ─── Fetch-only bill pass-through ────────────────────────────────────────────
 // Reads the latest raw bill files and writes a bills_enriched_*.json in which
 // every bill has analysis: null.  uploadBills() will see hasRealEnrichment()=false
@@ -868,6 +920,7 @@ const RUN_LEADER_EXPENSE_NOW    = process.argv.includes('--leader-expenses');
 const RUN_BUDGET_ANALYTICS_NOW  = process.argv.includes('--budget-analytics');
 const RUN_GOV_STATS_NOW         = process.argv.includes('--gov-stats');
 const RUN_TARGETED_STATS_NOW    = process.argv.includes('--targeted-stats');
+const RUN_NEWS_ALERTS_NOW       = process.argv.includes('--news-alerts');
 
 // ⚠️  STARTUP-RUN GUARD
 // Without this flag, bare `node src/scheduler.js` registers cron schedules only.
@@ -892,6 +945,7 @@ if (RUN_NOW) {
     .then(() => runLeaderExpenseCycle())
     .then(() => runBudgetAnalyticsCycle())
     .then(() => runGovStatsCycle())
+    .then(() => runNewsAlertsCycle())
     .then(() => process.exit(0))
     .catch(() => process.exit(1));
 } else if (RUN_DAILY_NOW) {
@@ -917,6 +971,8 @@ if (RUN_NOW) {
     .then(() => uploadTargetedStats())
     .then(n => { console.log(`[scheduler:targeted-stats] ✓ ${n} docs written to social_stats`); process.exit(0); })
     .catch(err => { console.error('[scheduler:targeted-stats] ✗', err.message); process.exit(1); });
+} else if (RUN_NEWS_ALERTS_NOW) {
+  runNewsAlertsCycle().then(() => process.exit(0)).catch(() => process.exit(1));
 } else {
   console.log('\n╔══════════════════════════════════════════════════════╗');
   console.log('║         CIVIC VOICE ENGINE — SCHEDULER STARTED       ║');
@@ -931,9 +987,11 @@ if (RUN_NOW) {
   console.log(`  Leader Expenses  (minister/secretary expenses + leaderboard) → ${LEADER_EXPENSE_SCHEDULE}`);
   console.log(`  Budget/Analytics (federal budgets, GDP, unemployment, crime) → ${BUDGET_ANALYTICS_SCHEDULE}`);
   console.log(`  Gov Stats        (revenue, debt, deficit, ODA, grants)        → ${GOV_STATS_SCHEDULE}`);
+  console.log(`  News Alerts      (CA gov announcements, Claude Haiku enrich)  → ${NEWS_ALERTS_SCHEDULE}`);
   console.log(`  Daily (fetch-only) (bills+votes+elections, no Claude, zero credits)   → manual only`);
   console.log('\n  Flags: --now (all), --daily, --daily-fetch-only, --weekly, --monthly, --bimonthly,');
-  console.log('         --expenses, --leader-expenses, --budget-analytics, --gov-stats, --targeted-stats');
+  console.log('         --expenses, --leader-expenses, --budget-analytics, --gov-stats, --targeted-stats,');
+  console.log('         --news-alerts');
   console.log('         --run-on-start  (or env SCHEDULER_RUN_ON_START=true) — also fires all cycles immediately\n');
   console.log('  ⚠  No immediate run. Cycles start on their cron schedules only.');
   console.log('     Pass --run-on-start (or set SCHEDULER_RUN_ON_START=true) to fire all cycles now.\n');
@@ -946,6 +1004,7 @@ if (RUN_NOW) {
   cron.schedule(LEADER_EXPENSE_SCHEDULE,   () => runLeaderExpenseCycle());
   cron.schedule(BUDGET_ANALYTICS_SCHEDULE, () => runBudgetAnalyticsCycle());
   cron.schedule(GOV_STATS_SCHEDULE,        () => runGovStatsCycle());
+  cron.schedule(NEWS_ALERTS_SCHEDULE,      () => runNewsAlertsCycle());
 
   if (SCHEDULER_RUN_ON_START) {
     console.log('[scheduler] --run-on-start / SCHEDULER_RUN_ON_START=true detected — running all cycles immediately.');
@@ -957,7 +1016,8 @@ if (RUN_NOW) {
       .then(() => runExpenseCycle())
       .then(() => runLeaderExpenseCycle())
       .then(() => runBudgetAnalyticsCycle())
-      .then(() => runGovStatsCycle());
+      .then(() => runGovStatsCycle())
+      .then(() => runNewsAlertsCycle());
   } else {
     console.log('[scheduler] Cron daemon running — waiting for scheduled times. No cycles running now.');
   }
