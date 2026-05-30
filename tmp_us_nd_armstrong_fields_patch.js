@@ -10,7 +10,7 @@ const SALARY = {
   amount_from_jul2026: 168000,
   currency:            'USD',
   period:              'annual',
-  notes:               'Current $135,360/yr per N.D.C.C. §54-06-01. Increases to $168,000 effective July 1, 2026.',
+  notes:               '$135,360/yr current per N.D.C.C. §54-06-01. Rising to $168,000 effective Jul 1 2026 per state legislation.',
   source_url:          'https://www.legis.nd.gov/cencode/t54c06.pdf',
   fetched_at:          NOW,
 };
@@ -22,7 +22,7 @@ const LOBBYING = {
 
 const STOCK_HOLDINGS = {
   status:     'requires_manual_portal_review',
-  notes:      'ND financial disclosure under N.D.C.C. §16.1-09-02. Portal is JS-rendered and requires manual navigation.',
+  notes:      'ND Financial Disclosure under N.D.C.C. §16.1-09-02. Portal JS-rendered, manual access required.',
   fetched_at: NOW,
 };
 
