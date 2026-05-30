@@ -9,7 +9,7 @@ const SALARY = {
   amount:     193100,
   currency:   'USD',
   period:     'annual',
-  notes:      'FY2026 rate per Utah Code §67-22-2, set by UT Elected Official Compensation Commission.',
+  notes:      '$193,100/yr FY2026 per UT Elected Official Compensation Commission under Utah Code §67-22-2.',
   source_url: 'https://le.utah.gov/xcode/Title67/Chapter22/67-22-S2.html',
   fetched_at: NOW,
 };
@@ -21,7 +21,7 @@ const LOBBYING = {
 
 const STOCK_HOLDINGS = {
   status:     'requires_manual_portal_review',
-  notes:      'UT financial disclosure under Utah Code §67-16-6. Disclosures portal requires manual navigation.',
+  notes:      'UT Financial Disclosure under Utah Code §67-16-6. Disclosures portal requires manual access.',
   fetched_at: NOW,
 };
 
