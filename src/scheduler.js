@@ -79,6 +79,7 @@ const biMonthlySources = allSources.filter(s =>
 //    2. Process bills with Claude AI
 //    3. Score government efficiency
 //    4. Upload bills, votes, efficiency_scores to Firestore
+//       — bills use merge:true plus enrichment-preserving scrub (summaries, args, votes not wiped)
 //
 //  WEEKLY     (03:00 every Sunday)        — member profiles + cabinet validation
 //    1. Ingest all legislator sources

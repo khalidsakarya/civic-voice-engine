@@ -26,7 +26,16 @@
       "Bash(Select-String --line-buffered \"Done|Error|Fatal|parsed|error|skipped|Complete\")",
       "Bash(Get-Content \"C:\\\\Users\\\\jem91\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\C--Users-jem91-civic-voice-engine\\\\ee2aaa24-2982-4ef4-b0f1-32110b44f3f0\\\\tasks\\\\b0dd65jzj.output\")",
       "Bash(Select-String \"Done|Complete|Parsed|Skipped|Error|Fatal|total\")",
-      "Bash(Select-Object -Last 30)"
+      "Bash(Select-Object -Last 30)",
+      "WebSearch",
+      "WebFetch(domain:www.congress.gov)",
+      "WebFetch(domain:www.everycrsreport.com)",
+      "WebFetch(domain:home.treasury.gov)",
+      "WebFetch(domain:www.legistorm.com)",
+      "WebFetch(domain:www.dol.gov)",
+      "WebFetch(domain:www.hhs.gov)",
+      "WebFetch(domain:govtransparencyproject.org)",
+      "WebFetch(domain:www.ed.gov)"
     ]
   }
 }

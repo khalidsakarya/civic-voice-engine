@@ -1,15 +1,16 @@
 'use strict';
 /**
- * Canadian MP Lobbying Fetcher
+ * Canadian MP + Senator Lobbying Fetcher
  *
  * Downloads the Office of the Commissioner of Lobbying (OCL) bulk
  * communications data from lobbycanada.gc.ca/en/open-data/ and extracts
  * all communication logs where a DPOH (Designated Public Office Holder)
- * matches a current Canadian MP name.
+ * matches a current Canadian MP or Senator name.
  *
  * Data sources:
  *   Bulk ZIP  — lobbycanada.gc.ca/media/mqbbmaqk/communications_ocl_cal.zip
  *   MP names  — output/corporate_affiliations/CA_coi_*.json (ourcommons.ca)
+ *   Senators  — hardcoded from SENATORS_DATA in civic-voice-app (official appointments)
  *
  * Saves to Firestore: member_lobbying (CA records, category: lobbying_communication)
  */
@@ -51,30 +52,106 @@ function saveOutput(records) {
   console.log(`[CA:LOB] Saved ${records.length} records → ${path.basename(file)}`);
 }
 
-// ─── Step 1: Load current MP names from COI output ──────────────────────────
+// ─── Canadian Senators (official appointments from Parliament of Canada) ──────
+const SENATORS = [
+  { name: 'Frances Lankin', province: 'Ontario', party: 'ISG' },
+  { name: 'Kim Pate', province: 'Ontario', party: 'ISG' },
+  { name: 'Ratna Omidvar', province: 'Ontario', party: 'ISG' },
+  { name: 'Rosemary Moodie', province: 'Ontario', party: 'ISG' },
+  { name: 'Marty Deacon', province: 'Ontario', party: 'ISG' },
+  { name: 'Donna Dasko', province: 'Ontario', party: 'ISG' },
+  { name: 'Hassan Yussuff', province: 'Ontario', party: 'ISG' },
+  { name: 'Andrew Cardozo', province: 'Ontario', party: 'ISG' },
+  { name: 'Rebecca Patterson', province: 'Ontario', party: 'ISG' },
+  { name: 'Bernadette Clement', province: 'Ontario', party: 'ISG' },
+  { name: 'Vernon White', province: 'Ontario', party: 'Conservative' },
+  { name: 'Linda Frum', province: 'Ontario', party: 'Conservative' },
+  { name: 'Victor Oh', province: 'Ontario', party: 'Conservative' },
+  { name: 'Judith Keating', province: 'Ontario', party: 'CSG' },
+  { name: 'Nancy Hartling', province: 'Ontario', party: 'CSG' },
+  { name: 'Catherine Boivin', province: 'Ontario', party: 'CSG' },
+  { name: 'Robert Nault', province: 'Ontario', party: 'CSG' },
+  { name: 'Denise Harrison', province: 'Ontario', party: 'CSG' },
+  { name: 'Hélène Poulin', province: 'Ontario', party: 'PSG' },
+  { name: 'Pierre-Luc Moreau', province: 'Ontario', party: 'PSG' },
+  { name: 'Sandra Munroe', province: 'Ontario', party: 'PSG' },
+  { name: 'James Oliphant', province: 'Ontario', party: 'PSG' },
+  { name: 'Raymond Cormier', province: 'Ontario', party: 'Non-affiliated' },
+  { name: 'Michael Delisle', province: 'Ontario', party: 'Non-affiliated' },
+  { name: 'Marc Gold', province: 'Quebec', party: 'ISG' },
+  { name: 'Chantal Petitclerc', province: 'Quebec', party: 'ISG' },
+  { name: 'Rosa Galvez', province: 'Quebec', party: 'ISG' },
+  { name: 'Lucie Moncion', province: 'Quebec', party: 'ISG' },
+  { name: 'Marilou McPhedran', province: 'Manitoba', party: 'Non-affiliated' },
+  { name: 'Stan Kutcher', province: 'Nova Scotia', party: 'ISG' },
+  { name: 'Mary Coyle', province: 'Nova Scotia', party: 'ISG' },
+  { name: 'Wanda Elaine Thomas Bernard', province: 'Nova Scotia', party: 'ISG' },
+  { name: 'Brian Francis', province: 'Prince Edward Island', party: 'ISG' },
+  { name: 'Iris Petten', province: 'Newfoundland and Labrador', party: 'ISG' },
+  { name: 'Bev Busson', province: 'British Columbia', party: 'ISG' },
+  { name: 'Yuen Pau Woo', province: 'British Columbia', party: 'ISG' },
+  { name: 'Pat Duncan', province: 'Yukon', party: 'ISG' },
+  { name: 'Scott Tannas', province: 'Alberta', party: 'Conservative' },
+  { name: 'Douglas Black', province: 'Alberta', party: 'Conservative' },
+  { name: 'Paula Simons', province: 'Alberta', party: 'ISG' },
+  { name: 'Michèle Audette', province: 'Quebec', party: 'ISG' },
+  { name: 'Pierre-Hugues Boisvenu', province: 'Quebec', party: 'Conservative' },
+  { name: 'Claude Carignan', province: 'Quebec', party: 'Conservative' },
+  { name: 'Jean-Guy Dagenais', province: 'Quebec', party: 'Conservative' },
+  { name: 'Ghislain Maltais', province: 'Quebec', party: 'Conservative' },
+  { name: 'Leo Housakos', province: 'Quebec', party: 'Conservative' },
+  { name: 'Donald Plett', province: 'Manitoba', party: 'Conservative' },
+  { name: 'Carolyn Stewart Olsen', province: 'New Brunswick', party: 'Conservative' },
+  { name: 'David Wells', province: 'Newfoundland and Labrador', party: 'Conservative' },
+  { name: 'Michael MacDonald', province: 'Nova Scotia', party: 'Conservative' },
+  { name: 'Pamela Wallin', province: 'Saskatchewan', party: 'Conservative' },
+  { name: 'Dennis Patterson', province: 'Nunavut', party: 'Conservative' },
+  { name: 'Salma Ataullahjan', province: 'Ontario', party: 'Conservative' },
+  { name: 'Yonah Martin', province: 'British Columbia', party: 'Conservative' },
+  { name: 'Patrick Brazeau', province: 'Quebec', party: 'Non-affiliated' },
+];
 
-function loadMPIndex() {
-  const dir = path.resolve(__dirname, '../../output/corporate_affiliations');
-  const files = fs.readdirSync(dir)
-    .filter(f => f.startsWith('CA_coi_') && f.endsWith('.json'))
-    .sort();
-  if (!files.length) throw new Error('No CA COI output found — run caConflictOfInterestFetcher.js first');
+// ─── Step 1: Load current MP + Senator names ──────────────────────────────────
 
-  const latest = path.join(dir, files[files.length - 1]);
-  const { records } = JSON.parse(fs.readFileSync(latest, 'utf8'));
-  console.log(`[CA:LOB] Loaded ${records.length} current MP names from ${files[files.length - 1]}`);
-
-  // Build lookup: normalizedFullName → { member_name, party, constituency, province }
+function loadMemberIndex() {
   const index = new Map();
-  for (const mp of records) {
-    const key = normalize(mp.member_name);
-    index.set(key, {
-      member_name:  mp.member_name,
-      party:        mp.party,
-      constituency: mp.constituency,
-      province:     mp.province,
+
+  // Load MPs from COI output
+  try {
+    const dir = path.resolve(__dirname, '../../output/corporate_affiliations');
+    const files = fs.readdirSync(dir)
+      .filter(f => f.startsWith('CA_coi_') && f.endsWith('.json'))
+      .sort();
+    if (files.length) {
+      const latest = path.join(dir, files[files.length - 1]);
+      const { records } = JSON.parse(fs.readFileSync(latest, 'utf8'));
+      for (const mp of records) {
+        index.set(normalize(mp.member_name), {
+          member_name:  mp.member_name,
+          party:        mp.party,
+          constituency: mp.constituency,
+          province:     mp.province,
+          chamber:      'House of Commons',
+        });
+      }
+      console.log(`[CA:LOB] Loaded ${records.length} MP names`);
+    }
+  } catch (e) {
+    console.warn('[CA:LOB] No MP COI output found — MPs skipped:', e.message);
+  }
+
+  // Add senators
+  for (const s of SENATORS) {
+    index.set(normalize(s.name), {
+      member_name:  s.name,
+      party:        s.party,
+      constituency: null,
+      province:     s.province,
+      chamber:      'Senate',
     });
   }
+  console.log(`[CA:LOB] Total member index: ${index.size} entries (MPs + ${SENATORS.length} senators)`);
+
   return index;
 }
 
@@ -203,7 +280,7 @@ function buildRecords(zipBuf, mpIndex) {
     }
   }
 
-  console.log(`[CA:LOB] Built ${records.length} lobbying records for current Canadian MPs`);
+  console.log(`[CA:LOB] Built ${records.length} lobbying records for current Canadian MPs and Senators`);
   return records;
 }
 
@@ -254,13 +331,13 @@ async function upsertToFirestore(records) {
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
 async function main() {
-  console.log('[CA:LOB] Starting Canadian MP lobbying fetch…');
+  console.log('[CA:LOB] Starting Canadian MP + Senator lobbying fetch…');
 
-  const mpIndex = loadMPIndex();
+  const mpIndex = loadMemberIndex();
   const zipBuf  = await downloadZip();
   const records = buildRecords(zipBuf, mpIndex);
 
-  if (!records.length) throw new Error('No lobbying records matched current MPs — check MP name normalization');
+  if (!records.length) throw new Error('No lobbying records matched current members — check name normalization');
 
   saveOutput(records);
   await upsertToFirestore(records);

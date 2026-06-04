@@ -5,37 +5,73 @@ const { getDb } = require('./client');
 const OUTPUT_ROOT = path.resolve(__dirname, '../../output');
 const BATCH_SIZE = 400; // Firestore max is 500 ops per batch
 
-// Fields that may only be written to Firestore when they carry real generated content.
-// If any of these fields is null, undefined, an empty string, or an empty array, it is
-// dropped from the write payload so that merge:true leaves the existing Firestore value
-// untouched. This prevents failed or partial enrichment runs from overwriting good data.
-const PROTECTED_ENRICHMENT_FIELDS = new Set([
-  'plainLanguageSummary', 'plain_language_summary', 'summary', 'aiSummary', 'civicSummary',
-  'argumentsFor', 'argumentsAgainst', 'pros', 'cons',
-  'citizenImpactScore', 'predictedOutcome',
-  'editorialReviewed', 'manuallyReviewed',
+/**
+ * Top-level bill fields that must never be overwritten with null, empty array,
+ * or blank string on merge (scheduler preserves existing Firestore enrichment & votes).
+ */
+const BILL_MERGE_PROTECTED_TOP_LEVEL = new Set([
+  'summary',
+  'plainLanguageSummary',
+  'plain_language_summary',
+  'aiSummary',
+  'civicSummary',
+  'argumentsFor',
+  'argumentsAgainst',
+  'pros',
+  'cons',
+  'editorialReviewed',
+  'manuallyReviewed',
   'enrichmentSource',
+  'supportVotes',
+  'opposeVotes',
+  'supportVoteCount',
+  'opposeVoteCount',
+  'concernVoteCount',
+  'citizenVoteTotals',
+  'voteTotals',
 ]);
 
-/**
- * Drop any protected enrichment field whose value is empty/null so that
- * Firestore merge:true leaves the existing value untouched.
- * Rules per type:
- *   null / undefined  → always dropped
- *   string            → dropped when blank after trim()
- *   array             → dropped when length === 0
- *   boolean / number  → kept as-is (false and 0 are valid values)
- */
-function guardEnrichmentFields(doc) {
-  const out = { ...doc };
-  for (const field of PROTECTED_ENRICHMENT_FIELDS) {
-    if (!(field in out)) continue;
-    const v = out[field];
-    if (v === null || v === undefined)                    { delete out[field]; continue; }
-    if (typeof v === 'string' && v.trim().length === 0)   { delete out[field]; continue; }
-    if (Array.isArray(v) && v.length === 0)               { delete out[field]; continue; }
+function isMeaningfulFirestoreScalar(val) {
+  if (val === undefined || val === null) return false;
+  if (Array.isArray(val)) return val.length > 0;
+  if (typeof val === 'object') return Object.keys(val).length > 0;
+  if (typeof val === 'string') return val.trim().length > 0;
+  if (typeof val === 'boolean') return true;
+  if (typeof val === 'number') return Number.isFinite(val);
+  return true;
+}
+
+function stripUndefinedDeep(value) {
+  if (value === undefined) return undefined;
+  if (value === null || typeof value !== 'object') return value;
+  if (value instanceof Date) return value;
+  if (Array.isArray(value)) return value.map(stripUndefinedDeep);
+  const out = {};
+  for (const [k, v] of Object.entries(value)) {
+    if (v === undefined) continue;
+    out[k] = stripUndefinedDeep(v);
   }
   return out;
+}
+
+/** Remove destructive writes so merge:true keeps existing enrichment / vote tallies. */
+function scrubBillPayloadForMerge(doc) {
+  const out = { ...doc };
+  for (const key of BILL_MERGE_PROTECTED_TOP_LEVEL) {
+    if (!(key in out)) continue;
+    if (!isMeaningfulFirestoreScalar(out[key])) {
+      delete out[key];
+    }
+  }
+  return out;
+}
+
+function serializeFirestoreDocument(record, collectionName) {
+  const deep = stripUndefinedDeep(record);
+  if (collectionName === 'bills') {
+    return scrubBillPayloadForMerge(deep);
+  }
+  return stripUndefined(deep);
 }
 
 /**
@@ -54,7 +90,7 @@ async function batchWrite(collectionName, records) {
     for (const record of chunk) {
       const docId = sanitizeId(record.id || record.sourceId || `auto-${Date.now()}-${Math.random()}`);
       const ref = db.collection(collectionName).doc(docId);
-      batch.set(ref, guardEnrichmentFields(stripUndefined(record)), { merge: true });
+      batch.set(ref, serializeFirestoreDocument(record, collectionName), { merge: true });
     }
 
     await batch.commit();
@@ -85,38 +121,10 @@ function withTimestamp(record) {
   return { ...record, last_updated: new Date().toISOString() };
 }
 
-// Valid values Claude is instructed to use for predictedOutcome.
-const VALID_PREDICTED_OUTCOMES = new Set([
-  'likely_to_pass', 'likely_to_fail', 'uncertain', 'already_passed', 'already_failed',
-]);
-
-/**
- * Returns true only when an analysis object contains genuine generated content
- * across every required field. Partial or null analyses are rejected so that
- * existing Firestore enrichment is never overwritten with empty/null values.
- */
-function hasRealEnrichment(analysis) {
-  if (!analysis || typeof analysis !== 'object') return false;
-  return (
-    typeof analysis.plainLanguageSummary === 'string' &&
-    analysis.plainLanguageSummary.trim().length > 0 &&
-    Array.isArray(analysis.argumentsFor) && analysis.argumentsFor.length > 0 &&
-    Array.isArray(analysis.argumentsAgainst) && analysis.argumentsAgainst.length > 0 &&
-    typeof analysis.citizenImpactScore === 'number' &&
-    analysis.citizenImpactScore >= 1 && analysis.citizenImpactScore <= 10 &&
-    VALID_PREDICTED_OUTCOMES.has(analysis.predictedOutcome)
-  );
-}
-
 /**
  * Upload all processed bills (with AI analysis) to the `bills` collection.
- *
- * Safe-write contract: enrichment fields (plainLanguageSummary, argumentsFor,
- * argumentsAgainst, citizenImpactScore, citizenImpactRationale, predictedOutcome,
- * predictedOutcomeRationale, analysis) are written ONLY when hasRealEnrichment()
- * returns true. When Claude failed or returned incomplete data, those fields are
- * omitted entirely from the Firestore payload. Because batchWrite uses merge:true,
- * omitted fields are left untouched — existing enrichment in Firestore is preserved.
+ * Uses merge writes and omits empty/null enrichment fields so existing summaries,
+ * arguments, review flags, and vote counts in Firestore are not wiped on re-run.
  */
 async function uploadBills() {
   const processedDir = path.join(OUTPUT_ROOT, 'processed');
@@ -128,37 +136,40 @@ async function uploadBills() {
 
   const { bills } = JSON.parse(fs.readFileSync(path.join(processedDir, files[files.length - 1])));
 
-  let enriched = 0, preserved = 0;
+  const docs = bills.map((bill) => {
+    const { analysis, ...rest } = bill;
+    const row = withTimestamp({ ...rest });
 
-  const docs = bills.map(bill => {
-    // Destructure enrichment and processing-error fields out of the base payload.
-    // Never spread them blindly — handle each explicitly below.
-    const { analysis, error: _processingError, ...billBase } = bill;
-
-    if (hasRealEnrichment(analysis)) {
-      enriched++;
-      return withTimestamp({
-        ...billBase,
-        plainLanguageSummary:      analysis.plainLanguageSummary,
-        argumentsFor:              analysis.argumentsFor,
-        argumentsAgainst:          analysis.argumentsAgainst,
-        citizenImpactScore:        analysis.citizenImpactScore,
-        citizenImpactRationale:    analysis.citizenImpactRationale  ?? null,
-        predictedOutcome:          analysis.predictedOutcome,
-        predictedOutcomeRationale: analysis.predictedOutcomeRationale ?? null,
-        analysis,
-      });
+    if (analysis && typeof analysis === 'object') {
+      if (isMeaningfulFirestoreScalar(analysis.plainLanguageSummary)) {
+        row.plainLanguageSummary = analysis.plainLanguageSummary;
+      }
+      if (Array.isArray(analysis.argumentsFor) && analysis.argumentsFor.length > 0) {
+        row.argumentsFor = analysis.argumentsFor;
+      }
+      if (Array.isArray(analysis.argumentsAgainst) && analysis.argumentsAgainst.length > 0) {
+        row.argumentsAgainst = analysis.argumentsAgainst;
+      }
+      if (analysis.citizenImpactScore != null && Number.isFinite(Number(analysis.citizenImpactScore))) {
+        row.citizenImpactScore = analysis.citizenImpactScore;
+      }
+      if (isMeaningfulFirestoreScalar(analysis.citizenImpactRationale)) {
+        row.citizenImpactRationale = analysis.citizenImpactRationale;
+      }
+      if (isMeaningfulFirestoreScalar(analysis.predictedOutcome)) {
+        row.predictedOutcome = analysis.predictedOutcome;
+      }
+      if (isMeaningfulFirestoreScalar(analysis.predictedOutcomeRationale)) {
+        row.predictedOutcomeRationale = analysis.predictedOutcomeRationale;
+      }
+      row.analysis = analysis;
     }
 
-    // Claude failed or returned incomplete data — write only the base bill fields.
-    // Enrichment fields are absent from this payload, so merge:true leaves any
-    // previously-written plainLanguageSummary, argumentsFor, etc. intact.
-    preserved++;
-    return withTimestamp(billBase);
+    return row;
   });
 
   const count = await batchWrite('bills', docs);
-  console.log(`[firebase] ✓ bills: ${count} documents written (${enriched} newly enriched, ${preserved} existing enrichment preserved)`);
+  console.log(`[firebase] ✓ bills: ${count} documents written (merge; enrichment-preserving)`);
   return count;
 }
 
@@ -1459,11 +1470,7 @@ const CANONICAL_STAT_DEFS = {
  * - Produces exactly 32 documents (8 statNames × 4 countries)
  * - Doc shape: { country, statName, value, source, sourceUrl, updated }
  * - Doc ID: {COUNTRY}_{statName}  e.g. US_unemploymentRate
- *
- * Safe-write order: new docs are written (upserted) first with merge:true so
- * the collection is always live. Stale docs whose IDs fall outside the current
- * expected set are deleted only after the write succeeds. The collection is
- * never empty at any point during the operation.
+ * - Wipes the entire collection first so no stale docs remain
  */
 async function uploadSocialStatsCanonical() {
   const dir = path.join(OUTPUT_ROOT, 'socialstats');
@@ -1492,9 +1499,17 @@ async function uploadSocialStatsCanonical() {
   const db  = getDb();
   const now = new Date().toISOString();
 
-  // ── 1. Build & upsert the canonical docs (collection stays live) ──────────
+  // ── 1. Wipe existing collection ───────────────────────────────────────────
+  const existing = await db.collection('social_stats').get();
+  if (existing.size > 0) {
+    const delBatch = db.batch();
+    existing.docs.forEach(d => delBatch.delete(d.ref));
+    await delBatch.commit();
+    console.log(`[firebase]   Cleared ${existing.size} existing social_stats docs`);
+  }
+
+  // ── 2. Build & write canonical 32 docs ───────────────────────────────────
   const writeBatch = db.batch();
-  const expectedIds = new Set();
   let count = 0;
 
   for (const [statName, countryDefs] of Object.entries(CANONICAL_STAT_DEFS)) {
@@ -1502,7 +1517,6 @@ async function uploadSocialStatsCanonical() {
       const def   = countryDefs[country];
       const live  = def.liveKey ? liveIndex[`${country}_${def.liveKey}`] : null;
       const docId = sanitizeId(`${country}_${statName}`);
-      expectedIds.add(docId);
 
       const doc = stripUndefined({
         country,
@@ -1514,29 +1528,13 @@ async function uploadSocialStatsCanonical() {
         last_updated: now,
       });
 
-      // merge:true — existing docs are updated, not replaced; nothing is deleted
-      writeBatch.set(db.collection('social_stats').doc(docId), doc, { merge: true });
+      writeBatch.set(db.collection('social_stats').doc(docId), doc);
       count++;
     }
   }
 
   await writeBatch.commit();
   console.log(`[firebase] ✓ social_stats: ${count} canonical documents written (${Object.keys(CANONICAL_STAT_DEFS).length} stats × ${CANONICAL_COUNTRIES.length} countries)`);
-
-  // ── 2. Remove stale docs (IDs outside the current expected set) ───────────
-  // Done only after the write succeeds so the collection is never empty.
-  const snapshot  = await db.collection('social_stats').get();
-  const staleDocs = snapshot.docs.filter(d => !expectedIds.has(d.id));
-  if (staleDocs.length > 0) {
-    // Delete in batches of 400 in case stale count ever grows large
-    for (let i = 0; i < staleDocs.length; i += 400) {
-      const delBatch = db.batch();
-      staleDocs.slice(i, i + 400).forEach(d => delBatch.delete(d.ref));
-      await delBatch.commit();
-    }
-    console.log(`[firebase]   Removed ${staleDocs.length} stale social_stats doc(s)`);
-  }
-
   return count;
 }
 
@@ -1624,7 +1622,7 @@ async function uploadLiveStats() {
  *
  * Reads the most recent output/targeted/targeted_*.json file.
  * Writes one document per successful result, doc ID = {COUNTRY}_{stat}.
- * Uses merge:true so any fields not present in the targeted payload are left intact.
+ * Uses set() (not merge) so stale values are fully overwritten.
  *
  * Schema: country, statName, value, unit, date, source, sourceUrl, notes,
  *         fetchedAt, last_updated.
@@ -1672,7 +1670,7 @@ async function uploadTargetedStats() {
       notes:        r.notes     ?? null,
       fetchedAt:    fetchedAt ?? r.fetchedAt ?? null,
       last_updated: now,
-    }), { merge: true });
+    }));
     count++;
   }
 
