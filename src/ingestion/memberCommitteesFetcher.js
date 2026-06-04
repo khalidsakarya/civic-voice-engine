@@ -304,12 +304,16 @@ async function fetchUSCommittees() {
 
     if (!bioguideId) continue;
 
+    const first = safeStr(firstName);
+    const last  = safeStr(lastName);
     records.push({
       id:           `us_${bioguideId}`,
       source:       'usa',
+      jurisdiction: 'US',
       bioguide_id:  safeStr(bioguideId),
-      first_name:   safeStr(firstName),
-      last_name:    safeStr(lastName),
+      full_name:    first && last ? `${first} ${last}` : (first || last),
+      first_name:   first,
+      last_name:    last,
       middle_name:  safeStr(middleName),
       party:        safeStr(party),
       state:        safeStr(stateCode),

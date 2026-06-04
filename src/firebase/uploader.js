@@ -445,14 +445,17 @@ async function uploadMemberCommittees() {
   const allRecords = [];
   for (const file of files) {
     const { records } = JSON.parse(fs.readFileSync(file));
-    allRecords.push(...records.map(withTimestamp));
+    // Only upload records that actually have committee data — skip empty arrays
+    // to avoid overwriting valid existing data with empty placeholder records
+    const withData = records.filter(r => Array.isArray(r.committees) && r.committees.length > 0);
+    allRecords.push(...withData.map(withTimestamp));
   }
   if (allRecords.length === 0) {
-    console.log('[firebase] ⚠ member_committees: no records found, skipping');
+    console.log('[firebase] ⚠ member_committees: no records with committee data found, skipping');
     return 0;
   }
   const count = await batchWrite('member_committees', allRecords);
-  console.log(`[firebase] ✓ member_committees: ${count} documents written`);
+  console.log(`[firebase] ✓ member_committees: ${count} documents written (records with committees only)`);
   return count;
 }
 
