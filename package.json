@@ -10,6 +10,7 @@
     "refresh:state-data": "node src/ingestion/runAllStates.js",
     "ingest:senate-data": "node src/ingestion/senateDataFetcher.js",
     "ingest:ca-lobbying": "node src/ingestion/caLobbyingFetcher.js",
+    "ingest:us-congress": "node src/ingestion/usCongressDataFetcher.js",
     "process:bills": "node src/processBills.js",
     "score:efficiency": "node src/scoreEfficiency.js",
     "upload:firebase": "node src/uploadToFirebase.js",
