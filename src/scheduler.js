@@ -54,6 +54,7 @@ const DAILY_SCHEDULE            = process.env.CRON_DAILY            || '0 2 * * 
 const WEEKLY_SCHEDULE           = process.env.CRON_WEEKLY           || '0 3 * * 0';    // 03:00 every Sunday
 const MONTHLY_SCHEDULE          = process.env.CRON_MONTHLY          || '0 5 1 * *';    // 05:00 on the 1st
 const BIMONTHLY_SCHEDULE        = process.env.CRON_BIMONTHLY        || '0 4 1,15 * *'; // 04:00 on 1st and 15th
+const QUARTERLY_SCHEDULE        = process.env.CRON_QUARTERLY        || '0 4 1 1,4,7,10 *'; // 04:00 Jan/Apr/Jul/Oct 1st
 const EXPENSE_SCHEDULE          = process.env.CRON_EXPENSE          || '0 1 * * 3';    // 01:00 every Wednesday
 const LEADER_EXPENSE_SCHEDULE   = process.env.CRON_LEADER_EXPENSE   || '0 2 * * 4';    // 02:00 every Thursday
 const BUDGET_ANALYTICS_SCHEDULE = process.env.CRON_BUDGET_ANALYTICS || '0 6 1 * *';    // 06:00 on the 1st
@@ -392,33 +393,28 @@ async function runBiMonthlyCycle() {
     console.log('\n[scheduler:bimonthly] Step 1/9 — Ingesting financial & lobbying data...');
     await runPipeline(biMonthlySources);
 
-    console.log('\n[scheduler:bimonthly] Step 2/9 — Fetching member disclosures & lobbying (US/UK/AU/CA)...');
-    await fetchAllMemberData();
+    console.log('\n[scheduler:bimonthly] Step 2/7 — Uploading disclosures & lobbying to Firebase...');
+    disclosureCount = await uploadFinancialDisclosures();
+    lobbyingCount   = await uploadLobbyingActivity();
+    contractCount   = await uploadContracts();
+    corporateCount  = await uploadCorporateAffiliations();
 
-    console.log('\n[scheduler:bimonthly] Step 3/9 — Uploading disclosures & lobbying to Firebase...');
-    disclosureCount       = await uploadFinancialDisclosures();
-    lobbyingCount         = await uploadLobbyingActivity();
-    contractCount         = await uploadContracts();
-    corporateCount        = await uploadCorporateAffiliations();
-    memberDisclosureCount = await uploadMemberDisclosures();
-    memberLobbyingCount   = await uploadMemberLobbying();
-
-    console.log('\n[scheduler:bimonthly] Step 4/9 — Fetching member expense reports (CA/US/UK/AU)...');
+    console.log('\n[scheduler:bimonthly] Step 3/7 — Fetching member expense reports (CA/US/UK/AU)...');
     await fetchAllMemberExpenses();
 
-    console.log('\n[scheduler:bimonthly] Step 5/9 — Uploading member expenses to Firebase...');
+    console.log('\n[scheduler:bimonthly] Step 4/7 — Uploading member expenses to Firebase...');
     memberExpensesCount = await uploadMemberExpenses();
 
-    console.log('\n[scheduler:bimonthly] Step 6/9 — Fetching STOCK Act trade disclosures (US House & Senate)...');
+    console.log('\n[scheduler:bimonthly] Step 5/7 — Fetching STOCK Act trade disclosures (US House & Senate)...');
     await fetchAllStockTrades();
 
-    console.log('\n[scheduler:bimonthly] Step 7/9 — Uploading member stock trades to Firebase...');
+    console.log('\n[scheduler:bimonthly] Step 6/7 — Uploading member stock trades to Firebase...');
     memberStockTradesCount = await uploadMemberStockTrades();
 
-    console.log('\n[scheduler:bimonthly] Step 8/9 — Fetching corporate affiliations (CA/US/UK/AU)...');
+    console.log('\n[scheduler:bimonthly] Step 7/7 — Fetching corporate affiliations (CA/US/UK/AU)...');
     await fetchAllCorporateAffiliations();
 
-    console.log('\n[scheduler:bimonthly] Step 9/9 — Uploading member corporate affiliations to Firebase...');
+    console.log('\n[scheduler:bimonthly] Step 7/7 — Uploading member corporate affiliations to Firebase...');
     memberCorporateAffiliationsCount = await uploadMemberCorporateAffiliations();
 
     const total = disclosureCount + lobbyingCount + contractCount + corporateCount +
@@ -432,7 +428,7 @@ async function runBiMonthlyCycle() {
     await writeSchedulerStatus('bimonthly', {
       startedAt,
       status:         'success',
-      collections:    ['financial_disclosures', 'lobbying_activity', 'contracts', 'corporate_affiliations', 'member_disclosures', 'member_lobbying', 'member_expenses', 'member_stock_trades', 'member_corporate_affiliations'],
+      collections:    ['financial_disclosures', 'lobbying_activity', 'contracts', 'corporate_affiliations', 'member_expenses', 'member_stock_trades', 'member_corporate_affiliations'],
       recordsUpdated: total,
       recordsSkipped: 0,
       aiCallsMade:    0,
@@ -444,13 +440,68 @@ async function runBiMonthlyCycle() {
     await writeSchedulerStatus('bimonthly', {
       startedAt,
       status:         'error',
-      collections:    ['financial_disclosures', 'lobbying_activity', 'contracts', 'corporate_affiliations', 'member_disclosures', 'member_lobbying', 'member_expenses', 'member_stock_trades', 'member_corporate_affiliations'],
+      collections:    ['financial_disclosures', 'lobbying_activity', 'contracts', 'corporate_affiliations', 'member_expenses', 'member_stock_trades', 'member_corporate_affiliations'],
       recordsUpdated: disclosureCount + lobbyingCount + contractCount + corporateCount +
-        memberDisclosureCount + memberLobbyingCount + memberExpensesCount +
-        memberStockTradesCount + memberCorporateAffiliationsCount,
+        memberExpensesCount + memberStockTradesCount + memberCorporateAffiliationsCount,
       recordsSkipped: 0,
       aiCallsMade:    0,
       cronSchedule:   BIMONTHLY_SCHEDULE,
+      errorMessage:   err.message,
+    }).catch(() => {});
+  }
+}
+
+// ─── Quarterly cycle (Jan/Apr/Jul/Oct 1st) ───────────────────────────────────
+//
+//  QUARTERLY  (04:00 on Jan 1, Apr 1, Jul 1, Oct 1)
+//    — member_disclosures (US House EFTS + UK Parliament + AU APH)
+//    — member_lobbying    (US Senate LDA + CA CKAN)
+//
+//  Staleness check inside fetchAllMemberData() skips the full fetch if output
+//  files are already < 85 days old (prevents double-runs on quarter boundaries).
+
+async function runQuarterlyCycle() {
+  const startedAt = new Date();
+  console.log(`\n${'='.repeat(60)}`);
+  console.log(`[scheduler:quarterly] Cycle started at ${startedAt.toISOString()}`);
+  console.log('='.repeat(60));
+
+  let memberDisclosureCount = 0, memberLobbyingCount = 0;
+
+  try {
+    console.log('\n[scheduler:quarterly] Step 1/2 — Fetching member disclosures & lobbying (US House EFTS / US LDA / UK Parliament / AU APH / CA CKAN)...');
+    const summary = await fetchAllMemberData();
+    const skipped = summary.some(r => r.status === 'skipped');
+    if (skipped) {
+      console.log('[scheduler:quarterly] ⏭ Data already fresh — skipping Firestore upload.');
+    } else {
+      console.log('\n[scheduler:quarterly] Step 2/2 — Uploading to Firestore (member_disclosures + member_lobbying)...');
+      memberDisclosureCount = await uploadMemberDisclosures();
+      memberLobbyingCount   = await uploadMemberLobbying();
+      console.log(`\n[scheduler:quarterly] ✓ Done at ${new Date().toISOString()}`);
+      console.log(`[scheduler:quarterly]   member_disclosures: ${memberDisclosureCount}  member_lobbying: ${memberLobbyingCount}`);
+    }
+
+    await writeSchedulerStatus('quarterly', {
+      startedAt,
+      status:         skipped ? 'skipped' : 'success',
+      collections:    ['member_disclosures', 'member_lobbying'],
+      recordsUpdated: memberDisclosureCount + memberLobbyingCount,
+      recordsSkipped: skipped ? 1 : 0,
+      aiCallsMade:    0,
+      cronSchedule:   QUARTERLY_SCHEDULE,
+    });
+  } catch (err) {
+    console.error(`[scheduler:quarterly] ✗ Failed: ${err.message}`);
+    console.error(err.stack);
+    await writeSchedulerStatus('quarterly', {
+      startedAt,
+      status:         'error',
+      collections:    ['member_disclosures', 'member_lobbying'],
+      recordsUpdated: memberDisclosureCount + memberLobbyingCount,
+      recordsSkipped: 0,
+      aiCallsMade:    0,
+      cronSchedule:   QUARTERLY_SCHEDULE,
       errorMessage:   err.message,
     }).catch(() => {});
   }
@@ -916,6 +967,7 @@ const RUN_DAILY_FETCH_ONLY      = process.argv.includes('--daily-fetch-only');
 const RUN_WEEKLY_NOW            = process.argv.includes('--weekly');
 const RUN_MONTHLY_NOW           = process.argv.includes('--monthly');
 const RUN_BIMONTHLY_NOW         = process.argv.includes('--bimonthly');
+const RUN_QUARTERLY_NOW         = process.argv.includes('--quarterly');
 const RUN_EXPENSE_NOW           = process.argv.includes('--expenses');
 const RUN_LEADER_EXPENSE_NOW    = process.argv.includes('--leader-expenses');
 const RUN_BUDGET_ANALYTICS_NOW  = process.argv.includes('--budget-analytics');
@@ -942,6 +994,7 @@ if (RUN_NOW) {
     .then(() => runWeeklyCycle())
     .then(() => runMonthlyCycle())
     .then(() => runBiMonthlyCycle())
+    .then(() => runQuarterlyCycle())
     .then(() => runExpenseCycle())
     .then(() => runLeaderExpenseCycle())
     .then(() => runBudgetAnalyticsCycle())
@@ -959,6 +1012,8 @@ if (RUN_NOW) {
   runMonthlyCycle().then(() => process.exit(0)).catch(() => process.exit(1));
 } else if (RUN_BIMONTHLY_NOW) {
   runBiMonthlyCycle().then(() => process.exit(0)).catch(() => process.exit(1));
+} else if (RUN_QUARTERLY_NOW) {
+  runQuarterlyCycle().then(() => process.exit(0)).catch(() => process.exit(1));
 } else if (RUN_EXPENSE_NOW) {
   runExpenseCycle().then(() => process.exit(0)).catch(() => process.exit(1));
 } else if (RUN_LEADER_EXPENSE_NOW) {
@@ -982,15 +1037,16 @@ if (RUN_NOW) {
   console.log(`  Weekly           (member profiles)                          → ${WEEKLY_SCHEDULE}`);
   console.log(`  Monthly          (efficiency, budget, audits, performance,   → ${MONTHLY_SCHEDULE}`);
   console.log(`                    + targeted live stats → social_stats)`);
-  console.log(`  Bimonthly        (disclosures, lobbying, contracts,           → ${BIMONTHLY_SCHEDULE}`);
-  console.log(`                    + member_disclosures, member_lobbying)`);
+  console.log(`  Bimonthly        (contracts, expenses, stock trades,           → ${BIMONTHLY_SCHEDULE}`);
+  console.log(`                    corporate affiliations)`);
+  console.log(`  Quarterly        (member_disclosures, member_lobbying)         → ${QUARTERLY_SCHEDULE}`);
   console.log(`  Expense/Waste    (dept expenses + waste analysis)            → ${EXPENSE_SCHEDULE}`);
   console.log(`  Leader Expenses  (minister/secretary expenses + leaderboard) → ${LEADER_EXPENSE_SCHEDULE}`);
   console.log(`  Budget/Analytics (federal budgets, GDP, unemployment, crime) → ${BUDGET_ANALYTICS_SCHEDULE}`);
   console.log(`  Gov Stats        (revenue, debt, deficit, ODA, grants)        → ${GOV_STATS_SCHEDULE}`);
   console.log(`  News Alerts      (CA gov announcements, Claude Haiku enrich)  → ${NEWS_ALERTS_SCHEDULE}`);
   console.log(`  Daily (fetch-only) (bills+votes+elections, no Claude, zero credits)   → manual only`);
-  console.log('\n  Flags: --now (all), --daily, --daily-fetch-only, --weekly, --monthly, --bimonthly,');
+  console.log('\n  Flags: --now (all), --daily, --daily-fetch-only, --weekly, --monthly, --bimonthly, --quarterly,');
   console.log('         --expenses, --leader-expenses, --budget-analytics, --gov-stats, --targeted-stats,');
   console.log('         --news-alerts');
   console.log('         --run-on-start  (or env SCHEDULER_RUN_ON_START=true) — also fires all cycles immediately\n');
@@ -1001,6 +1057,7 @@ if (RUN_NOW) {
   cron.schedule(WEEKLY_SCHEDULE,           () => runWeeklyCycle());
   cron.schedule(MONTHLY_SCHEDULE,          () => runMonthlyCycle());
   cron.schedule(BIMONTHLY_SCHEDULE,        () => runBiMonthlyCycle());
+  cron.schedule(QUARTERLY_SCHEDULE,       () => runQuarterlyCycle());
   cron.schedule(EXPENSE_SCHEDULE,          () => runExpenseCycle());
   cron.schedule(LEADER_EXPENSE_SCHEDULE,   () => runLeaderExpenseCycle());
   cron.schedule(BUDGET_ANALYTICS_SCHEDULE, () => runBudgetAnalyticsCycle());
@@ -1014,6 +1071,7 @@ if (RUN_NOW) {
       .then(() => runWeeklyCycle())
       .then(() => runMonthlyCycle())
       .then(() => runBiMonthlyCycle())
+      .then(() => runQuarterlyCycle())
       .then(() => runExpenseCycle())
       .then(() => runLeaderExpenseCycle())
       .then(() => runBudgetAnalyticsCycle())

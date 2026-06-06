@@ -614,6 +614,25 @@ async function fetchAUMembersRegister() {
   }
 }
 
+// ─── Staleness check ─────────────────────────────────────────────────────────
+//
+//  Skip the full fetch if any output file in both output directories was written
+//  within the last STALE_DAYS days. This prevents redundant API hammering when
+//  the quarterly scheduler fires but data is already fresh.
+
+const STALE_DAYS = 85; // ~3 months
+
+function isDataFresh(outputDir) {
+  if (!fs.existsSync(outputDir)) return false;
+  const files = fs.readdirSync(outputDir).filter(f => f.endsWith('.json'));
+  if (files.length === 0) return false;
+  const cutoff = Date.now() - STALE_DAYS * 24 * 60 * 60 * 1000;
+  return files.some(f => {
+    const stat = fs.statSync(path.join(outputDir, f));
+    return stat.mtimeMs > cutoff;
+  });
+}
+
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
 const SOURCES = [
@@ -629,6 +648,15 @@ async function fetchAllMemberData() {
   console.log('\n' + '='.repeat(60));
   console.log('[memberDisclosureFetcher] Starting member data ingestion');
   console.log('='.repeat(60));
+
+  // Skip entirely if both output directories have files fresher than STALE_DAYS
+  if (isDataFresh(OUTPUT_DISCLOSURES) && isDataFresh(OUTPUT_LOBBYING)) {
+    console.log(`[memberDisclosureFetcher] ⏭ Data is fresh (< ${STALE_DAYS} days old) — skipping fetch.`);
+    console.log('[memberDisclosureFetcher] Delete output/member_disclosures/ and output/member_lobbying/ to force a re-fetch.');
+    return [
+      { source: 'staleness-check', type: 'skipped', status: 'skipped', records: 0, reason: `fresh data found (< ${STALE_DAYS} days)` },
+    ];
+  }
 
   const summary = [];
 
