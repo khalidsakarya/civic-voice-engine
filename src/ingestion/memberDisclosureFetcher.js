@@ -249,52 +249,70 @@ async function fetchCanadaLobbying() {
 //               lobbying_activities, income, expenses, filing_year, … } ] }
 
 async function fetchUSFederalLobbying() {
-  const _ts = new Date().toISOString();
-  const year = CURRENT_YEAR - 1;
+  const _ts  = new Date().toISOString();
+  const VALID_TYPES = ['Q1', 'Q2', 'Q3', 'Q4'];
+  // Fetch the two most recent years so we always have recent data
+  const years = [CURRENT_YEAR - 1, CURRENT_YEAR];
+  const allRecords = [];
+  let totalFetched = 0;
+
   try {
-  console.log(`[lobbying:US] Querying Senate LDA API for filings in ${year}…`);
+  for (const year of years) {
+    for (const filing_type of VALID_TYPES) {
+      try {
+        console.log(`[lobbying:US] Querying LDA ${filing_type} ${year}…`);
+        const resp = await axios.get('https://lda.senate.gov/api/v1/filings/', {
+          params: { filing_year: year, filing_type, page_size: 25, ordering: '-dt_posted' },
+          headers: { Accept: 'application/json' },
+          timeout: TIMEOUT_MS,
+        });
+        const results = resp.data?.results || [];
+        totalFetched += results.length;
+        for (const f of results) {
+          const reg    = f.registrant || {};
+          const client = f.client     || {};
+          allRecords.push({
+            id:              safeStr(f.filing_uuid || `us-lda-${f.id}`),
+            filing_uuid:     safeStr(f.filing_uuid),
+            filing_type:     safeStr(f.filing_type_display || f.filing_type),
+            filing_year:     safeNum(f.filing_year) || year,
+            filing_period:   safeStr(f.filing_period_display || f.filing_period),
+            registrant_name: safeStr(reg.name),
+            registrant_id:   safeStr(reg.id),
+            client_name:     safeStr(client.name),
+            client_id:       safeStr(client.id),
+            income:          safeNum(f.income),
+            expenses:        safeNum(f.expenses),
+            posted_date:     safeStr(f.dt_posted),
+            lobbying_issues: (f.lobbying_activities || [])
+                               .map(a => safeStr(a.general_issue_code_display || a.general_issue_code))
+                               .filter(Boolean)
+                               .join('; ') || null,
+            jurisdiction:    'US',
+            sourceUrl:       `https://lda.senate.gov/filings/public/filing/${f.filing_uuid}/view/`,
+          });
+        }
+      } catch (innerErr) {
+        // Skip quarters that fail (e.g. future quarters return 400)
+        console.warn(`[lobbying:US] Skipping ${filing_type} ${year}: ${innerErr.message}`);
+      }
+    }
+  }
 
-  const resp = await axios.get('https://lda.senate.gov/api/v1/filings/', {
-    params: {
-      filing_year: year,
-      filing_type: 'MR', // Mid-Year Report — also try 'Q1','Q2','Q3','Q4'
-      page_size:   50,
-      ordering:    '-dt_posted',
-    },
-    headers: { Accept: 'application/json' },
-    timeout: TIMEOUT_MS,
+  // Deduplicate by filing_uuid
+  const seen = new Set();
+  const records = allRecords.filter(r => {
+    if (!r.filing_uuid || seen.has(r.filing_uuid)) return false;
+    seen.add(r.filing_uuid);
+    return true;
   });
 
-  const results = resp.data?.results || [];
-  const records = results.map(f => {
-    const reg    = f.registrant  || {};
-    const client = f.client      || {};
-    return {
-      id:                  safeStr(f.filing_uuid || `us-lda-${f.id}`),
-      filing_uuid:         safeStr(f.filing_uuid),
-      filing_type:         safeStr(f.filing_type_display || f.filing_type),
-      filing_year:         safeNum(f.filing_year) || year,
-      filing_period:       safeStr(f.filing_period_display || f.filing_period),
-      registrant_name:     safeStr(reg.name),
-      registrant_id:       safeStr(reg.id),
-      client_name:         safeStr(client.name),
-      client_id:           safeStr(client.id),
-      income:              safeNum(f.income),
-      expenses:            safeNum(f.expenses),
-      posted_date:         safeStr(f.dt_posted),
-      lobbying_issues:     (f.lobbying_activities || [])
-                             .map(a => safeStr(a.general_issue_code_display || a.general_issue_code))
-                             .filter(Boolean)
-                             .join('; ') || null,
-      jurisdiction:        'US',
-      sourceUrl:           `https://lda.senate.gov/filings/public/filing/${f.filing_uuid}/view/`,
-    };
-  });
+  console.log(`[lobbying:US] ${records.length} unique filings from ${totalFetched} fetched`);
 
   const result = saveRecords(OUTPUT_LOBBYING, 'us_senate_lda_filings', records, {
-    filingYear:     year,
-    filingType:     'MR',
-    totalAvailable: resp.data?.count,
+    yearsQueried:   years,
+    typesQueried:   VALID_TYPES,
+    totalFetched,
     sourceApi:      'https://lda.senate.gov/api/v1/filings/',
   });
   await writeAuditLog({ collection_name: COLLECTION_NAME_LOBBY, jurisdiction: 'US', data_pull_timestamp: _ts, source_endpoint: 'https://lda.senate.gov/api/v1/filings/', record_count: result.count, import_status: 'success', scheduler_tier: SCHEDULER_TIER });
