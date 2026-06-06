@@ -26,7 +26,8 @@
 'use strict';
 require('dotenv').config();
 
-const axios = require('axios');
+const axios  = require('axios');
+const AdmZip = require('adm-zip');
 const fs    = require('fs');
 const path  = require('path');
 const { writeAuditLog } = require('../firebase/auditLog');
@@ -63,15 +64,21 @@ function saveRecords(outputDir, sourceName, records, meta = {}) {
 const safeStr = v => (v != null ? String(v).trim().slice(0, 600) || null : null);
 const safeNum = v => { const n = parseFloat(v); return isNaN(n) ? null : n; };
 
-// ─── US House Financial Disclosures (EFTS) ───────────────────────────────────
+// ─── US House Financial Disclosures (Clerk ZIP) ──────────────────────────────
 //
-//  The Electronic Financial Disclosure System (EFTS) exposes a public JSON
-//  search endpoint used by the disclosures.house.gov website itself.
+//  The House Clerk publishes annual FD data as a ZIP archive:
+//    https://disclosures-clerk.house.gov/public_disc/financial-pdfs/{year}FD.zip
 //
-//  GET https://efts.house.gov/EFTS-Public/query
-//    ?q=                  — full-text search (blank = all)
-//    &dateRange=custom
-//    &fromDate=YYYY-MM-DD
+//  The ZIP contains {year}FD.xml with <Member> records:
+//    Last, First, FilingType, StateDst, Year, FilingDate, DocID
+//
+//  FilingType codes:
+//    O = Annual Report (Original)   P = Annual Report (Final)
+//    A = Amendment                  C = Candidate Initial Disclosure
+//    E = Extension Request          T = Termination Report
+//    W = Annual Report (Extension)  X = Waiver
+//
+//  PDF URL: https://disclosures-clerk.house.gov/public_disc/financial-pdfs/{year}/{DocID}.pdf
 //    &toDate=YYYY-MM-DD
 //    &hits.hits.total.value=true
 //
@@ -84,76 +91,106 @@ const safeNum = v => { const n = parseFloat(v); return isNaN(n) ? null : n; };
 //  the year; FD (annual) filings cluster Jan–May following the disclosure year.
 
 async function fetchUSHouseDisclosures() {
-  const _ts = new Date().toISOString();
-  const year      = CURRENT_YEAR - 1; // most recent completed year
-  const fromDate  = `${year}-01-01`;
-  const toDate    = `${year}-12-31`;
+  const _ts    = new Date().toISOString();
+  const BASE   = 'https://disclosures-clerk.house.gov/public_disc/financial-pdfs';
+  // Fetch both the previous completed year and the current year
+  const years  = [CURRENT_YEAR - 1, CURRENT_YEAR];
+  const allRecords = [];
 
   try {
-  console.log(`[disclosures:US] Querying EFTS for House disclosures filed in ${year}…`);
+  for (const year of years) {
+    const zipUrl = `${BASE}/${year}FD.zip`;
+    console.log(`[disclosures:US] Downloading House FD ZIP for ${year}…`);
+    let resp;
+    try {
+      resp = await axios.get(zipUrl, {
+        headers: { 'User-Agent': 'Mozilla/5.0', Accept: '*/*' },
+        timeout: TIMEOUT_MS,
+        responseType: 'arraybuffer',
+      });
+    } catch (e) {
+      console.warn(`[disclosures:US] Skipping ${year}: ${e.message}`);
+      continue;
+    }
 
-  const resp = await axios.get('https://efts.house.gov/EFTS-Public/query', {
-    params: {
-      q:          '',
-      dateRange:  'custom',
-      fromDate,
-      toDate,
-      // Request up to 100 hits (EFTS default page size is 10)
-      'hits.hits._source.*': true,
-    },
-    headers: { Accept: 'application/json' },
-    timeout: TIMEOUT_MS,
-  });
+    const zip  = new AdmZip(Buffer.from(resp.data));
+    // Prefer XML; fall back to TXT
+    const xml  = zip.getEntry(`${year}FD.xml`);
+    const txt  = zip.getEntry(`${year}FD.txt`);
 
-  const hits = resp.data?.hits?.hits || [];
-
-  if (hits.length === 0) {
-    // Try current year (PTRs already filed this year)
-    console.log('[disclosures:US] No hits for prior year, retrying with current year…');
-    const resp2 = await axios.get('https://efts.house.gov/EFTS-Public/query', {
-      params: {
-        q:         '',
-        dateRange: 'custom',
-        fromDate:  `${CURRENT_YEAR}-01-01`,
-        toDate:    new Date().toISOString().slice(0, 10),
-        'hits.hits._source.*': true,
-      },
-      headers: { Accept: 'application/json' },
-      timeout: TIMEOUT_MS,
-    });
-    hits.push(...(resp2.data?.hits?.hits || []));
+    if (xml) {
+      const xmlStr = xml.getData().toString('utf8');
+      // Parse <Member> blocks with a lightweight regex — no xml2js needed
+      const members = xmlStr.match(/<Member>[\s\S]*?<\/Member>/g) || [];
+      const getTag  = (block, tag) => {
+        const m = block.match(new RegExp(`<${tag}>([^<]*)</${tag}>`));
+        return m ? m[1].trim() : '';
+      };
+      for (const block of members) {
+        const last      = getTag(block, 'Last');
+        const first     = getTag(block, 'First');
+        const docId     = getTag(block, 'DocID');
+        const fileType  = getTag(block, 'FilingType');
+        const stateDst  = getTag(block, 'StateDst');
+        const fyear     = getTag(block, 'Year');
+        const fileDate  = getTag(block, 'FilingDate');
+        if (!docId || !last) continue;
+        allRecords.push({
+          id:             `us-house-fd-${docId}`,
+          member_name:    [first, last].filter(Boolean).join(' ') || null,
+          first_name:     first || null,
+          last_name:      last  || null,
+          state_district: stateDst || null,
+          filing_type:    fileType || null,
+          filing_year:    safeNum(fyear) || year,
+          filing_date:    fileDate || null,
+          document_url:   docId ? `${BASE}/${year}/${docId}.pdf` : null,
+          filing_id:      docId,
+          jurisdiction:   'US',
+          chamber:        'House',
+          sourceUrl:      'https://disclosures-clerk.house.gov',
+        });
+      }
+      console.log(`[disclosures:US] ${year}: parsed ${members.length} members from XML`);
+    } else if (txt) {
+      // Tab-delimited fallback: Prefix, Last, First, Suffix, FilingType, StateDst, Year, FilingDate, DocID
+      const lines = txt.getData().toString('utf8').split('\n').slice(1); // skip header
+      for (const line of lines) {
+        const parts = line.split('\t');
+        if (parts.length < 9) continue;
+        const [, last, first, , fileType, stateDst, fyear, fileDate, docIdRaw] = parts;
+        const docId = docIdRaw?.trim();
+        if (!docId || !last?.trim()) continue;
+        allRecords.push({
+          id:             `us-house-fd-${docId}`,
+          member_name:    [first?.trim(), last?.trim()].filter(Boolean).join(' ') || null,
+          first_name:     first?.trim() || null,
+          last_name:      last?.trim()  || null,
+          state_district: stateDst?.trim() || null,
+          filing_type:    fileType?.trim() || null,
+          filing_year:    safeNum(fyear) || year,
+          filing_date:    fileDate?.trim() || null,
+          document_url:   docId ? `${BASE}/${year}/${docId}.pdf` : null,
+          filing_id:      docId,
+          jurisdiction:   'US',
+          chamber:        'House',
+          sourceUrl:      'https://disclosures-clerk.house.gov',
+        });
+      }
+      console.log(`[disclosures:US] ${year}: parsed ${lines.length} rows from TXT`);
+    }
   }
 
-  const records = hits.map(h => {
-    const s = h._source || {};
-    const memberId = safeStr(s.FilingID || h._id);
-    return {
-      id:           `us-house-fd-${memberId}`,
-      member_name:  [safeStr(s.First), safeStr(s.Last)].filter(Boolean).join(' ') || null,
-      first_name:   safeStr(s.First),
-      last_name:    safeStr(s.Last),
-      office:       safeStr(s.Office),
-      state_district: safeStr(s.StateDst),
-      filing_type:  safeStr(s.FilingType || s.DocumentType),
-      filing_year:  safeNum(s.FilingYear) || year,
-      document_url: s.URL ? `https://disclosures.house.gov${s.URL}` : null,
-      filing_id:    memberId,
-      jurisdiction: 'US',
-      chamber:      'House',
-      sourceUrl:    'https://disclosures.house.gov',
-    };
-  });
+  console.log(`[disclosures:US] ${allRecords.length} total House FD records`);
 
-  const total = resp.data?.hits?.total?.value ?? hits.length;
-  const result = saveRecords(OUTPUT_DISCLOSURES, 'us_house_disclosures', records, {
-    filingYear:     year,
-    totalAvailable: total,
-    sourceApi:      'https://efts.house.gov/EFTS-Public/query',
+  const result = saveRecords(OUTPUT_DISCLOSURES, 'us_house_disclosures', allRecords, {
+    yearsQueried: years,
+    sourceApi:    BASE,
   });
-  await writeAuditLog({ collection_name: COLLECTION_NAME_DISC, jurisdiction: 'US', data_pull_timestamp: _ts, source_endpoint: 'https://efts.house.gov/EFTS-Public/query', record_count: result.count, import_status: 'success', scheduler_tier: SCHEDULER_TIER });
+  await writeAuditLog({ collection_name: COLLECTION_NAME_DISC, jurisdiction: 'US', data_pull_timestamp: _ts, source_endpoint: BASE, record_count: result.count, import_status: 'success', scheduler_tier: SCHEDULER_TIER });
   return result;
   } catch (err) {
-    await writeAuditLog({ collection_name: COLLECTION_NAME_DISC, jurisdiction: 'US', data_pull_timestamp: _ts, source_endpoint: 'https://efts.house.gov/EFTS-Public/query', record_count: 0, import_status: 'failed', error_message: err.message, scheduler_tier: SCHEDULER_TIER });
+    await writeAuditLog({ collection_name: COLLECTION_NAME_DISC, jurisdiction: 'US', data_pull_timestamp: _ts, source_endpoint: BASE, record_count: 0, import_status: 'failed', error_message: err.message, scheduler_tier: SCHEDULER_TIER });
     throw err;
   }
 }
