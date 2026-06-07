@@ -30,6 +30,12 @@ const { fetchAllForeignAid }                      = require('./ingestion/foreign
 const { fetchAllGovernmentContracts }             = require('./ingestion/governmentContractsFetcher');
 const { fetchAllDepartmentExpenses }              = require('./ingestion/departmentExpensesFetcher');
 const { fetchNewsAlerts }                         = require('./ingestion/newsAlertsFetcher');
+const { fetchCarneyData }                         = require('./ingestion/carneyDataFetcher');
+const { fetchCarneyActivity }                     = require('./ingestion/carneyActivityFetcher');
+const { fetchCarneyProfile }                      = require('./ingestion/carneyProfileFetcher');
+const { fetchExecutiveActions }                   = require('./ingestion/executiveActionsFetcher');
+const { fetchCaLobbying }                         = require('./ingestion/caLobbyingFetcher');
+const { fetchCaConflictOfInterest }               = require('./ingestion/caConflictOfInterestFetcher');
 const { processGovStats }           = require('./processing/govStatsProcessor');
 const {
   uploadBills, uploadVotes, uploadMembers, uploadEfficiencyScores,
@@ -252,19 +258,29 @@ async function runWeeklyCycle() {
     console.log('\n[scheduler:weekly] Step 16/17 — Uploading department heads to Firebase...');
     deptHeadsCount = await uploadDepartmentHeads();
 
-    console.log('\n[scheduler:weekly] Step 17/17 — Cabinet validation: comparing live dept sites vs Firestore (CA / US / UK / AU)...');
+    console.log('\n[scheduler:weekly] Step 17/20 — Cabinet validation: comparing live dept sites vs Firestore (CA / US / UK / AU)...');
     const validationResult = await validateAllCabinets();
     cabinetChanges = validationResult?.us?.changed ?? 0;
+
+    console.log('\n[scheduler:weekly] Step 18/20 — Fetching Carney recent activity (pm.gc.ca press releases, speeches, votes, bills)...');
+    try { await fetchCarneyActivity(); } catch (e) { console.warn(`[scheduler:weekly] fetchCarneyActivity skipped: ${e.message}`); }
+
+    console.log('\n[scheduler:weekly] Step 19/20 — Fetching Carney profile sections (policy areas, advisors, term info, contact)...');
+    try { await fetchCarneyProfile(); } catch (e) { console.warn(`[scheduler:weekly] fetchCarneyProfile skipped: ${e.message}`); }
+
+    console.log('\n[scheduler:weekly] Step 20/20 — Fetching executive actions (CA / US / UK / AU)...');
+    try { await fetchExecutiveActions(); } catch (e) { console.warn(`[scheduler:weekly] fetchExecutiveActions skipped: ${e.message}`); }
 
     const total = memberCount + memberVotesCount + memberAttendanceCount + memberBiosCount + memberCommitteesCount + promisesCount + electionsCount + deptHeadsCount;
     console.log(`\n[scheduler:weekly] ✓ Done at ${new Date().toISOString()}`);
     console.log(`[scheduler:weekly]   members: ${memberCount}  votes: ${memberVotesCount}  attendance: ${memberAttendanceCount}  bios: ${memberBiosCount}  committees: ${memberCommitteesCount}`);
     console.log(`[scheduler:weekly]   promise_tracker: ${promisesCount}  elections: ${electionsCount}  department_heads: ${deptHeadsCount}  cabinet_changes_detected: ${cabinetChanges}`);
+    console.log(`[scheduler:weekly]   + carney_activity, carney_profile, executive_actions (write directly to Firestore)`);
 
     await writeSchedulerStatus('weekly', {
       startedAt,
       status:         'success',
-      collections:    ['members', 'member_votes', 'member_attendance', 'member_bios', 'member_committees', 'promise_tracker', 'elections', 'department_heads'],
+      collections:    ['members', 'member_votes', 'member_attendance', 'member_bios', 'member_committees', 'promise_tracker', 'elections', 'department_heads', 'member_recent_activity', 'leader_profile_data', 'executive_actions'],
       recordsUpdated: total,
       recordsSkipped: 0,
       aiCallsMade:    0,
@@ -411,11 +427,17 @@ async function runBiMonthlyCycle() {
     console.log('\n[scheduler:bimonthly] Step 6/7 — Uploading member stock trades to Firebase...');
     memberStockTradesCount = await uploadMemberStockTrades();
 
-    console.log('\n[scheduler:bimonthly] Step 7/7 — Fetching corporate affiliations (CA/US/UK/AU)...');
+    console.log('\n[scheduler:bimonthly] Step 7/9 — Fetching corporate affiliations (CA/US/UK/AU)...');
     await fetchAllCorporateAffiliations();
 
-    console.log('\n[scheduler:bimonthly] Step 7/7 — Uploading member corporate affiliations to Firebase...');
+    console.log('\n[scheduler:bimonthly] Step 8/9 — Uploading member corporate affiliations to Firebase...');
     memberCorporateAffiliationsCount = await uploadMemberCorporateAffiliations();
+
+    console.log('\n[scheduler:bimonthly] Step 8/9 — Fetching Carney-specific data (PWGSC expenses, OCL lobbying meetings, corporate affiliations, CIEC disclosures)...');
+    try { await fetchCarneyData(); } catch (e) { console.warn(`[scheduler:bimonthly] fetchCarneyData skipped: ${e.message}`); }
+
+    console.log('\n[scheduler:bimonthly] Step 9/9 — Fetching CA MP conflict-of-interest records (ourcommons.ca + CIEC)...');
+    try { await fetchCaConflictOfInterest(); } catch (e) { console.warn(`[scheduler:bimonthly] fetchCaConflictOfInterest skipped: ${e.message}`); }
 
     const total = disclosureCount + lobbyingCount + contractCount + corporateCount +
       memberDisclosureCount + memberLobbyingCount + memberExpensesCount +
@@ -424,11 +446,12 @@ async function runBiMonthlyCycle() {
     console.log(`[scheduler:bimonthly]   financial_disclosures: ${disclosureCount}  lobbying_activity: ${lobbyingCount}  contracts: ${contractCount}  corporate_affiliations: ${corporateCount}`);
     console.log(`[scheduler:bimonthly]   member_disclosures: ${memberDisclosureCount}  member_lobbying: ${memberLobbyingCount}  member_expenses: ${memberExpensesCount}`);
     console.log(`[scheduler:bimonthly]   member_stock_trades: ${memberStockTradesCount}  member_corporate_affiliations: ${memberCorporateAffiliationsCount}`);
+    console.log(`[scheduler:bimonthly]   + carney_data, ca_conflict_of_interest (write directly to Firestore)`);
 
     await writeSchedulerStatus('bimonthly', {
       startedAt,
       status:         'success',
-      collections:    ['financial_disclosures', 'lobbying_activity', 'contracts', 'corporate_affiliations', 'member_expenses', 'member_stock_trades', 'member_corporate_affiliations'],
+      collections:    ['financial_disclosures', 'lobbying_activity', 'contracts', 'corporate_affiliations', 'member_expenses', 'member_stock_trades', 'member_corporate_affiliations', 'member_disclosures', 'member_lobbying'],
       recordsUpdated: total,
       recordsSkipped: 0,
       aiCallsMade:    0,
@@ -475,12 +498,15 @@ async function runQuarterlyCycle() {
     if (skipped) {
       console.log('[scheduler:quarterly] ⏭ Data already fresh — skipping Firestore upload.');
     } else {
-      console.log('\n[scheduler:quarterly] Step 2/2 — Uploading to Firestore (member_disclosures + member_lobbying)...');
+      console.log('\n[scheduler:quarterly] Step 2/3 — Uploading to Firestore (member_disclosures + member_lobbying)...');
       memberDisclosureCount = await uploadMemberDisclosures();
       memberLobbyingCount   = await uploadMemberLobbying();
       console.log(`\n[scheduler:quarterly] ✓ Done at ${new Date().toISOString()}`);
       console.log(`[scheduler:quarterly]   member_disclosures: ${memberDisclosureCount}  member_lobbying: ${memberLobbyingCount}`);
     }
+
+    console.log('\n[scheduler:quarterly] Step 3/3 — Fetching CA MP lobbying communications (OCL bulk ZIP — all 343 MPs + senators)...');
+    try { await fetchCaLobbying(); } catch (e) { console.warn(`[scheduler:quarterly] fetchCaLobbying skipped: ${e.message}`); }
 
     await writeSchedulerStatus('quarterly', {
       startedAt,
@@ -974,6 +1000,9 @@ const RUN_BUDGET_ANALYTICS_NOW  = process.argv.includes('--budget-analytics');
 const RUN_GOV_STATS_NOW         = process.argv.includes('--gov-stats');
 const RUN_TARGETED_STATS_NOW    = process.argv.includes('--targeted-stats');
 const RUN_NEWS_ALERTS_NOW       = process.argv.includes('--news-alerts');
+const RUN_CARNEY_NOW            = process.argv.includes('--carney');
+const RUN_CA_LOBBYING_NOW       = process.argv.includes('--ca-lobbying');
+const RUN_CA_COI_NOW            = process.argv.includes('--ca-coi');
 
 // ⚠️  STARTUP-RUN GUARD
 // Without this flag, bare `node src/scheduler.js` registers cron schedules only.
@@ -1000,6 +1029,12 @@ if (RUN_NOW) {
     .then(() => runBudgetAnalyticsCycle())
     .then(() => runGovStatsCycle())
     .then(() => runNewsAlertsCycle())
+    .then(() => fetchCarneyData())
+    .then(() => fetchCarneyActivity())
+    .then(() => fetchCarneyProfile())
+    .then(() => fetchExecutiveActions())
+    .then(() => fetchCaLobbying())
+    .then(() => fetchCaConflictOfInterest())
     .then(() => process.exit(0))
     .catch(() => process.exit(1));
 } else if (RUN_DAILY_NOW) {
@@ -1029,6 +1064,18 @@ if (RUN_NOW) {
     .catch(err => { console.error('[scheduler:targeted-stats] ✗', err.message); process.exit(1); });
 } else if (RUN_NEWS_ALERTS_NOW) {
   runNewsAlertsCycle().then(() => process.exit(0)).catch(() => process.exit(1));
+} else if (RUN_CARNEY_NOW) {
+  Promise.all([fetchCarneyData(), fetchCarneyActivity(), fetchCarneyProfile(), fetchExecutiveActions()])
+    .then(() => { console.log('[scheduler:carney] ✓ All Carney fetchers complete'); process.exit(0); })
+    .catch(e => { console.error('[scheduler:carney] ✗', e.message); process.exit(1); });
+} else if (RUN_CA_LOBBYING_NOW) {
+  fetchCaLobbying()
+    .then(n => { console.log(`[scheduler:ca-lobbying] ✓ ${n} records written`); process.exit(0); })
+    .catch(e => { console.error('[scheduler:ca-lobbying] ✗', e.message); process.exit(1); });
+} else if (RUN_CA_COI_NOW) {
+  fetchCaConflictOfInterest()
+    .then(n => { console.log(`[scheduler:ca-coi] ✓ ${n} records written`); process.exit(0); })
+    .catch(e => { console.error('[scheduler:ca-coi] ✗', e.message); process.exit(1); });
 } else {
   console.log('\n╔══════════════════════════════════════════════════════╗');
   console.log('║         CIVIC VOICE ENGINE — SCHEDULER STARTED       ║');
@@ -1048,7 +1095,7 @@ if (RUN_NOW) {
   console.log(`  Daily (fetch-only) (bills+votes+elections, no Claude, zero credits)   → manual only`);
   console.log('\n  Flags: --now (all), --daily, --daily-fetch-only, --weekly, --monthly, --bimonthly, --quarterly,');
   console.log('         --expenses, --leader-expenses, --budget-analytics, --gov-stats, --targeted-stats,');
-  console.log('         --news-alerts');
+  console.log('         --news-alerts, --carney, --ca-lobbying, --ca-coi');
   console.log('         --run-on-start  (or env SCHEDULER_RUN_ON_START=true) — also fires all cycles immediately\n');
   console.log('  ⚠  No immediate run. Cycles start on their cron schedules only.');
   console.log('     Pass --run-on-start (or set SCHEDULER_RUN_ON_START=true) to fire all cycles now.\n');

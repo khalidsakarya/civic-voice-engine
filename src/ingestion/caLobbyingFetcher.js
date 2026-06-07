@@ -346,6 +346,10 @@ async function main() {
   return records.length;
 }
 
-main()
-  .then(n => { console.log(`[CA:LOB] ${n} records written.`); process.exit(0); })
-  .catch(e => { console.error('[CA:LOB] Fatal:', e.message); process.exit(1); });
+if (require.main === module) {
+  main()
+    .then(n => { console.log(`[CA:LOB] ${n} records written.`); process.exit(0); })
+    .catch(e => { console.error('[CA:LOB] Fatal:', e.message); process.exit(1); });
+}
+
+module.exports = { fetchCaLobbying: main };
