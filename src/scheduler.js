@@ -37,6 +37,7 @@ const { fetchExecutiveActions }                   = require('./ingestion/executi
 const { fetchCaLobbying }                         = require('./ingestion/caLobbyingFetcher');
 const { fetchCaConflictOfInterest }               = require('./ingestion/caConflictOfInterestFetcher');
 const { fetchCaHouseVotes }                       = require('./ingestion/caHouseVotesFetcher');
+const { fetchCaSenatevotes }                      = require('./ingestion/senateDataFetcher');
 const { processGovStats }           = require('./processing/govStatsProcessor');
 const {
   uploadBills, uploadVotes, uploadMembers, uploadEfficiencyScores,
@@ -1005,6 +1006,7 @@ const RUN_CARNEY_NOW            = process.argv.includes('--carney');
 const RUN_CA_LOBBYING_NOW       = process.argv.includes('--ca-lobbying');
 const RUN_CA_COI_NOW            = process.argv.includes('--ca-coi');
 const RUN_CA_HOUSE_VOTES_NOW    = process.argv.includes('--ca-house-votes');
+const RUN_CA_SENATE_VOTES_NOW   = process.argv.includes('--ca-senate-votes');
 
 // ⚠️  STARTUP-RUN GUARD
 // Without this flag, bare `node src/scheduler.js` registers cron schedules only.
@@ -1082,6 +1084,10 @@ if (RUN_NOW) {
   fetchCaHouseVotes()
     .then(n => { console.log(`[scheduler:ca-house-votes] ✓ ${n} MPs processed`); process.exit(0); })
     .catch(e => { console.error('[scheduler:ca-house-votes] ✗', e.message); process.exit(1); });
+} else if (RUN_CA_SENATE_VOTES_NOW) {
+  fetchCaSenatevotes()
+    .then(() => { console.log('[scheduler:ca-senate-votes] ✓ Done'); process.exit(0); })
+    .catch(e => { console.error('[scheduler:ca-senate-votes] ✗', e.message); process.exit(1); });
 } else {
   console.log('\n╔══════════════════════════════════════════════════════╗');
   console.log('║         CIVIC VOICE ENGINE — SCHEDULER STARTED       ║');

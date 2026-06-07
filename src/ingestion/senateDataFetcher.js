@@ -78,7 +78,11 @@ async function fetchVoteDetail(voteInfo) {
     const senatorLink = rowHtml.match(/href="[^"]*\/votes\/senator\/(\d+)[^"]*"[^>]*>([^<]+)<\/a>/);
     if (!senatorLink) continue;
 
-    const senatorName = senatorLink[2].trim(); // "LastName, FirstName" format
+    const rawSenatorName = senatorLink[2].trim(); // "LastName, FirstName" format, may have HTML entities
+    // Decode HTML entities (e.g. &#xC9; → É, &#xE9; → é)
+    const senatorName = rawSenatorName.replace(/&#x([0-9A-Fa-f]+);/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)))
+      .replace(/&#(\d+);/g, (_, dec) => String.fromCharCode(parseInt(dec, 10)))
+      .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>');
     const nameParts   = senatorName.split(',').map(s => s.trim());
     const fullName    = nameParts.length >= 2 ? `${nameParts[1]} ${nameParts[0]}` : senatorName;
 
@@ -242,7 +246,11 @@ async function run() {
   console.log('\n✅ Senate voting and attendance data is now live in Firestore\n');
 }
 
-run().then(() => process.exit(0)).catch(e => {
-  console.error('\n❌ Fatal:', e.message);
-  process.exit(1);
-});
+if (require.main === module) {
+  run().then(() => process.exit(0)).catch(e => {
+    console.error('\n❌ Fatal:', e.message);
+    process.exit(1);
+  });
+}
+
+module.exports = { fetchCaSenatevotes: run };
