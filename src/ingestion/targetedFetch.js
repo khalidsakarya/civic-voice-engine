@@ -5,9 +5,8 @@
  *
  * Canada (via bankofcanada.ca/valet + open.canada.ca CKAN + StatCan ZIP CSV):
  *   - CPI           Bank of Canada Valet series V41690973
- *   - unemployment  Statistics Canada LFS table 14-10-0017-01 (streaming ZIP/CSV)
- *                   NOTE: Bank of Canada Valet does not publish an unemployment series;
- *                   StatCan LFS is the primary and only programmatic source.
+ *   - (unemployment is NOT fetched here: it is owned by the dedicated, change-gated check in
+ *     ./caUnemploymentCheck.js — StatCan LFS table 14-10-0287-01, run around the 15th/22nd)
  *   - govtSpending  open.canada.ca CKAN datastore — Public Accounts of Canada
  *
  * Canada — Safety & Health (StatCan in-memory ZIP CSV + PHAC Health Infobase):
@@ -144,122 +143,6 @@ async function fetchCA_CPI() {
   return result('CA', 'cpi', val, 'index (2002=100, all-items)', latest.d,
     'Bank of Canada Valet API — CPI All-items, series V41690973 (sourced from Statistics Canada)',
     `https://www.bankofcanada.ca/valet/observations/${SERIES}/json`);
-}
-
-/**
- * CA Unemployment — Statistics Canada Labour Force Survey
- * Table 14-10-0017-01 (54 MB streaming ZIP/CSV)
- * NOTE: Bank of Canada Valet does not expose an unemployment rate series.
- *       StatCan LFS is the only government JSON/data API source.
- *       The ZIP uses compressedSize=0 (streaming format); inflateRaw feeds until error.
- */
-async function fetchCA_Unemployment() {
-  const resp = await axios({
-    method: 'GET',
-    url: 'https://www150.statcan.gc.ca/n1/tbl/csv/14100017-eng.zip',
-    responseType: 'stream',
-    timeout: 120000,
-    headers: { 'User-Agent': BROWSER_UA },
-  });
-
-  return new Promise((resolve, reject) => {
-    const source   = resp.data;
-    const inflater = zlib.createInflateRaw();
-
-    let zipBuf = Buffer.alloc(0), zipHeaderDone = false;
-    let compressedSize = 0, bytesWritten = 0;
-    let lineBuffer = '', csvHeader = null, colIdx = {};
-    let bestDate = '', bestValue = null, finished = false;
-
-    function finish(err) {
-      if (finished) return;
-      finished = true;
-      source.destroy();
-      if (err) return reject(err);
-      if (bestValue !== null) {
-        return resolve(result(
-          'CA', 'unemployment', bestValue,
-          '% (3-month moving average, seasonally adjusted)',
-          bestDate,
-          'Statistics Canada — Labour Force Survey, table 14-10-0017-01',
-          'https://www150.statcan.gc.ca/t1/tbl1/en/tv.action?pid=1410001701',
-          'BoC Valet has no unemployment series; StatCan LFS is primary source'
-        ));
-      }
-      reject(new Error('StatCan LFS: no Canada unemployment rate found'));
-    }
-
-    function processChunk(chunk) {
-      lineBuffer += chunk.toString('utf-8');
-      const lines = lineBuffer.split('\n');
-      lineBuffer  = lines.pop();
-      for (const rawLine of lines) {
-        const line = rawLine.trim();
-        if (!line) continue;
-        if (!csvHeader) {
-          csvHeader = line;
-          const cols = parseCSVLine(line.replace(/^\uFEFF/, ''));
-          colIdx = {
-            date:   cols.findIndex(c => c === 'REF_DATE'),
-            geo:    cols.findIndex(c => c === 'GEO'),
-            chars:  cols.findIndex(c => c.includes('Labour force characteristics')),
-            gender: cols.findIndex(c => c === 'Gender' || c === 'Sex'),
-            age:    cols.findIndex(c => c === 'Age group'),
-            value:  cols.findIndex(c => c === 'VALUE'),
-          };
-          continue;
-        }
-        if (!line.includes('Canada') || !line.includes('Unemployment rate') || !line.includes('15 years and over')) continue;
-        const cols   = parseCSVLine(line);
-        if (cols[colIdx.geo] !== 'Canada') continue;
-        if (!cols[colIdx.chars]?.includes('Unemployment rate')) continue;
-        const gender = cols[colIdx.gender];
-        if (gender !== 'Total - Gender' && gender !== 'Both sexes') continue;
-        if (cols[colIdx.age] !== '15 years and over') continue;
-        const val = cols[colIdx.value], date = cols[colIdx.date];
-        if (!val || val === '..' || !date) continue;
-        if (date > bestDate) { bestDate = date; bestValue = parseFloat(val); }
-      }
-    }
-
-    inflater.on('data', chunk => processChunk(chunk));
-    inflater.on('end',  () => finish(null));
-    inflater.on('error', () => finish(null)); // ZIP metadata after DEFLATE end
-
-    source.on('data', chunk => {
-      if (finished) return;
-      if (zipHeaderDone) {
-        if (compressedSize > 0) {
-          const remaining = compressedSize - bytesWritten;
-          if (remaining <= 0) return;
-          const toWrite = chunk.length <= remaining ? chunk : chunk.slice(0, remaining);
-          inflater.write(toWrite); bytesWritten += toWrite.length;
-          if (bytesWritten >= compressedSize) inflater.end();
-        } else {
-          inflater.write(chunk); bytesWritten += chunk.length;
-        }
-        return;
-      }
-      zipBuf = Buffer.concat([zipBuf, chunk]);
-      if (zipBuf.length < 30) return;
-      if (zipBuf.readUInt32LE(0) !== 0x04034b50) { finish(new Error('Not a ZIP')); return; }
-      const fnLen = zipBuf.readUInt16LE(26), extLen = zipBuf.readUInt16LE(28);
-      compressedSize = zipBuf.readUInt32LE(18);
-      const dataStart = 30 + fnLen + extLen;
-      if (zipBuf.length < dataStart) return;
-      zipHeaderDone = true;
-      const initial = zipBuf.slice(dataStart); zipBuf = null;
-      if (compressedSize > 0) {
-        const toWrite = initial.length <= compressedSize ? initial : initial.slice(0, compressedSize);
-        inflater.write(toWrite); bytesWritten += toWrite.length;
-        if (bytesWritten >= compressedSize) inflater.end();
-      } else {
-        inflater.write(initial); bytesWritten += initial.length;
-      }
-    });
-    source.on('end',   () => { if (!finished && zipHeaderDone) inflater.end(); else finish(new Error('Stream ended before ZIP header')); });
-    source.on('error', err => finish(err));
-  });
 }
 
 /**
@@ -3614,7 +3497,6 @@ async function fetchAU_MinWageGap() {
 
 const FETCHERS = [
   { label: 'CA  CPI            (Bank of Canada Valet V41690973)',          fn: fetchCA_CPI },
-  { label: 'CA  Unemployment    (StatCan LFS 14-10-0017-01, stream ZIP)',  fn: fetchCA_Unemployment },
   { label: 'CA  Govt Spending   (open.canada.ca CKAN Public Accounts)',    fn: fetchCA_GovtSpending },
   { label: 'CA  Crime Rate      (StatCan CSI 35-10-0026-01)',              fn: fetchCA_CrimeRate },
   { label: 'CA  Drug Overdoses  (PHAC Health Infobase SubstanceHarms)',    fn: fetchCA_DrugOverdoses },

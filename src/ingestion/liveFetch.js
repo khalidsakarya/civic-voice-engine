@@ -22,6 +22,7 @@ const path   = require('path');
 const zlib   = require('zlib');
 const { promisify } = require('util');
 const inflateRaw = promisify(zlib.inflateRaw);
+const { fetchCaUnemployment, toLiveRecord } = require('./caUnemploymentMonthly');
 
 const OUTPUT_DIR = path.resolve(__dirname, '../../output/socialstats');
 const TIMEOUT_MS = 25000;
@@ -233,146 +234,17 @@ async function fetchUSASpending() {
   return [];
 }
 
-// ─── CA: StatCan LFS — unemployment rate (table 14-10-0017-01, streaming ZIP) ─
+// ─── CA: StatCan LFS — unemployment rate (table 14-10-0287-01, monthly, seasonally adjusted, WDS API) ─
+//
+// Previously table 14-10-0017-01 via a 54 MB streaming ZIP. Content now comes from the shared
+// ./caUnemploymentMonthly module (series identity verified against StatCan metadata), the same
+// module the scheduled targeted fetch uses, so every writer of social_stats/CA_unemploymentRate
+// stores the identical document. `docOverride` carries that document to the uploaders.
 
 async function fetchCALFS() {
-  // Table 14-10-0017-01: Labour force characteristics by province/territory,
-  // three-month moving average, seasonally adjusted. 54 MB ZIP.
-  // Streams the ZIP to avoid loading the full decompressed CSV (~500 MB) into memory.
-  // Reads compressed-size from the local file header so we feed inflateRaw only the
-  // exact compressed bytes and cleanly end the stream, avoiding spurious zlib errors
-  // from the ZIP central directory that follows.
-  const resp = await axios({
-    method: 'GET',
-    url: 'https://www150.statcan.gc.ca/n1/tbl/csv/14100017-eng.zip',
-    responseType: 'stream',
-    timeout: 120000,
-    headers: { 'User-Agent': BROWSER_UA },
-  });
-
-  return new Promise((resolve, reject) => {
-    const source   = resp.data;
-    const inflater = zlib.createInflateRaw();
-
-    let zipBuf         = Buffer.alloc(0);
-    let zipHeaderDone  = false;
-    let compressedSize = 0;
-    let bytesWritten   = 0;
-    let lineBuffer     = '';
-    let csvHeader      = null;
-    let colIdx         = {};
-    let bestDate = '', bestValue = null;
-    let finished = false;
-
-    function finish(err) {
-      if (finished) return;
-      finished = true;
-      source.destroy();
-      if (err) return reject(err);
-      if (bestValue !== null) {
-        console.log(`  [CA] unemploymentRate (StatCan LFS): ${bestValue}% (${bestDate})`);
-        resolve([record('CA', 'unemploymentRate', bestValue,
-          '% (3-month moving average, seasonally adjusted)',
-          bestDate,
-          'Statistics Canada — Labour Force Survey, table 14-10-0017-01',
-          'https://www150.statcan.gc.ca/t1/tbl1/en/tv.action?pid=1410001701')]);
-      } else {
-        reject(new Error('StatCan LFS: no Canada unemployment rate found in stream'));
-      }
-    }
-
-    function processCSVChunk(chunk) {
-      lineBuffer += chunk.toString('utf-8');
-      const lines = lineBuffer.split('\n');
-      lineBuffer = lines.pop(); // hold incomplete last line
-      for (const rawLine of lines) {
-        const line = rawLine.trim();
-        if (!line) continue;
-        if (!csvHeader) {
-          csvHeader = line;
-          const cols = parseCSVLine(line.replace(/^\uFEFF/, ''));
-          colIdx = {
-            date:   cols.findIndex(c => c === 'REF_DATE'),
-            geo:    cols.findIndex(c => c === 'GEO'),
-            chars:  cols.findIndex(c => c.includes('Labour force characteristics')),
-            gender: cols.findIndex(c => c === 'Gender' || c === 'Sex'),
-            age:    cols.findIndex(c => c === 'Age group'),
-            value:  cols.findIndex(c => c === 'VALUE'),
-          };
-          continue;
-        }
-        // Quick substring pre-filter before full CSV parse
-        if (!line.includes('Canada')) continue;
-        if (!line.includes('Unemployment rate')) continue;
-        if (!line.includes('15 years and over')) continue;
-        const cols = parseCSVLine(line);
-        if (cols[colIdx.geo] !== 'Canada') continue;
-        if (!cols[colIdx.chars]?.includes('Unemployment rate')) continue;
-        const gender = cols[colIdx.gender];
-        if (gender !== 'Total - Gender' && gender !== 'Both sexes') continue;
-        if (cols[colIdx.age] !== '15 years and over') continue;
-        const val  = cols[colIdx.value];
-        const date = cols[colIdx.date];
-        if (!val || val === '..' || !date) continue;
-        if (date > bestDate) { bestDate = date; bestValue = parseFloat(val); }
-      }
-    }
-
-    inflater.on('data', chunk => processCSVChunk(chunk));
-    inflater.on('end',  () => finish(null));
-    inflater.on('error', err => finish(null)); // error after DEFLATE end = ZIP metadata bytes; use whatever we found
-
-    source.on('data', chunk => {
-      if (finished) return;
-
-      // Once ZIP header is parsed, feed bytes to inflater
-      if (zipHeaderDone) {
-        if (compressedSize > 0) {
-          // Known size: feed exactly compressedSize bytes then end cleanly
-          const remaining = compressedSize - bytesWritten;
-          if (remaining <= 0) return;
-          const toWrite = chunk.length <= remaining ? chunk : chunk.slice(0, remaining);
-          inflater.write(toWrite);
-          bytesWritten += toWrite.length;
-          if (bytesWritten >= compressedSize) inflater.end();
-        } else {
-          // compressedSize=0 (streaming/data-descriptor ZIP): feed until inflater errors
-          inflater.write(chunk);
-          bytesWritten += chunk.length;
-        }
-        return;
-      }
-
-      // Buffer until we have enough bytes to parse the ZIP local file header
-      zipBuf = Buffer.concat([zipBuf, chunk]);
-      if (zipBuf.length < 30) return;
-
-      if (zipBuf.readUInt32LE(0) !== 0x04034b50) { finish(new Error('StatCan LFS: not a ZIP file')); return; }
-      const fnLen    = zipBuf.readUInt16LE(26);
-      const extLen   = zipBuf.readUInt16LE(28);
-      compressedSize = zipBuf.readUInt32LE(18); // 0 = streaming ZIP with data descriptor
-      const dataStart = 30 + fnLen + extLen;
-      if (zipBuf.length < dataStart) return; // wait for more data
-
-      zipHeaderDone = true;
-      const initial   = zipBuf.slice(dataStart);
-      zipBuf = null;
-
-      if (compressedSize > 0) {
-        const toWrite = initial.length <= compressedSize ? initial : initial.slice(0, compressedSize);
-        inflater.write(toWrite);
-        bytesWritten += toWrite.length;
-        if (bytesWritten >= compressedSize) inflater.end();
-      } else {
-        // Streaming ZIP: feed all initial bytes; subsequent chunks handled above
-        inflater.write(initial);
-        bytesWritten += initial.length;
-      }
-    });
-
-    source.on('end',   () => { if (!finished && zipHeaderDone) inflater.end(); else finish(new Error('Stream ended before ZIP header')); });
-    source.on('error', err => finish(err));
-  });
+  const built = await fetchCaUnemployment();
+  console.log(`  [CA] unemploymentRate (StatCan LFS 14-10-0287-01, seasonally adjusted): ${built.latest.value}% (${built.latest.period})`);
+  return [toLiveRecord(built, FETCHED_AT)];
 }
 
 // ─── CA: StatCan NHPI — New Housing Price Index (table 18-10-0205-01, 344 KB ZIP) ─
@@ -863,7 +735,7 @@ async function main() {
   console.log('[CA] Bank of Canada Valet — exchange rates & interest rates');
   try { allRecords.push(...await fetchBoCRates()); } catch (e) { console.error(`  [CA] BoC fetch error: ${e.message}`); }
 
-  console.log('\n[CA] StatCan LFS — unemployment rate (table 14-10-0017-01, streaming ZIP)');
+  console.log('\n[CA] StatCan LFS — unemployment rate (table 14-10-0287-01, monthly, seasonally adjusted)');
   try { allRecords.push(...await fetchCALFS()); } catch (e) { console.error(`  [CA] StatCan LFS error: ${e.message}`); }
 
   console.log('\n[CA] StatCan NHPI — new housing price index (table 18-10-0205-01)');

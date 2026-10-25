@@ -14,7 +14,7 @@ Requires Key: Yes / No / Optional
 
 | Stat | Agency | URL | API | Format | Latest Date | Key |
 |------|--------|-----|-----|--------|-------------|-----|
-| **Unemployment** | Statistics Canada — Labour Force Survey, table 14-10-0017-01 | https://www150.statcan.gc.ca/n1/tbl/csv/14100017-eng.zip | ✅ | CSV | 2026-02 | No |
+| **Unemployment** | Statistics Canada — Labour Force Survey, table 14-10-0287-01 (monthly, seasonally adjusted; WDS API, series identity verified). Replaces table 14-10-0017-01, which is *unadjusted* and was mislabelled as seasonally adjusted. Refreshed by a change-gated check (`npm run scheduler:ca-unemployment`; cron 06:00 on the 15th and 22nd, `CRON_CA_UNEMPLOYMENT`) that writes only when StatCan's reporting month advances. | https://www150.statcan.gc.ca/t1/tbl1/en/tv.action?pid=1410028701 | ✅ | JSON (WDS) | 2026-09 | No |
 | **CPI / Inflation** | Statistics Canada — CPI, table 18-10-0004-01 | https://www150.statcan.gc.ca/n1/tbl/csv/18100004-eng.zip | ✅ | CSV | 2026-02 | No |
 | **CPI / Inflation** | Bank of Canada Valet API (CPIX series ATOM_V41693242) | https://www.bankofcanada.ca/valet/observations/ATOM_V41693242/json | ✅ | JSON | 2026-02 | No |
 | **Home Prices** | Statistics Canada — New Housing Price Index, table 18-10-0205-01 | https://www150.statcan.gc.ca/n1/tbl/csv/18100205-eng.zip | ✅ | CSV | 2026-02 | No |

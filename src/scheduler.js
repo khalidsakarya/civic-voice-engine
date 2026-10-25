@@ -11,6 +11,7 @@ const { buildLeaderboard }          = require('./processing/leaderLeaderboard');
 const { detectLeaderAnomalies }     = require('./processing/leaderAnomalyDetector');
 const { fetchAllBudgetAnalytics }   = require('./ingestion/budgetAnalyticsFetcher');
 const { main: runTargetedFetch }    = require('./ingestion/targetedFetch');
+const { runCaUnemploymentCheck }    = require('./ingestion/caUnemploymentCheck');
 const { fetchAllGovStats }          = require('./ingestion/govStatsFetcher');
 const { fetchAllMemberData }        = require('./ingestion/memberDisclosureFetcher');
 const { fetchAllMemberVotes }       = require('./ingestion/memberVotesFetcher');
@@ -68,6 +69,11 @@ const LEADER_EXPENSE_SCHEDULE   = process.env.CRON_LEADER_EXPENSE   || '0 2 * * 
 const BUDGET_ANALYTICS_SCHEDULE = process.env.CRON_BUDGET_ANALYTICS || '0 6 1 * *';    // 06:00 on the 1st
 const GOV_STATS_SCHEDULE        = process.env.CRON_GOV_STATS        || '0 7 1 1,4,7,10 *'; // 07:00 on Jan/Apr/Jul/Oct 1st
 const NEWS_ALERTS_SCHEDULE      = process.env.CRON_NEWS_ALERTS      || '0 */6 * * *';       // every 6 hours
+// Canada unemployment: StatCan publishes the Labour Force Survey partway through the month (Sep 2026
+// data came out on 2026-10-09), AFTER the monthly cycle's 1st-of-month run. Check on the 15th, with a
+// second pass on the 22nd in case a release is late. The check only writes when the official reporting
+// period advances, so extra runs are harmless. Override with CRON_CA_UNEMPLOYMENT.
+const CA_UNEMPLOYMENT_SCHEDULE  = process.env.CRON_CA_UNEMPLOYMENT  || '0 6 15,22 * *';     // 06:00 on the 15th and 22nd
 
 // ─── Source lists ─────────────────────────────────────────────────────────────
 
@@ -987,6 +993,22 @@ async function processBillsFromOutput() {
   return { total: allBills.length, succeeded, failed };
 }
 
+// ─── Canada unemployment (change-gated; see ingestion/caUnemploymentCheck.js) ────────────────────
+// Not part of the monthly cycle and not part of --now / --run-on-start. Safe to run at any time and
+// any number of times: it writes social_stats/CA_unemploymentRate ONLY if StatCan's latest reporting
+// month is newer than the stored one.
+async function runCaUnemploymentCycle() {
+  console.log('\n[scheduler:ca-unemployment] Checking StatCan for a newer Canada unemployment month...');
+  try {
+    const { getDb } = require('./firebase/client');
+    const { writeAuditLog } = require('./firebase/auditLog');
+    return await runCaUnemploymentCheck({ getDb, writeAudit: writeAuditLog });
+  } catch (err) {
+    console.error('[scheduler:ca-unemployment] ✗', err.message);
+    return { status: 'FAILED', error: err.message };
+  }
+}
+
 // ─── Start ────────────────────────────────────────────────────────────────────
 
 const RUN_NOW                   = process.argv.includes('--now');
@@ -1007,6 +1029,7 @@ const RUN_CA_LOBBYING_NOW       = process.argv.includes('--ca-lobbying');
 const RUN_CA_COI_NOW            = process.argv.includes('--ca-coi');
 const RUN_CA_HOUSE_VOTES_NOW    = process.argv.includes('--ca-house-votes');
 const RUN_CA_SENATE_VOTES_NOW   = process.argv.includes('--ca-senate-votes');
+const RUN_CA_UNEMPLOYMENT_NOW   = process.argv.includes('--ca-unemployment');
 
 // ⚠️  STARTUP-RUN GUARD
 // Without this flag, bare `node src/scheduler.js` registers cron schedules only.
@@ -1088,6 +1111,9 @@ if (RUN_NOW) {
   fetchCaSenatevotes()
     .then(() => { console.log('[scheduler:ca-senate-votes] ✓ Done'); process.exit(0); })
     .catch(e => { console.error('[scheduler:ca-senate-votes] ✗', e.message); process.exit(1); });
+} else if (RUN_CA_UNEMPLOYMENT_NOW) {
+  runCaUnemploymentCycle()
+    .then(r => process.exit(r && ['FETCH_FAILED', 'WRITE_FAILED', 'FAILED'].includes(r.status) ? 1 : 0));
 } else {
   console.log('\n╔══════════════════════════════════════════════════════╗');
   console.log('║         CIVIC VOICE ENGINE — SCHEDULER STARTED       ║');
@@ -1104,10 +1130,11 @@ if (RUN_NOW) {
   console.log(`  Budget/Analytics (federal budgets, GDP, unemployment, crime) → ${BUDGET_ANALYTICS_SCHEDULE}`);
   console.log(`  Gov Stats        (revenue, debt, deficit, ODA, grants)        → ${GOV_STATS_SCHEDULE}`);
   console.log(`  News Alerts      (CA gov announcements, Claude Haiku enrich)  → ${NEWS_ALERTS_SCHEDULE}`);
+  console.log(`  CA Unemployment  (StatCan LFS 14-10-0287-01, change-gated)    → ${CA_UNEMPLOYMENT_SCHEDULE}`);
   console.log(`  Daily (fetch-only) (bills+votes+elections, no Claude, zero credits)   → manual only`);
   console.log('\n  Flags: --now (all), --daily, --daily-fetch-only, --weekly, --monthly, --bimonthly, --quarterly,');
   console.log('         --expenses, --leader-expenses, --budget-analytics, --gov-stats, --targeted-stats,');
-  console.log('         --news-alerts, --carney, --ca-lobbying, --ca-coi');
+  console.log('         --news-alerts, --carney, --ca-lobbying, --ca-coi, --ca-unemployment');
   console.log('         --run-on-start  (or env SCHEDULER_RUN_ON_START=true) — also fires all cycles immediately\n');
   console.log('  ⚠  No immediate run. Cycles start on their cron schedules only.');
   console.log('     Pass --run-on-start (or set SCHEDULER_RUN_ON_START=true) to fire all cycles now.\n');
@@ -1122,6 +1149,7 @@ if (RUN_NOW) {
   cron.schedule(BUDGET_ANALYTICS_SCHEDULE, () => runBudgetAnalyticsCycle());
   cron.schedule(GOV_STATS_SCHEDULE,        () => runGovStatsCycle());
   cron.schedule(NEWS_ALERTS_SCHEDULE,      () => runNewsAlertsCycle());
+  cron.schedule(CA_UNEMPLOYMENT_SCHEDULE,  () => runCaUnemploymentCycle());
 
   if (SCHEDULER_RUN_ON_START) {
     console.log('[scheduler] --run-on-start / SCHEDULER_RUN_ON_START=true detected — running all cycles immediately.');

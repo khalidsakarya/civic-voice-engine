@@ -3,6 +3,9 @@ const path = require('path');
 const { getDb } = require('./client');
 
 const OUTPUT_ROOT = path.resolve(__dirname, '../../output');
+// Canada unemployment: single source of truth shared with the scheduled targeted fetch and live:fetch.
+const CA_UNEMPLOYMENT = require('../ingestion/caUnemploymentMonthly');
+
 const BATCH_SIZE = 400; // Firestore max is 500 ops per batch
 
 /**
@@ -1315,8 +1318,11 @@ const CANONICAL_COUNTRIES = ['CA', 'US', 'UK', 'AU'];
 const CANONICAL_STAT_DEFS = {
 
   unemploymentRate: {
-    CA: { source: 'Statistics Canada — Labour Force Survey, table 14-10-0017-01',
-          sourceUrl: 'https://www150.statcan.gc.ca/t1/tbl1/en/tv.action?pid=1410001701',
+    // Table 14-10-0287-01 (monthly, seasonally adjusted) is the authoritative Canada unemployment
+    // series. Source text and URL come from the shared module that the scheduled targeted fetch and
+    // live:fetch also use, so every writer of CA_unemploymentRate stores the same source metadata.
+    CA: { source: CA_UNEMPLOYMENT.SOURCE_LABEL,
+          sourceUrl: CA_UNEMPLOYMENT.SOURCE_URL,
           liveKey: 'unemploymentRate' },
     US: { source: 'Bureau of Labor Statistics — CPS series LNS14000000',
           sourceUrl: 'https://api.bls.gov/publicAPI/v1/timeseries/data/LNS14000000',
@@ -1493,6 +1499,11 @@ async function uploadSocialStatsCanonical() {
 
   const { records } = JSON.parse(fs.readFileSync(path.join(dir, liveFiles[liveFiles.length - 1])));
 
+  // Pre-flight, BEFORE the wipe below: refuse a stale live_fetch file whose Canada unemployment
+  // predates the 14-10-0287-01 module (or is missing), so we never wipe the collection and then
+  // write a wrong or null value for the card.
+  CA_UNEMPLOYMENT.assertCurrentCaUnemploymentRecord(records, { requirePresent: true });
+
   // Index live records by country+metric for O(1) lookup
   const liveIndex = {};
   for (const r of (records || [])) {
@@ -1521,15 +1532,7 @@ async function uploadSocialStatsCanonical() {
       const live  = def.liveKey ? liveIndex[`${country}_${def.liveKey}`] : null;
       const docId = sanitizeId(`${country}_${statName}`);
 
-      const doc = stripUndefined({
-        country,
-        statName,
-        value:     live?.value  ?? null,
-        source:    def.source,
-        sourceUrl: def.sourceUrl,
-        updated:   live?.date   ?? null,
-        last_updated: now,
-      });
+      const doc = buildCanonicalDoc(country, statName, def, live, now);
 
       writeBatch.set(db.collection('social_stats').doc(docId), doc);
       count++;
@@ -1558,6 +1561,68 @@ const LIVE_STAT_UPDATE_FREQ = {
   federalAgencySpending: 'Monthly (fiscal period, USAspending)',
   cpiInflation:          'Monthly',
 };
+
+// ── social_stats document builders ──────────────────────────────────────────
+// Pure functions so the exact document each writer produces can be tested without Firestore.
+// A record that carries `docOverride` (currently only Canada's unemployment rate, built by
+// ../ingestion/caUnemploymentMonthly) supplies its COMPLETE document, so the scheduled targeted
+// fetch, live:fetch and the canonical upload can never disagree about CA_unemploymentRate.
+// Every other record is built exactly as it always was.
+
+function buildCanonicalDoc(country, statName, def, live, now) {
+  if (live && live.docOverride) {
+    return stripUndefined(CA_UNEMPLOYMENT.docFromOverride(live.docOverride, now));
+  }
+  return stripUndefined({
+    country,
+    statName,
+    value:     live?.value  ?? null,
+    source:    def.source,
+    sourceUrl: def.sourceUrl,
+    updated:   live?.date   ?? null,
+    last_updated: now,
+  });
+}
+
+function buildLiveDoc(r, fetchedAt, now) {
+  const docId = sanitizeId(`${r.country}_${r.metric}`);
+  if (r.docOverride) {
+    return stripUndefined({ id: docId, ...CA_UNEMPLOYMENT.docFromOverride(r.docOverride, now) });
+  }
+  const doc   = stripUndefined({
+    id:              docId,
+    country:         r.country,
+    statName:        r.metric,
+    value:           r.value  ?? null,
+    unit:            r.unit   ?? null,
+    date:            r.date   != null ? String(r.date) : null,
+    sourceUrl:       r.sourceUrl ?? null,
+    source:          r.source    ?? null,
+    updateFrequency: LIVE_STAT_UPDATE_FREQ[r.metric] ?? null,
+    fetchedAt:       fetchedAt ?? r.fetchedAt ?? null,
+    last_updated:    now,
+  });
+  // Preserve topAgencies for federalAgencySpending
+  if (r.topAgencies) doc.topAgencies = r.topAgencies;
+  return doc;
+}
+
+function buildTargetedDoc(r, fetchedAt, now) {
+  // NB: Canada's unemployment rate is deliberately NOT written by this (monthly, scheduled) path.
+  // It is owned by the dedicated change-gated check (src/ingestion/caUnemploymentCheck.js).
+  return stripUndefined({
+    country:      r.country,
+    statName:     r.stat,
+    value:        r.value     ?? null,
+    unit:         r.unit      ?? null,
+    date:         r.date  != null ? String(r.date) : null,
+    source:       r.source    ?? null,
+    sourceUrl:    r.sourceUrl ?? null,
+    notes:        r.notes     ?? null,
+    fetchedAt:    fetchedAt ?? r.fetchedAt ?? null,
+    last_updated: now,
+  });
+}
 
 /**
  * Upload live-fetched social stats to the `social_stats` collection.
@@ -1594,26 +1659,11 @@ async function uploadLiveStats() {
     return 0;
   }
 
+  // Refuse a stale live_fetch file whose Canada unemployment predates the 14-10-0287-01 module.
+  CA_UNEMPLOYMENT.assertCurrentCaUnemploymentRecord(records, { requirePresent: false });
+
   const now  = new Date().toISOString();
-  const docs = records.map(r => {
-    const docId = sanitizeId(`${r.country}_${r.metric}`);
-    const doc   = stripUndefined({
-      id:              docId,
-      country:         r.country,
-      statName:        r.metric,
-      value:           r.value  ?? null,
-      unit:            r.unit   ?? null,
-      date:            r.date   != null ? String(r.date) : null,
-      sourceUrl:       r.sourceUrl ?? null,
-      source:          r.source    ?? null,
-      updateFrequency: LIVE_STAT_UPDATE_FREQ[r.metric] ?? null,
-      fetchedAt:       fetchedAt ?? r.fetchedAt ?? null,
-      last_updated:    now,
-    });
-    // Preserve topAgencies for federalAgencySpending
-    if (r.topAgencies) doc.topAgencies = r.topAgencies;
-    return doc;
-  });
+  const docs = records.map(r => buildLiveDoc(r, fetchedAt, now));
 
   const count = await batchWrite('social_stats', docs);
   console.log(`[firebase] ✓ social_stats (live): ${count} documents written`);
@@ -1662,18 +1712,7 @@ async function uploadTargetedStats() {
     if (!r.ok) continue; // skip failed fetches
     const docId = sanitizeId(`${r.country}_${r.stat}`);
     const ref   = db.collection('social_stats').doc(docId);
-    batch.set(ref, stripUndefined({
-      country:      r.country,
-      statName:     r.stat,
-      value:        r.value     ?? null,
-      unit:         r.unit      ?? null,
-      date:         r.date  != null ? String(r.date) : null,
-      source:       r.source    ?? null,
-      sourceUrl:    r.sourceUrl ?? null,
-      notes:        r.notes     ?? null,
-      fetchedAt:    fetchedAt ?? r.fetchedAt ?? null,
-      last_updated: now,
-    }));
+    batch.set(ref, buildTargetedDoc(r, fetchedAt, now));
     count++;
   }
 
@@ -1980,6 +2019,11 @@ module.exports = {
   uploadLiveStats,
   uploadSocialStatsCanonical,
   uploadTargetedStats,
+  // exported for tests (pure; no Firestore)
+  CANONICAL_STAT_DEFS,
+  buildCanonicalDoc,
+  buildLiveDoc,
+  buildTargetedDoc,
   uploadDepartmentBudgets,
   uploadPromiseTracker,
   uploadElections,
