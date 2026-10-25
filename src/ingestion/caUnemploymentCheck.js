@@ -197,10 +197,20 @@ async function runCaUnemploymentCheck({
   }
 
   // 3b. REAL RUN: compare, back up (if replacing), and write — atomically.
+  // Firestore re-runs this callback when the commit hits contention. Every attempt re-reads the document,
+  // so the backup taken in the attempt that finally COMMITS is the exact version that was overwritten
+  // (a commit only succeeds if the document is unchanged since that attempt's read). Backups written by
+  // earlier attempts describe versions that were never overwritten: they are kept (never deleted by us)
+  // but reported as superseded so nobody restores one by mistake.
   let decision;
   let backup = null;
+  let attempts = 0;
+  const attemptBackups = [];
+  const supersededOf = () => attemptBackups.filter((b) => b !== backup);
   try {
     decision = await db.runTransaction(async (tx) => {
+      attempts += 1;
+      const attempt = attempts;
       backup = null; // a retried attempt starts clean
       const snap = await tx.get(ref);
       const existing = snap.exists ? snap.data() : null;
@@ -210,7 +220,8 @@ async function runCaUnemploymentCheck({
           // Preserve the COMPLETE original BEFORE replacing it; if this fails the transaction is abandoned.
           try {
             if (typeof writeBackup !== 'function') throw new Error('no backup writer is configured');
-            backup = await writeBackup({ collection: COLLECTION, docId, data: existing, projectId });
+            backup = await writeBackup({ collection: COLLECTION, docId, data: existing, projectId, attempt });
+            attemptBackups.push(backup);
           } catch (e) {
             throw new BackupError(clip(e));
           }
@@ -223,18 +234,24 @@ async function runCaUnemploymentCheck({
     const error = clip(err);
     const status = err instanceof BackupError ? 'BACKUP_FAILED' : 'WRITE_FAILED';
     logger.warn(status === 'BACKUP_FAILED' ? `[ca-unemployment] NOT written — the pre-write backup failed: ${error}` : `[ca-unemployment] write failed: ${error}`);
+    // Nothing was committed, so NO backup file represents an overwritten version; list what was left behind.
+    const left = attemptBackups.map((b) => b.path);
+    if (left.length) logger.warn(`[ca-unemployment] backup file(s) from this failed run (the document was NOT replaced; none of them is a recovery point): ${left.join(', ')}`);
     await audit(auditEntry('failed', { error_message: status === 'BACKUP_FAILED' ? `backup failed: ${error}` : error }));
-    return { status, docId, projectId, error, dryRun: false };
+    return { status, docId, projectId, error, attempts, unusedBackups: attemptBackups, dryRun: false };
   }
 
   if (decision.action === 'skip') {
     logger.log(`[ca-unemployment] no change — ${decision.reason} (stored ${decision.storedPeriod}, StatCan latest ${decision.newPeriod})`);
-    return { status: 'SKIPPED', reason: decision.reason, storedPeriod: decision.storedPeriod, newPeriod: decision.newPeriod, docId, projectId, dryRun: false };
+    if (attemptBackups.length) logger.warn(`[ca-unemployment] nothing was overwritten after a retry; backup file(s) from earlier attempt(s) are NOT recovery points: ${attemptBackups.map((b) => b.path).join(', ')}`);
+    return { status: 'SKIPPED', reason: decision.reason, storedPeriod: decision.storedPeriod, newPeriod: decision.newPeriod, docId, projectId, attempts, unusedBackups: attemptBackups, dryRun: false };
   }
 
   logger.log(`[ca-unemployment] ✓ wrote ${COLLECTION}/${docId}: ${built.data.value} for ${built.data.updated} (${decision.reason}; previously ${decision.storedPeriod || 'none'})${backup ? `; original saved to ${backup.path}` : ''}`);
+  const superseded = supersededOf();
+  if (superseded.length) logger.warn(`[ca-unemployment] the transaction retried (${attempts} attempts). The recovery point is ONLY ${backup ? backup.path : 'n/a'}; these earlier-attempt backups hold versions that were never overwritten and must NOT be restored: ${superseded.map((b) => b.path).join(', ')}`);
   await audit(auditEntry('success'));
-  return { status: 'WRITTEN', reason: decision.reason, storedPeriod: decision.storedPeriod, newPeriod: decision.newPeriod, docId, projectId, backup, dryRun: false };
+  return { status: 'WRITTEN', reason: decision.reason, storedPeriod: decision.storedPeriod, newPeriod: decision.newPeriod, docId, projectId, backup, attempts, supersededBackups: superseded, dryRun: false };
 }
 
 module.exports = {

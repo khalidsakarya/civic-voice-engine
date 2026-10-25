@@ -89,7 +89,7 @@ function assertNoCredentialMaterial(text) {
  * { path, bytes, sha256 }, or throws (and the caller must then stop).
  */
 function createLocalBackupWriter({ dir = resolveBackupDir(), now = () => new Date() } = {}) {
-  return async function writeBackup({ collection, docId, data, projectId = null }) {
+  return async function writeBackup({ collection, docId, data, projectId = null, attempt = null }) {
     const resolvedDir = path.resolve(dir);
     const repo = findGitRepoAbove(resolvedDir);
     if (repo) throw new Error(`backup refused: ${resolvedDir} is inside the git repository at ${repo}; backups must live outside any repository`);
@@ -102,6 +102,7 @@ function createLocalBackupWriter({ dir = resolveBackupDir(), now = () => new Dat
       backed_up_at: takenAt,
       firebase_project: projectId,
       written_by: 'civic-voice-engine src/ingestion/caUnemploymentBackup.js',
+      ...(attempt === null ? {} : { transaction_attempt: attempt }), // which transaction attempt read this version
       data: serializeFirestoreValue(data),
     };
     const text = JSON.stringify(payload, null, 2) + '\n';

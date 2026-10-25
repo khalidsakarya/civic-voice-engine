@@ -267,6 +267,135 @@ test('SKIPS: same-month and older-month data write nothing, back up nothing and 
   }
 });
 
+// ─── 2b. TRANSACTION RETRIES ────────────────────────────────────────────────
+/**
+ * Firestore-like contention: the callback runs against the version current at its read; if
+ * `concurrent[i]` exists, that version lands from another writer before attempt i+1 can commit,
+ * so attempt i+1's staged writes are discarded and the callback is re-run (as the Admin SDK does).
+ */
+function contendedDb(initial, concurrent) {
+  const copy = (d) => (d === null ? undefined : JSON.parse(JSON.stringify(d)));
+  const state = { doc: copy(initial), commits: [], attempts: 0 };
+  return {
+    state,
+    collection: () => ({ doc: (id) => ({ path: `social_stats/${id}`, id }) }),
+    async runTransaction(fn) {
+      for (;;) {
+        const attemptNo = state.attempts;
+        state.attempts += 1;
+        const staged = [];
+        const result = await fn({
+          get: async () => ({ exists: state.doc !== undefined, data: () => copy(state.doc) }),
+          set: (ref, data, opts) => staged.push({ data, opts }),
+        });
+        if (attemptNo in concurrent) { state.doc = copy(concurrent[attemptNo]); continue; } // commit conflict -> retry
+        for (const w of staged) { state.doc = w.opts && w.opts.merge ? { ...state.doc, ...w.data } : { ...w.data }; state.commits.push(w); }
+        return result;
+      }
+    },
+  };
+}
+
+test('RETRY: the recovery backup is the version read by the COMMITTING attempt (what was really overwritten), not the first attempt\'s', async () => {
+  const dir = mkTemp('bk'); gitFree(dir);
+  try {
+    const v1 = { ...ours('2026-07', 6.1), marker: 'version-1' };
+    const v2 = { ...ours('2026-08', 6.4), marker: 'version-2 (landed during the retry)' };
+    const db = contendedDb(v1, [v2]);
+    const logs = lines();
+    const r = await C.runCaUnemploymentCheck({
+      getDb: () => db, getProjectId: projectOk, fetchBuilt: fetchReturning('2026-09'), nowIso: NOW,
+      writeBackup: B.createLocalBackupWriter({ dir }), logger: logs,
+    });
+    assert.strictEqual(r.status, 'WRITTEN');
+    assert.strictEqual(r.attempts, 2);
+    assert.strictEqual(db.state.commits.length, 1, 'exactly one commit despite the retry');
+    // the final backup equals the version that the commit actually replaced
+    const final = JSON.parse(fs.readFileSync(r.backup.path, 'utf8'));
+    assert.deepStrictEqual(final.data, v2);
+    assert.strictEqual(final.transaction_attempt, 2);
+    // the earlier attempt's file holds a version that was never overwritten: kept, labelled, and reported as superseded
+    assert.strictEqual(r.supersededBackups.length, 1);
+    const stale = JSON.parse(fs.readFileSync(r.supersededBackups[0].path, 'utf8'));
+    assert.deepStrictEqual(stale.data, v1);
+    assert.strictEqual(stale.transaction_attempt, 1);
+    assert.notStrictEqual(r.supersededBackups[0].path, r.backup.path);
+    assert.strictEqual(fs.readdirSync(dir).length, 2);
+    // the operator is told which single file to use
+    const text = logs.out.join('\n');
+    assert.match(text, /transaction retried \(2 attempts\)/);
+    assert.ok(text.includes(`recovery point is ONLY ${r.backup.path}`));
+    assert.ok(text.includes(r.supersededBackups[0].path));
+  } finally { rmrf(dir); }
+});
+
+test('RETRY: several retries -> still one commit, the last attempt\'s backup is the recovery point, all earlier ones are superseded', async () => {
+  const dir = mkTemp('bk'); gitFree(dir);
+  try {
+    const versions = [ours('2026-05', 5.9), ours('2026-06', 6.0), ours('2026-07', 6.1), ours('2026-08', 6.4)];
+    const db = contendedDb(versions[0], [versions[1], versions[2], versions[3]]);
+    const r = await C.runCaUnemploymentCheck({ getDb: () => db, getProjectId: projectOk, fetchBuilt: fetchReturning('2026-09'), nowIso: NOW, writeBackup: B.createLocalBackupWriter({ dir }), logger: silent });
+    assert.strictEqual(r.status, 'WRITTEN');
+    assert.strictEqual(r.attempts, 4);
+    assert.deepStrictEqual(JSON.parse(fs.readFileSync(r.backup.path, 'utf8')).data, versions[3]);
+    assert.deepStrictEqual(r.supersededBackups.map((b) => JSON.parse(fs.readFileSync(b.path, 'utf8')).transaction_attempt), [1, 2, 3]);
+    assert.strictEqual(db.state.commits.length, 1);
+  } finally { rmrf(dir); }
+});
+
+test('RETRY: if the retry shows a NEWER month already landed, nothing is overwritten and the earlier attempt\'s file is reported as NOT a recovery point', async () => {
+  const dir = mkTemp('bk'); gitFree(dir);
+  try {
+    const v1 = ours('2026-07', 6.1);
+    const v2 = ours('2026-09', 6.5); // someone else already wrote September
+    const db = contendedDb(v1, [v2]);
+    const logs = lines();
+    const r = await C.runCaUnemploymentCheck({ getDb: () => db, getProjectId: projectOk, fetchBuilt: fetchReturning('2026-09'), nowIso: NOW, writeBackup: B.createLocalBackupWriter({ dir }), logger: logs });
+    assert.strictEqual(r.status, 'SKIPPED');
+    assert.strictEqual(db.state.commits.length, 0);
+    assert.deepStrictEqual(db.state.doc, v2, 'the newer value is untouched');
+    assert.strictEqual(r.unusedBackups.length, 1);
+    assert.match(logs.out.join('\n'), /nothing was overwritten after a retry/);
+  } finally { rmrf(dir); }
+});
+
+test('RETRY: if the document is gone on the retry, the first attempt backup is NOT reported as the recovery point', async () => {
+  const dir = mkTemp('bk'); gitFree(dir);
+  try {
+    const db = contendedDb(ours('2026-07'), [null]); // deleted by someone else before the retry
+    const r = await C.runCaUnemploymentCheck({ getDb: () => db, getProjectId: projectOk, fetchBuilt: fetchReturning('2026-09'), nowIso: NOW, writeBackup: B.createLocalBackupWriter({ dir }), logger: silent });
+    assert.strictEqual(r.status, 'WRITTEN');
+    assert.strictEqual(r.reason, 'NO_EXISTING_DOCUMENT');
+    assert.strictEqual(r.backup, null, 'nothing was overwritten, so there is no recovery point');
+    assert.strictEqual(r.supersededBackups.length, 1, 'the stale first-attempt file is flagged as superseded');
+  } finally { rmrf(dir); }
+});
+
+test('RETRY: with no retry there is no superseded backup and the recovery point is the single file', async () => {
+  const dir = mkTemp('bk'); gitFree(dir);
+  try {
+    const logs = lines();
+    const r = await C.runCaUnemploymentCheck({ getDb: () => contendedDb(legacyDoc, []), getProjectId: projectOk, fetchBuilt: fetchReturning('2026-09'), nowIso: NOW, writeBackup: B.createLocalBackupWriter({ dir }), logger: logs });
+    assert.strictEqual(r.status, 'WRITTEN');
+    assert.strictEqual(r.attempts, 1);
+    assert.deepStrictEqual(r.supersededBackups, []);
+    assert.ok(!/retried/.test(logs.out.join('\n')));
+    assert.strictEqual(fs.readdirSync(dir).length, 1);
+  } finally { rmrf(dir); }
+});
+
+test('RETRY: a commit that fails after a backup was taken is WRITE_FAILED, the document is untouched, and the leftover file is reported as NOT a recovery point', async () => {
+  const dir = mkTemp('bk'); gitFree(dir);
+  try {
+    const logs = lines();
+    const db = { collection: () => ({ doc: () => ({ path: 'social_stats/CA_unemploymentRate' }) }), async runTransaction(fn) { await fn({ get: async () => ({ exists: true, data: () => legacyDoc }), set() {} }); throw new Error('ABORTED: too much contention'); } };
+    const r = await C.runCaUnemploymentCheck({ getDb: () => db, getProjectId: projectOk, fetchBuilt: fetchReturning('2026-09'), nowIso: NOW, writeBackup: B.createLocalBackupWriter({ dir }), logger: logs });
+    assert.strictEqual(r.status, 'WRITE_FAILED');
+    assert.strictEqual(r.unusedBackups.length, 1);
+    assert.match(logs.out.join('\n'), /document was NOT replaced; none of them is a recovery point/);
+  } finally { rmrf(dir); }
+});
+
 // ─── 3. AUDIT-LOG BEHAVIOUR PRESERVED ───────────────────────────────────────
 test('AUDIT: a successful update writes exactly social_stats/CA_unemploymentRate plus ONE data_audit_log entry — nothing else', async () => {
   const db = recordingDb(legacyDoc);
