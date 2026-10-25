@@ -24,17 +24,37 @@
  * The compare-and-write happens inside ONE Firestore transaction, so a value written by anything
  * else between "read" and "write" can never be silently overwritten by an older one.
  *
+ * SAFETY RAILS (added for the first controlled live update)
+ *   1. PROJECT GUARD — before the first Firestore read, the credential's project must be
+ *      civic-voice-5ea94 and no GOOGLE_CLOUD_PROJECT / GCLOUD_PROJECT hint may disagree
+ *      (PROJECT_MISMATCH; nothing is read, written or audit-logged).
+ *   2. DRY RUN — fetch and validate StatCan, read ONLY social_stats/CA_unemploymentRate, report the
+ *      stored and proposed month/value and whether the transaction would write or skip. Zero
+ *      Firestore writes, zero audit-log writes, no backup file.
+ *   3. PRE-WRITE BACKUP — when a write would REPLACE an existing document, its complete original
+ *      contents are saved to a local JSON file outside any git repository, INSIDE the same
+ *      transaction and BEFORE tx.set. If the backup cannot be written and verified the transaction
+ *      is abandoned and nothing is written (BACKUP_FAILED). The backup always matches the exact
+ *      version that gets replaced, even if the transaction retries. A first-ever write (no existing
+ *      document) has nothing to preserve and creates no backup. Skips never create one.
+ *
+ * Audit log (unchanged behaviour): one data_audit_log entry after a successful write and after a
+ * failure; never for a skip or a dry run; never when the project guard refuses (that would itself
+ * be a write to the wrong project).
+ *
  * Revisions: if StatCan revises the already-published latest month (same period, different value),
  * this check deliberately does NOT rewrite it — it waits for the next month's release, which
  * refreshes the whole 12-month trend. That is the stated rule: only newer reporting periods update.
  *
- * Nothing here runs on import. The Firestore handle (as a getter) and the fetch function are injected,
- * so the whole decision table is tested with stubs (no network, no Firestore).
+ * Nothing here runs on import. The Firestore handle (as a getter), the project resolver, the fetch
+ * function, the backup writer and the audit writer are all injected, so the whole decision table is
+ * tested with stubs (no network, no Firestore).
  */
 
 'use strict';
 
 const U = require('./caUnemploymentMonthly');
+const { createLocalBackupWriter } = require('./caUnemploymentBackup');
 
 const COLLECTION = 'social_stats';
 const MONTHS = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
@@ -83,64 +103,143 @@ function decideCaUnemploymentWrite(existing, built) {
   return { action: 'write', reason: 'SERIES_CORRECTION_SAME_PERIOD', storedPeriod, newPeriod };
 }
 
+/** Raised by the backup step so the caller can tell "backup failed" from "Firestore failed". */
+class BackupError extends Error {}
+
+const clip = (e) => String(e && e.message ? e.message : e).slice(0, 300);
+
 /**
  * Run one check.
  * @param {object} deps
  * @param {() => { collection: Function, runTransaction: Function }} deps.getDb returns the Firestore handle; called only AFTER a successful, verified fetch
+ * @param {() => Promise<string>} deps.getProjectId resolves (and verifies) the project the handle is bound to; throws to refuse
  * @param {(opts: { nowIso: string }) => Promise<any>} [deps.fetchBuilt] defaults to the verified StatCan fetch
  * @param {string} [deps.nowIso]
- * @param {(entry: object) => Promise<void>} [deps.writeAudit] called ONLY after a write or a fetch failure, never for a skip
+ * @param {boolean} [deps.dryRun] report the decision only: read the one document, write nothing, audit nothing
+ * @param {(args: { collection: string, docId: string, data: object, projectId: string }) => Promise<{ path: string }>} [deps.writeBackup]
+ *        defaults to the local-file writer; it cannot be switched off (a non-function aborts the write)
+ * @param {(entry: object) => Promise<void>} [deps.writeAudit] called ONLY after a write or a failure, never for a skip or dry run
  * @param {{ log: Function, warn: Function }} [deps.logger]
- * @returns {Promise<{ status: 'WRITTEN'|'SKIPPED'|'FETCH_FAILED'|'WRITE_FAILED', reason?: string, storedPeriod?: string|null, newPeriod?: string, docId: string, error?: string }>}
  */
-async function runCaUnemploymentCheck({ getDb, fetchBuilt = U.fetchCaUnemployment, nowIso = new Date().toISOString(), writeAudit = null, logger = console } = {}) {
+async function runCaUnemploymentCheck({
+  getDb,
+  getProjectId,
+  fetchBuilt = U.fetchCaUnemployment,
+  nowIso = new Date().toISOString(),
+  dryRun = false,
+  writeBackup = createLocalBackupWriter(),
+  writeAudit = null,
+  logger = console,
+} = {}) {
   const docId = U.DOC_ID;
   const audit = async (entry) => {
-    if (!writeAudit) return;
+    if (dryRun || !writeAudit) return; // a dry run never writes an audit entry
     try { await writeAudit(entry); } catch (e) { logger.warn(`[ca-unemployment] audit log failed: ${e.message}`); }
   };
+  const auditEntry = (status, extra = {}) => ({ collection_name: COLLECTION, jurisdiction: 'CA', data_pull_timestamp: nowIso, source_endpoint: U.SOURCE_URL, record_count: status === 'success' ? 1 : 0, import_status: status, scheduler_tier: 'ca_unemployment', ...extra });
 
   // 1. Fetch + verify first. Any failure leaves Firestore completely untouched.
   let built;
   try {
     built = await fetchBuilt({ nowIso });
   } catch (err) {
-    const error = String(err && err.message ? err.message : err).slice(0, 300);
+    const error = clip(err);
     logger.warn(`[ca-unemployment] no update — StatCan fetch/verification failed: ${error}`);
-    await audit({ collection_name: COLLECTION, jurisdiction: 'CA', data_pull_timestamp: nowIso, source_endpoint: U.SOURCE_URL, record_count: 0, import_status: 'failed', error_message: error, scheduler_tier: 'ca_unemployment' });
-    return { status: 'FETCH_FAILED', docId, error };
+    await audit(auditEntry('failed', { error_message: error }));
+    return { status: 'FETCH_FAILED', docId, error, dryRun };
   }
 
-  // 2. Compare and write atomically.
-  let decision;
+  // 2. Open the handle and verify the PROJECT before the first read (and before any audit write).
+  let db;
+  let projectId;
   try {
-    const db = getDb();
-    const ref = db.collection(COLLECTION).doc(docId);
+    if (typeof getProjectId !== 'function') throw new Error('Refusing to touch Firestore: no project verifier was supplied.');
+    db = getDb();
+    projectId = await getProjectId();
+  } catch (err) {
+    const error = clip(err);
+    logger.warn(`[ca-unemployment] ${error}`);
+    return { status: 'PROJECT_MISMATCH', docId, error, dryRun }; // deliberately NOT audit-logged: that write would go to the wrong project
+  }
+  const ref = db.collection(COLLECTION).doc(docId);
+
+  // 3a. DRY RUN: one read of the one document; nothing else.
+  if (dryRun) {
+    try {
+      const snap = await ref.get();
+      const existing = snap.exists ? snap.data() : null;
+      const decision = decideCaUnemploymentWrite(existing, built);
+      const report = {
+        status: 'DRY_RUN',
+        docId,
+        projectId,
+        wouldWrite: decision.action === 'write',
+        reason: decision.reason,
+        existing: existing
+          ? { period: decision.storedPeriod, value: existing.value ?? null, updated: existing.updated ?? null, table: existing.table ?? null, source: existing.source ?? null }
+          : null,
+        proposed: { period: decision.newPeriod, value: built.data.value, updated: built.data.updated, table: built.data.table, source: built.data.source },
+        dryRun: true,
+      };
+      logger.log([
+        `[ca-unemployment][DRY RUN] project ${projectId}, document ${COLLECTION}/${docId}`,
+        `  existing : ${existing ? `month ${decision.storedPeriod || 'unreadable'}, value ${JSON.stringify(existing.value)}, updated ${JSON.stringify(existing.updated)}, table ${existing.table || 'n/a'}` : 'none (no document yet)'}`,
+        `  proposed : month ${decision.newPeriod}, value ${built.data.value}, updated ${built.data.updated}, table ${built.data.table}`,
+        `  decision : ${decision.action === 'write' ? 'WRITE' : 'SKIP'} (${decision.reason})`,
+        '  Firestore writes: 0 · audit-log writes: 0 · backup files: 0 (dry run)',
+      ].join('\n'));
+      return report;
+    } catch (err) {
+      const error = clip(err);
+      logger.warn(`[ca-unemployment][DRY RUN] could not read the document: ${error}`);
+      return { status: 'DRY_RUN_FAILED', docId, projectId, error, dryRun: true };
+    }
+  }
+
+  // 3b. REAL RUN: compare, back up (if replacing), and write — atomically.
+  let decision;
+  let backup = null;
+  try {
     decision = await db.runTransaction(async (tx) => {
+      backup = null; // a retried attempt starts clean
       const snap = await tx.get(ref);
-      const d = decideCaUnemploymentWrite(snap.exists ? snap.data() : null, built);
-      if (d.action === 'write') tx.set(ref, built.data, { merge: true });
+      const existing = snap.exists ? snap.data() : null;
+      const d = decideCaUnemploymentWrite(existing, built);
+      if (d.action === 'write') {
+        if (existing) {
+          // Preserve the COMPLETE original BEFORE replacing it; if this fails the transaction is abandoned.
+          try {
+            if (typeof writeBackup !== 'function') throw new Error('no backup writer is configured');
+            backup = await writeBackup({ collection: COLLECTION, docId, data: existing, projectId });
+          } catch (e) {
+            throw new BackupError(clip(e));
+          }
+        }
+        tx.set(ref, built.data, { merge: true });
+      }
       return d;
     });
   } catch (err) {
-    const error = String(err && err.message ? err.message : err).slice(0, 300);
-    logger.warn(`[ca-unemployment] write failed: ${error}`);
-    await audit({ collection_name: COLLECTION, jurisdiction: 'CA', data_pull_timestamp: nowIso, source_endpoint: U.SOURCE_URL, record_count: 0, import_status: 'failed', error_message: error, scheduler_tier: 'ca_unemployment' });
-    return { status: 'WRITE_FAILED', docId, error };
+    const error = clip(err);
+    const status = err instanceof BackupError ? 'BACKUP_FAILED' : 'WRITE_FAILED';
+    logger.warn(status === 'BACKUP_FAILED' ? `[ca-unemployment] NOT written — the pre-write backup failed: ${error}` : `[ca-unemployment] write failed: ${error}`);
+    await audit(auditEntry('failed', { error_message: status === 'BACKUP_FAILED' ? `backup failed: ${error}` : error }));
+    return { status, docId, projectId, error, dryRun: false };
   }
 
   if (decision.action === 'skip') {
     logger.log(`[ca-unemployment] no change — ${decision.reason} (stored ${decision.storedPeriod}, StatCan latest ${decision.newPeriod})`);
-    return { status: 'SKIPPED', reason: decision.reason, storedPeriod: decision.storedPeriod, newPeriod: decision.newPeriod, docId };
+    return { status: 'SKIPPED', reason: decision.reason, storedPeriod: decision.storedPeriod, newPeriod: decision.newPeriod, docId, projectId, dryRun: false };
   }
 
-  logger.log(`[ca-unemployment] ✓ wrote ${COLLECTION}/${docId}: ${built.data.value} for ${built.data.updated} (${decision.reason}; previously ${decision.storedPeriod || 'none'})`);
-  await audit({ collection_name: COLLECTION, jurisdiction: 'CA', data_pull_timestamp: nowIso, source_endpoint: U.SOURCE_URL, record_count: 1, import_status: 'success', scheduler_tier: 'ca_unemployment' });
-  return { status: 'WRITTEN', reason: decision.reason, storedPeriod: decision.storedPeriod, newPeriod: decision.newPeriod, docId };
+  logger.log(`[ca-unemployment] ✓ wrote ${COLLECTION}/${docId}: ${built.data.value} for ${built.data.updated} (${decision.reason}; previously ${decision.storedPeriod || 'none'})${backup ? `; original saved to ${backup.path}` : ''}`);
+  await audit(auditEntry('success'));
+  return { status: 'WRITTEN', reason: decision.reason, storedPeriod: decision.storedPeriod, newPeriod: decision.newPeriod, docId, projectId, backup, dryRun: false };
 }
 
 module.exports = {
   COLLECTION,
+  BackupError,
   storedPeriodOf,
   hasVerifiedProvenance,
   decideCaUnemploymentWrite,

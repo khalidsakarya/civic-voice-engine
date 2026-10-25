@@ -4,7 +4,9 @@
  *   node test/ca-unemployment-schedule.test.js     (or: npm run test:ca-unemployment-schedule)
  *
  * No network and no Firestore: StatCan is stubbed (axios.post) or injected, and the database is an
- * in-memory stub that implements runTransaction / get / set.
+ * in-memory stub that implements runTransaction / get / set. The project verifier and the pre-write
+ * backup writer are stubbed too, so nothing here touches the disk outside this process (the real
+ * backup and dry-run behaviour is covered by test/ca-unemployment-dryrun-backup.test.js).
  */
 
 'use strict';
@@ -77,8 +79,10 @@ function memoryDb(initial) {
   };
   return db;
 }
+const stubProject = async () => 'civic-voice-5ea94';
+const stubBackup = async ({ docId }) => ({ path: `(stub backup of ${docId})` });
 const runWith = async ({ db, fetchBuilt, writeAudit, onGetDb }) => C.runCaUnemploymentCheck({
-  getDb: () => { if (onGetDb) onGetDb(); return db; }, fetchBuilt, nowIso: NOW, writeAudit, logger: silent,
+  getDb: () => { if (onGetDb) onGetDb(); return db; }, getProjectId: stubProject, writeBackup: stubBackup, fetchBuilt, nowIso: NOW, writeAudit, logger: silent,
 });
 const ours = (period, value = 6.5) => ({ ...builtFor(period, value).data });
 const legacyEngineDoc = (updated) => ({
@@ -163,7 +167,7 @@ test('MISSING publication (empty data from StatCan): the real fetch path fails s
     : { data: [{ status: 'SUCCESS', object: { vectorDataPoint: [] } }] });
   try {
     const db = memoryDb(ours('2026-08'));
-    const r = await C.runCaUnemploymentCheck({ getDb: () => db, nowIso: NOW, logger: silent });
+    const r = await C.runCaUnemploymentCheck({ getDb: () => db, getProjectId: stubProject, writeBackup: stubBackup, nowIso: NOW, logger: silent });
     assert.strictEqual(r.status, 'FETCH_FAILED');
     assert.match(r.error, /No valid monthly unemployment points/);
     assert.strictEqual(db.state.writes.length, 0);
@@ -180,7 +184,7 @@ test('MISSING publication (wrong series came back): identity check fails -> noth
   };
   try {
     const db = memoryDb(ours('2026-08'));
-    const r = await C.runCaUnemploymentCheck({ getDb: () => db, nowIso: NOW, logger: silent });
+    const r = await C.runCaUnemploymentCheck({ getDb: () => db, getProjectId: stubProject, writeBackup: stubBackup, nowIso: NOW, logger: silent });
     assert.strictEqual(r.status, 'FETCH_FAILED');
     assert.match(r.error, /identity check FAILED/);
     assert.strictEqual(dataRequests, 0, 'no data may be requested for an unverified series');
@@ -216,7 +220,7 @@ test('OLDER reporting month: a newer value written by something else between our
       async function fn2() { return db.runTransaction(fn); }
     },
   };
-  const r = await C.runCaUnemploymentCheck({ getDb: () => db, fetchBuilt: fetchReturning('2026-09', 6.4), nowIso: NOW, logger: silent });
+  const r = await C.runCaUnemploymentCheck({ getDb: () => db, getProjectId: stubProject, writeBackup: stubBackup, fetchBuilt: fetchReturning('2026-09', 6.4), nowIso: NOW, logger: silent });
   assert.strictEqual(r.status, 'SKIPPED');
   assert.strictEqual(state.committed.length, 0, 'the stale attempt must not commit');
 });
@@ -251,7 +255,7 @@ test('NO document yet -> written; a stored document whose month is unreadable is
 test('a write failure is reported, audited, and never throws out of the scheduler', async () => {
   const db = { collection: () => ({ doc: () => ({}) }), runTransaction: async () => { throw new Error('RESOURCE_EXHAUSTED'); } };
   const audits = [];
-  const r = await C.runCaUnemploymentCheck({ getDb: () => db, fetchBuilt: fetchReturning('2026-09'), nowIso: NOW, writeAudit: async (e) => audits.push(e), logger: silent });
+  const r = await C.runCaUnemploymentCheck({ getDb: () => db, getProjectId: stubProject, writeBackup: stubBackup, fetchBuilt: fetchReturning('2026-09'), nowIso: NOW, writeAudit: async (e) => audits.push(e), logger: silent });
   assert.strictEqual(r.status, 'WRITE_FAILED');
   assert.match(r.error, /RESOURCE_EXHAUSTED/);
   assert.strictEqual(audits.length, 1);
@@ -367,15 +371,15 @@ test('the check is NOT part of --now / --run-on-start chains; it appears only as
   const uses = schedulerSrc.split('\n').filter((l) => /runCaUnemploymentCycle/.test(l)).map((l) => l.trim());
   assert.strictEqual(uses.length, 3, uses.join(' | '));
   assert.ok(uses.some((l) => l.startsWith('async function runCaUnemploymentCycle')));
-  assert.ok(uses.some((l) => l.startsWith('runCaUnemploymentCycle()')));
+  assert.ok(uses.some((l) => l.startsWith('runCaUnemploymentCycle({ dryRun:')));
   assert.ok(uses.some((l) => l.includes('cron.schedule(CA_UNEMPLOYMENT_SCHEDULE')));
 });
 
-test('PACKAGE SCRIPTS: all 101 original scripts are untouched; only the three new ones were added', () => {
+test('PACKAGE SCRIPTS: all 101 original scripts are untouched; only the five new ones were added', () => {
   const now = pkg.scripts;
   Object.entries(GOLDEN.package_scripts).forEach(([k, v]) => assert.strictEqual(now[k], v, `script ${k} changed`));
   const added = Object.keys(now).filter((k) => !(k in GOLDEN.package_scripts)).sort();
-  assert.deepStrictEqual(added, ['scheduler:ca-unemployment', 'test:ca-unemployment', 'test:ca-unemployment-schedule']);
+  assert.deepStrictEqual(added, ['scheduler:ca-unemployment', 'scheduler:ca-unemployment:dry-run', 'test:ca-unemployment', 'test:ca-unemployment-safety', 'test:ca-unemployment-schedule']);
   assert.strictEqual(now['scheduler:ca-unemployment'], 'node src/scheduler.js --ca-unemployment');
 });
 
@@ -383,8 +387,8 @@ test('the on-demand command is wired: --ca-unemployment dispatches the check and
   const i = schedulerSrc.indexOf('} else if (RUN_CA_UNEMPLOYMENT_NOW) {');
   assert.ok(i > 0);
   const branch = schedulerSrc.slice(i, i + 400);
-  assert.match(branch, /runCaUnemploymentCycle\(\)/);
-  assert.match(branch, /FETCH_FAILED.*WRITE_FAILED.*FAILED/);
+  assert.match(branch, /runCaUnemploymentCycle\(\{ dryRun: process\.argv\.includes\('--dry-run'\) \}\)/);
+  assert.match(branch, /FETCH_FAILED.*WRITE_FAILED.*BACKUP_FAILED.*PROJECT_MISMATCH.*DRY_RUN_FAILED.*FAILED/);
   assert.match(schedulerSrc, /const RUN_CA_UNEMPLOYMENT_NOW\s*=\s*process\.argv\.includes\('--ca-unemployment'\)/);
 });
 

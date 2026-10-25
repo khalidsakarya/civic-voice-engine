@@ -997,12 +997,23 @@ async function processBillsFromOutput() {
 // Not part of the monthly cycle and not part of --now / --run-on-start. Safe to run at any time and
 // any number of times: it writes social_stats/CA_unemploymentRate ONLY if StatCan's latest reporting
 // month is newer than the stored one.
-async function runCaUnemploymentCycle() {
-  console.log('\n[scheduler:ca-unemployment] Checking StatCan for a newer Canada unemployment month...');
+//
+// { dryRun: true } (CLI: --ca-unemployment --dry-run) fetches and validates StatCan, reads ONLY
+// social_stats/CA_unemploymentRate, and reports whether it would write or skip. It performs no
+// Firestore write, no audit-log write and no backup. A real run first verifies the Firebase project
+// (civic-voice-5ea94), then backs up the existing document locally before replacing it.
+async function runCaUnemploymentCycle({ dryRun = false } = {}) {
+  console.log(`\n[scheduler:ca-unemployment] ${dryRun ? 'DRY RUN — ' : ''}Checking StatCan for a newer Canada unemployment month...`);
   try {
     const { getDb } = require('./firebase/client');
     const { writeAuditLog } = require('./firebase/auditLog');
-    return await runCaUnemploymentCheck({ getDb, writeAudit: writeAuditLog });
+    const { verifyFirestoreProject } = require('./firebase/projectGuard');
+    return await runCaUnemploymentCheck({
+      getDb,
+      getProjectId: () => verifyFirestoreProject(),
+      writeAudit: dryRun ? null : writeAuditLog,
+      dryRun,
+    });
   } catch (err) {
     console.error('[scheduler:ca-unemployment] ✗', err.message);
     return { status: 'FAILED', error: err.message };
@@ -1044,6 +1055,17 @@ const RUN_CA_UNEMPLOYMENT_NOW   = process.argv.includes('--ca-unemployment');
 // leader-expense=Claude per batch, gov-stats=Claude Sonnet×4).
 const SCHEDULER_RUN_ON_START = process.env.SCHEDULER_RUN_ON_START === 'true'
   || process.argv.includes('--run-on-start');
+
+// --dry-run is only meaningful for the Canada unemployment check, and ONLY in the exact form
+// `--ca-unemployment --dry-run`. Anywhere else it would be silently ignored while the rest of the
+// command ran FOR REAL (e.g. `--now --dry-run`), so refuse to start rather than mislead the operator.
+if (process.argv.includes('--dry-run')) {
+  const extra = process.argv.slice(2).filter(a => a !== '--ca-unemployment' && a !== '--dry-run');
+  if (!RUN_CA_UNEMPLOYMENT_NOW || extra.length > 0) {
+    console.error('[scheduler] --dry-run is only supported as exactly: --ca-unemployment --dry-run. Refusing to start; nothing was run.');
+    process.exit(1);
+  }
+}
 
 if (RUN_NOW) {
   runDailyCycle()
@@ -1112,8 +1134,8 @@ if (RUN_NOW) {
     .then(() => { console.log('[scheduler:ca-senate-votes] ✓ Done'); process.exit(0); })
     .catch(e => { console.error('[scheduler:ca-senate-votes] ✗', e.message); process.exit(1); });
 } else if (RUN_CA_UNEMPLOYMENT_NOW) {
-  runCaUnemploymentCycle()
-    .then(r => process.exit(r && ['FETCH_FAILED', 'WRITE_FAILED', 'FAILED'].includes(r.status) ? 1 : 0));
+  runCaUnemploymentCycle({ dryRun: process.argv.includes('--dry-run') })
+    .then(r => process.exit(r && ['FETCH_FAILED', 'WRITE_FAILED', 'BACKUP_FAILED', 'PROJECT_MISMATCH', 'DRY_RUN_FAILED', 'FAILED'].includes(r.status) ? 1 : 0));
 } else {
   console.log('\n╔══════════════════════════════════════════════════════╗');
   console.log('║         CIVIC VOICE ENGINE — SCHEDULER STARTED       ║');
@@ -1135,6 +1157,7 @@ if (RUN_NOW) {
   console.log('\n  Flags: --now (all), --daily, --daily-fetch-only, --weekly, --monthly, --bimonthly, --quarterly,');
   console.log('         --expenses, --leader-expenses, --budget-analytics, --gov-stats, --targeted-stats,');
   console.log('         --news-alerts, --carney, --ca-lobbying, --ca-coi, --ca-unemployment');
+  console.log('         (--ca-unemployment --dry-run: report only, no Firestore writes)');
   console.log('         --run-on-start  (or env SCHEDULER_RUN_ON_START=true) — also fires all cycles immediately\n');
   console.log('  ⚠  No immediate run. Cycles start on their cron schedules only.');
   console.log('     Pass --run-on-start (or set SCHEDULER_RUN_ON_START=true) to fire all cycles now.\n');
